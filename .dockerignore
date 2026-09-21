@@ -1,0 +1,34 @@
+# Dependencies and generated package output
+node_modules
+dist
+*.tgz
+
+# Browser-test artifacts
+.demo-dist
+.playwright-dist
+playwright-report
+test-results
+
+# Local configuration and logs
+.env
+.env.*
+*.log
+
+# Version-control and editor metadata
+.git
+.gitignore
+.github
+.vscode
+*.code-workspace
+*.kate-swp
+.project
+
+# Operating-system noise and temporary files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+*~
+*.backup
+.~lock.*
+.directory

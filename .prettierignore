@@ -1,0 +1,13 @@
+*.min.js
+*.min.css
+
+# Dependencies and generated package output
+node_modules/
+dist/
+*.tgz
+
+# Browser-test artifacts
+.demo-dist/
+.playwright-dist/
+playwright-report/
+test-results/

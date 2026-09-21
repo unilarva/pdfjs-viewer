@@ -1,0 +1,126 @@
+{
+  "name": "@unilarva/pdfjs-viewer",
+  "version": "0.6.0",
+  "type": "module",
+  "description": "Framework-independent, TypeScript-first browser PDF viewer built on Mozilla PDF.js, with a responsive default UI plus custom and headless modes.",
+  "keywords": [
+    "pdf",
+    "pdf.js",
+    "pdfjs",
+    "pdf-viewer",
+    "pdfjs-viewer",
+    "viewer",
+    "document-viewer",
+    "browser",
+    "typescript",
+    "esm",
+    "accessible",
+    "accessibility",
+    "a11y",
+    "headless",
+    "search",
+    "annotations",
+    "acroform",
+    "xfa",
+    "forms",
+    "touch"
+  ],
+  "author": {
+    "name": "Lari Natri",
+    "email": "lari.natri@iki.fi"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unilarva/pdfjs-viewer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/unilarva/pdfjs-viewer/issues"
+  },
+  "homepage": "https://github.com/unilarva/pdfjs-viewer#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "USAGE.md",
+    "CUSTOMIZATION.md",
+    "ARCHITECTURE.md",
+    "DEVICE-COMPATIBILITY.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "assets/icons/unilarva-pdfjs-viewer-logo-adaptive.svg"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "style": "./dist/default-ui.css",
+  "sideEffects": [
+    "./dist/default-ui.css",
+    "./dist/core.css"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./core.css": "./dist/core.css",
+    "./default-ui.css": "./dist/default-ui.css",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "clean": "rm -rf dist",
+    "demo": "node ./scripts/demo-server.mjs",
+    "demo:print-test": "PDFJS_VIEWER_DEMO_HOST=0.0.0.0 PDFJS_VIEWER_DEMO_NATIVE_PRINT_SUPPORT=portrait-and-landscape npm run demo",
+    "test:unit": "node ./scripts/test-unit.mjs",
+    "test:consumer": "node ./scripts/test-dist-consumer.mjs",
+    "test:compatibility": "npm run test:compatibility:standard && npm run test:compatibility:legacy",
+    "test:compatibility:standard": "node ./scripts/test-pdfjs-compatibility.mjs standard",
+    "test:compatibility:legacy": "node ./scripts/test-pdfjs-compatibility.mjs legacy",
+    "test:pack": "node ./scripts/test-pack-candidate.mjs",
+    "test:browser": "node ./scripts/playwright-run.mjs --project=chromium --project=firefox",
+    "test:browser:all": "node ./scripts/playwright-run.mjs",
+    "test:browser:firefox": "node ./scripts/playwright-run.mjs --project=firefox",
+    "test:browser:chromium": "node ./scripts/playwright-run.mjs --project=chromium",
+    "test:browser:firefox:non-csp": "node ./scripts/playwright-run.mjs --project=firefox --grep-invert=@csp",
+    "test:browser:chromium:non-csp": "node ./scripts/playwright-run.mjs --project=chromium --grep-invert=@csp",
+    "test:browser:csp": "node ./scripts/playwright-run.mjs --project=chromium --project=firefox --grep=@csp",
+    "test:browser:webkit": "node ./scripts/playwright-run.mjs --project=webkit --workers=1",
+    "test:browser:webkit:docker": "node ./scripts/test-webkit-docker.mjs",
+    "test:browser:mobile:chromium": "node ./scripts/playwright-run.mjs --project=mobile-chromium",
+    "test:browser:mobile:firefox": "node ./scripts/playwright-run.mjs --project=mobile-firefox",
+    "test:browser:mobile:webkit": "node ./scripts/playwright-run.mjs --project=mobile-webkit --workers=1",
+    "test:browser:mobile:webkit:docker": "node ./scripts/test-webkit-docker.mjs --project=mobile-webkit",
+    "test:browser:install": "playwright install chromium firefox webkit",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit --emitDeclarationOnly false",
+    "validate": "npm run format:check && npm run test:unit && npm run validate:architecture && node ./scripts/validate-package.mjs",
+    "validate:architecture": "node ./scripts/validate-architecture.mjs",
+    "validate:dist": "node ./scripts/validate-dist.mjs && npm run validate:tsdoc && npm run test:consumer",
+    "validate:tsdoc": "node ./scripts/validate-public-tsdoc.mjs",
+    "prepack": "npm run validate && npm run build && npm run validate:dist",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "peerDependencies": {
+    "pdfjs-dist": "6.3.289"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "css-loader": "^7.1.2",
+    "esbuild": "^0.28.1",
+    "mini-css-extract-plugin": "^2.9.4",
+    "pdfjs-dist": "6.3.289",
+    "postcss": "8.5.26",
+    "postcss-selector-parser": "7.1.5",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "webpack": "^5.101.3"
+  }
+}

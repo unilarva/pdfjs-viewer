@@ -1,0 +1,915 @@
+/* SPDX-FileCopyrightText: 2022-2026 Lari Natri <lari.natri@iki.fi>
+   SPDX-License-Identifier: Apache-2.0 */
+
+/* Functional viewer CSS required by default, custom, and headless integrations. */
+/* PDF.js-adapted sections are qualified by scripts/pdfjs-css-compatibility.mjs and browser fixtures. */
+@scope ([data-pdfjs-viewer-root]) {
+  /* Package-specific viewer surface and interaction state. */
+  .pdf-headless-ui {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+  .pdf-headless-ui .pdf-container {
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    outline: none;
+  }
+  :scope.pdf-fullscreen,
+  :scope:fullscreen,
+  .pdf-fullscreen,
+  .pdf-fullscreen:fullscreen {
+    width: 100vw;
+    height: 100dvh;
+    max-width: none;
+    max-height: none;
+  }
+  :scope.pdf-presentation-mode .pdf-container,
+  .pdf-presentation-mode .pdf-container,
+  :scope.pdf-container.pdf-presentation-mode {
+    overflow: hidden;
+    overscroll-behavior: none;
+    scroll-behavior: auto;
+  }
+  :scope.pdf-presentation-mode .pdf-row,
+  .pdf-presentation-mode .pdf-row,
+  :scope.pdf-container.pdf-presentation-mode .pdf-row {
+    min-block-size: var(--pdf-presentation-viewport-height, 100%);
+    margin-block-end: 0 !important;
+    align-items: center;
+  }
+  :scope.pdf-presentation-mode.pdf-presentation-controls-visible .pdf-container,
+  .pdf-presentation-mode.pdf-presentation-controls-visible .pdf-container {
+    cursor: default;
+  }
+  :scope.pdf-presentation-mode:not(.pdf-presentation-controls-visible) .pdf-container,
+  .pdf-presentation-mode:not(.pdf-presentation-controls-visible) .pdf-container {
+    cursor: none;
+  }
+  .pdf-presentation-controls[hidden] {
+    display: none !important;
+  }
+  .pdf-content {
+    box-sizing: border-box;
+    min-block-size: calc(100% + var(--pdf-page-vgap-scaled, 0px));
+    padding-block-start: var(--pdf-page-vgap-scaled, 0px);
+    transition: none;
+  }
+  :scope.pdf-container.pdf-pinch-active,
+  .pdf-container.pdf-pinch-active,
+  .pdf-container.pdf-pinch-active :is(.pdf-text-layer, .pdf-text-layer span, .pdf-text-layer br) {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+  }
+  /* Functional subset adapted from Mozilla PDF.js 6.3 pdf_viewer.css `.textLayer` (Apache-2.0). */
+  .pdf-text-layer {
+    position: absolute;
+    z-index: 2;
+    inset: 0;
+    overflow: clip;
+    color-scheme: only light;
+    opacity: 1;
+    line-height: 1;
+    letter-spacing: normal;
+    word-spacing: normal;
+    text-align: initial;
+    text-size-adjust: none;
+    -webkit-text-size-adjust: none;
+    forced-color-adjust: none;
+    transform-origin: 0 0;
+    pointer-events: none;
+    user-select: none;
+    --min-font-size: 1;
+    --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+    --min-font-size-inv: calc(1 / var(--min-font-size));
+  }
+  .pdf-text-layer :is(span, br) {
+    position: absolute;
+    color: transparent;
+    white-space: pre;
+    cursor: text;
+    transform-origin: 0% 0%;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .pdf-text-layer--interactive :is(span, br) {
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .pdf-text-layer--native-selection-hidden {
+    opacity: 0;
+  }
+  .pdf-text-layer > :not(.markedContent),
+  .pdf-text-layer .markedContent span:not(.markedContent) {
+    z-index: 1;
+    --font-height: 0;
+    --scale-x: 1;
+    --rotate: 0deg;
+    font-size: calc(var(--text-scale-factor) * var(--font-height));
+    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+  }
+  .pdf-text-layer[data-main-rotation="90"] {
+    transform: rotate(90deg) translateY(-100%);
+  }
+  .pdf-text-layer[data-main-rotation="180"] {
+    transform: rotate(180deg) translate(-100%, -100%);
+  }
+  .pdf-text-layer[data-main-rotation="270"] {
+    transform: rotate(270deg) translateX(-100%);
+  }
+  .pdf-text-layer .markedContent {
+    display: contents;
+  }
+  .pdf-text-layer ::selection,
+  .pdf-text-layer ::-moz-selection {
+    color: transparent;
+    background: transparent;
+  }
+  .pdf-text-layer .endOfContent {
+    position: absolute;
+    z-index: 0;
+    inset: 100% 0 0;
+    display: block;
+    cursor: default;
+    top: 100% !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden;
+    user-select: none !important;
+  }
+  /* Package-specific search and semantic-selection projection layers. */
+  .pdf-highlight-layer,
+  .pdf-search-highlight-channel,
+  .pdf-selection-highlight-channel {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .pdf-highlight-layer {
+    z-index: 4;
+  }
+  :is(.pdf-search-highlight, .pdf-text-selection-highlight) {
+    position: absolute;
+  }
+  .pdf-text-selection-highlight {
+    background: var(--pdf-ui-color-text-highlight, rgb(40 85 166 / 42%));
+  }
+  /* Functional subset adapted from Mozilla PDF.js 6.3 pdf_viewer.css `.annotationLayer` (Apache-2.0). */
+  .pdf-annotation-layer {
+    position: absolute;
+    z-index: 3;
+    inset: 0;
+    width: auto !important;
+    height: auto !important;
+    color-scheme: only light;
+    pointer-events: none;
+    transform-origin: 0 0;
+    --pdf-form-unfocused-background: linear-gradient(rgb(0 54 255 / 13%), rgb(0 54 255 / 13%));
+    --pdf-form-focus-border-color: Highlight;
+    --pdf-form-focus-outline: 1px solid Canvas;
+    --pdf-form-unfocused-border-color: transparent;
+    --pdf-form-disabled-border-color: transparent;
+    --pdf-form-hover-border-color: black;
+  }
+  .pdf-annotation-layer[data-main-rotation="90"] .norotate {
+    transform: rotate(270deg) translateX(-100%);
+  }
+  .pdf-annotation-layer[data-main-rotation="180"] .norotate {
+    transform: rotate(180deg) translate(-100%, -100%);
+  }
+  .pdf-annotation-layer[data-main-rotation="270"] .norotate {
+    transform: rotate(90deg) translateY(-100%);
+  }
+  .pdf-annotation-layer section {
+    position: absolute;
+    box-sizing: border-box;
+    text-align: initial;
+    pointer-events: auto;
+    transform-origin: 0 0;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .pdf-annotation-layer section:has(div.annotationContent) canvas.annotationContent {
+    display: none;
+  }
+  .pdf-annotation-layer .hasOwnCanvas:not(.sandboxModified) :is(input, textarea) {
+    display: none;
+  }
+  .pdf-annotation-layer .hasOwnCanvas.sandboxModified canvas.annotationContent {
+    display: none;
+  }
+  .pdf-annotation-layer .pdf-annotation-markup {
+    pointer-events: none;
+  }
+  .pdf-annotation-layer :is(.pdf-annotation-popup-trigger, .pdf-annotation-file-attachment) {
+    pointer-events: auto;
+  }
+  .pdf-annotation-layer .annotationContent {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  .pdf-annotation-layer .annotationContent.freetext {
+    overflow: visible;
+    border: 0;
+    background: transparent;
+    white-space: nowrap;
+    font: 10px/1.35 sans-serif;
+  }
+  .pdf-annotation-layer section .overlaidText {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    display: inline-block;
+    overflow: hidden;
+  }
+  .pdf-annotation-layer .linkAnnotation > .pdf-annotation-link {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    font-size: 1em;
+    pointer-events: auto;
+  }
+  .pdf-annotation-layer .textAnnotation img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+  }
+  .pdf-annotation-layer .fileAttachmentAnnotation .popupTriggerArea {
+    width: 100%;
+    height: 100%;
+  }
+  .pdf-annotation-layer .pdf-annotation-popup {
+    position: absolute;
+    width: max-content;
+    max-width: 45%;
+    height: auto;
+    font-size: calc(9px * var(--total-scale-factor));
+    pointer-events: none;
+  }
+  .pdf-annotation-layer .popup {
+    padding: calc(6px * var(--total-scale-factor));
+    border-radius: calc(2px * var(--total-scale-factor));
+    outline: 1.5px solid rgb(255 255 74);
+    background: rgb(255 255 153);
+    color: #000;
+    box-shadow: 0 calc(2px * var(--total-scale-factor)) calc(5px * var(--total-scale-factor))
+      rgb(136 136 136);
+    cursor: pointer;
+    font: message-box;
+    white-space: normal;
+    overflow-wrap: break-word;
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .pdf-annotation-layer .pdf-annotation-popup.focused .popup {
+    outline-width: 3px;
+  }
+  .pdf-annotation-layer .popup * {
+    font-size: calc(9px * var(--total-scale-factor));
+  }
+  .pdf-annotation-layer .popup > .header {
+    display: inline-block;
+  }
+  .pdf-annotation-layer .popup > .header > .title {
+    display: inline;
+    font-weight: bold;
+  }
+  .pdf-annotation-layer .popup > .header .popupDate {
+    display: inline-block;
+    width: fit-content;
+    margin-left: calc(5px * var(--total-scale-factor));
+  }
+  .pdf-annotation-layer .popupContent {
+    margin-top: calc(2px * var(--total-scale-factor));
+    padding-top: calc(2px * var(--total-scale-factor));
+    border-top: 1px solid rgb(51 51 51);
+  }
+  .pdf-annotation-layer .richText > * {
+    white-space: pre-wrap;
+    font-size: calc(9px * var(--total-scale-factor));
+  }
+  .pdf-annotation-layer .popupTriggerArea {
+    cursor: pointer;
+  }
+  .pdf-annotation-layer section svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .pdf-annotation-layer .annotationTextContent {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    color: transparent;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .pdf-annotation-layer .annotationTextContent span {
+    display: inline-block;
+    width: 100%;
+  }
+  .pdf-annotation-layer svg.quadrilateralsContainer {
+    position: absolute;
+    z-index: -1;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    contain: strict;
+  }
+  .pdf-annotation-layer
+    :is(
+      .textWidgetAnnotation input,
+      .textWidgetAnnotation textarea,
+      .choiceWidgetAnnotation select,
+      .buttonWidgetAnnotation.checkBox input,
+      .buttonWidgetAnnotation.radioButton input
+    ) {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    margin: 0;
+    border: 2px solid var(--pdf-form-unfocused-border-color);
+    background-image: var(--pdf-form-unfocused-background);
+    font: calc(9px * var(--total-scale-factor)) sans-serif;
+    vertical-align: top;
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .pdf-annotation-layer .textWidgetAnnotation textarea {
+    resize: none;
+  }
+  .pdf-annotation-layer .choiceWidgetAnnotation select option {
+    padding: 0;
+  }
+  .pdf-annotation-layer
+    :is(
+      .textWidgetAnnotation input,
+      .textWidgetAnnotation textarea,
+      .choiceWidgetAnnotation select,
+      .buttonWidgetAnnotation.checkBox input,
+      .buttonWidgetAnnotation.radioButton input
+    ):disabled {
+    border-color: var(--pdf-form-disabled-border-color);
+    background: none;
+    cursor: not-allowed;
+  }
+  .pdf-annotation-layer
+    :is(
+      .textWidgetAnnotation input,
+      .textWidgetAnnotation textarea,
+      .choiceWidgetAnnotation select,
+      .buttonWidgetAnnotation.checkBox input,
+      .buttonWidgetAnnotation.radioButton input
+    ):required {
+    outline: 1.5px solid red;
+  }
+  .pdf-annotation-layer
+    :is(
+      .textWidgetAnnotation input,
+      .textWidgetAnnotation textarea,
+      .choiceWidgetAnnotation select
+    ):focus {
+    border-color: var(--pdf-form-focus-border-color);
+    border-radius: 2px;
+    background: none;
+    outline: var(--pdf-form-focus-outline);
+  }
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton)
+    input {
+    appearance: none;
+  }
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton)
+    input:focus {
+    border-color: var(--pdf-form-focus-border-color);
+    background: transparent;
+    outline: var(--pdf-form-focus-outline);
+  }
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton)
+    [data-canvas-name="checked"]:has(~ input:checked),
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton)
+    [data-canvas-name="unchecked"]:has(~ input:not(:checked)) {
+    display: block;
+  }
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton)
+    [data-canvas-name="checked"]:has(~ input:not(:checked)),
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton)
+    [data-canvas-name="unchecked"]:has(~ input:checked) {
+    display: none;
+  }
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton):has(
+      [data-canvas-name="checked"]
+    )
+    input:checked,
+  .pdf-annotation-layer
+    :is(.buttonWidgetAnnotation.checkBox, .buttonWidgetAnnotation.radioButton):has(
+      [data-canvas-name="unchecked"]
+    )
+    input:not(:checked) {
+    background-image: none;
+  }
+  .pdf-annotation-layer .textWidgetAnnotation input.comb {
+    --comb-width: 0px;
+    font-family: monospace;
+    letter-spacing: calc(var(--comb-width) - 1ch);
+    overflow-x: hidden;
+    padding: 0;
+    text-indent: calc(var(--comb-offset, 0) * var(--comb-width) + (var(--comb-width) - 1ch) / 2);
+  }
+  .pdf-annotation-layer :is(.linkAnnotation, .buttonWidgetAnnotation.pushButton) > a {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: auto;
+  }
+  /* Selection mode yields only existing link and popup trigger hit areas, never future form controls. */
+  .pdf-text-selection-mode
+    .pdf-annotation-layer
+    :is(.pdf-annotation-link, .pdf-annotation-popup-trigger) {
+    pointer-events: none !important;
+  }
+  .pdf-text-selection-mode
+    .pdf-annotation-layer
+    :is(
+      .linkAnnotation:has(> .pdf-annotation-link),
+      .pdf-annotation-markup:has(.pdf-annotation-popup-trigger)
+    ) {
+    pointer-events: none;
+  }
+  /* Functional subset adapted from Mozilla PDF.js 6.3 pdf_viewer.css `.xfaLayer` (Apache-2.0). */
+  .pdf-xfa-layer {
+    position: absolute;
+    z-index: 3;
+    top: 0;
+    left: 0;
+    color-scheme: only light;
+    background: transparent;
+    text-align: initial;
+    transform-origin: 0 0;
+    line-height: 1.2;
+    --xfa-unfocused-field-background: linear-gradient(rgb(0 54 255 / 13%), rgb(0 54 255 / 13%));
+    --xfa-focus-outline: auto;
+  }
+  .pdf-xfa-layer * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    color: inherit;
+    background-color: transparent;
+    font: inherit;
+    font-style: inherit;
+    font-weight: inherit;
+    font-kerning: inherit;
+    letter-spacing: -0.01px;
+    line-height: inherit;
+    text-align: inherit;
+    text-decoration: inherit;
+    pointer-events: auto;
+  }
+  .pdf-xfa-layer :is(div, svg, svg *) {
+    pointer-events: none;
+  }
+  .pdf-xfa-layer *:required {
+    outline: 1.5px solid red;
+  }
+  .pdf-xfa-layer a {
+    color: blue;
+  }
+  .pdf-xfa-layer.xfaFont {
+    color: black;
+    font: normal 10px/1.2 sans-serif;
+    font-kerning: none;
+    letter-spacing: 0;
+    text-decoration: none;
+    vertical-align: 0;
+  }
+  .pdf-xfa-unavailable {
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    text-align: center;
+  }
+  .pdf-xfa-layer .xfaPage {
+    position: relative;
+    overflow: hidden;
+  }
+  .pdf-xfa-layer .xfaContentarea {
+    position: absolute;
+  }
+  .pdf-xfa-layer .xfaPrintOnly {
+    display: none;
+  }
+  .pdf-xfa-layer :is(.xfaCaption, .xfaCaptionForCheckButton) {
+    overflow: hidden;
+    flex: 0 0 auto;
+  }
+  .pdf-xfa-layer .xfaCaptionForCheckButton {
+    flex: 1 1 auto;
+  }
+  .pdf-xfa-layer .xfaLabel,
+  .pdf-xfa-layer .xfaWrapped {
+    width: 100%;
+    height: 100%;
+  }
+  .pdf-xfa-layer
+    :is(
+      .xfaLeft,
+      .xfaRight,
+      .xfaTop,
+      .xfaBottom,
+      .xfaLrTb,
+      .xfaRlTb,
+      .xfaTb,
+      .xfaLr,
+      .xfaRl,
+      .xfaTable,
+      .xfaRow,
+      .xfaRlRow
+    ) {
+    display: flex;
+    align-items: stretch;
+  }
+  .pdf-xfa-layer :is(.xfaLeft, .xfaRight) {
+    flex-direction: row;
+    align-items: center;
+  }
+  .pdf-xfa-layer .xfaRight {
+    flex-direction: row-reverse;
+  }
+  .pdf-xfa-layer :is(.xfaTop, .xfaBottom, .xfaLrTb, .xfaRlTb, .xfaTb, .xfaTable) {
+    flex-direction: column;
+  }
+  .pdf-xfa-layer .xfaTb > div {
+    justify-content: left;
+  }
+  .pdf-xfa-layer .xfaBottom {
+    flex-direction: column-reverse;
+  }
+  .pdf-xfa-layer :is(.xfaTop, .xfaBottom) {
+    align-items: flex-start;
+  }
+  .pdf-xfa-layer :is(.xfaLeft, .xfaRight) > :is(.xfaCaption, .xfaCaptionForCheckButton) {
+    max-height: 100%;
+  }
+  .pdf-xfa-layer :is(.xfaTop, .xfaBottom) > :is(.xfaCaption, .xfaCaptionForCheckButton) {
+    width: 100%;
+  }
+  .pdf-xfa-layer :is(.xfaLr, .xfaRl, .xfaRow, .xfaRlRow) {
+    flex-direction: row;
+  }
+  .pdf-xfa-layer :is(.xfaRl, .xfaRlRow) {
+    flex-direction: row-reverse;
+  }
+  .pdf-xfa-layer .xfaRlRow {
+    flex: 1;
+  }
+  .pdf-xfa-layer .xfaRlRow > div {
+    flex: 1;
+  }
+  .pdf-xfa-layer :is(.xfaPosition, .xfaArea) {
+    position: relative;
+  }
+  .pdf-xfa-layer .xfaValignMiddle {
+    display: flex;
+    align-items: center;
+  }
+  .pdf-xfa-layer .xfaBorder {
+    position: absolute;
+    background: transparent;
+    pointer-events: none;
+  }
+  .pdf-xfa-layer :is(.xfaTextfield, .xfaSelect) {
+    width: 100%;
+    height: 100%;
+    flex: 1 1 auto;
+    border: 0;
+    resize: none;
+    background-image: var(--xfa-unfocused-field-background);
+  }
+  .pdf-xfa-layer :is(.xfaTextfield, .xfaSelect):focus {
+    background: transparent;
+    outline: var(--xfa-focus-outline);
+    outline-offset: -1px;
+  }
+  .pdf-xfa-layer :is(.xfaCheckbox, .xfaRadio):focus {
+    outline: var(--xfa-focus-outline);
+  }
+  .pdf-xfa-layer .xfaSelect {
+    padding-inline: 2px;
+  }
+  .pdf-xfa-layer :is(.xfaTop, .xfaBottom) > :is(.xfaTextfield, .xfaSelect) {
+    flex: 0 1 auto;
+  }
+  .pdf-xfa-layer :is(.xfaButton, .xfaCheckbox, .xfaRadio) {
+    width: 100%;
+    height: 100%;
+    border: 0;
+  }
+  .pdf-xfa-layer .xfaButton {
+    cursor: pointer;
+    text-align: center;
+  }
+  .pdf-xfa-layer :is(.xfaCheckbox, .xfaRadio) {
+    flex: 0 0 auto;
+  }
+  .pdf-xfa-layer .xfaLink {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .pdf-xfa-layer .xfaRich {
+    width: 100%;
+    height: 100%;
+    white-space: pre-wrap;
+  }
+  .pdf-xfa-layer .xfaRich li {
+    margin-left: 3em;
+  }
+  .pdf-xfa-layer .xfaImage {
+    width: 100%;
+    height: 100%;
+    object-position: left top;
+    object-fit: contain;
+  }
+  .pdf-xfa-layer :is(.xfaNonInteractive, .xfaDisabled, .xfaReadOnly) :is(input, textarea) {
+    background: initial;
+  }
+  /* Package-specific sidebar visibility, thumbnail sizing, and pointer-scroll state. */
+  :scope.pdf-sidebar-panel[hidden],
+  .pdf-sidebar-panel[hidden] {
+    display: none !important;
+  }
+  .pdf-thumbnail-canvas {
+    display: block;
+    width: var(--pdf-thumbnail-width);
+    max-width: 100%;
+    height: auto;
+    contain: content;
+  }
+  :scope[data-pdf-pointer-scroll-cursor="grabbing"],
+  [data-pdf-pointer-scroll-cursor="grabbing"],
+  [data-pdf-pointer-scroll-cursor="grabbing"] * {
+    cursor: grabbing !important;
+  }
+  :scope[data-pdf-pointer-scroll-cursor="all-scroll"],
+  [data-pdf-pointer-scroll-cursor="all-scroll"],
+  [data-pdf-pointer-scroll-cursor="all-scroll"] * {
+    cursor: all-scroll !important;
+  }
+
+  @media (hover: hover) {
+    .pdf-annotation-layer
+      :is(
+        .textWidgetAnnotation input,
+        .textWidgetAnnotation textarea,
+        .choiceWidgetAnnotation select,
+        .buttonWidgetAnnotation.checkBox input,
+        .buttonWidgetAnnotation.radioButton input
+      ):hover {
+      border-color: var(--pdf-form-hover-border-color);
+    }
+  }
+
+  @media screen and (forced-colors: active) {
+    .pdf-annotation-layer {
+      --pdf-form-focus-border-color: CanvasText;
+      --pdf-form-unfocused-border-color: ActiveText;
+      --pdf-form-disabled-border-color: GrayText;
+      --pdf-form-hover-border-color: Highlight;
+    }
+    .pdf-annotation-layer .linkAnnotation {
+      outline: 1.5px solid LinkText;
+    }
+    .pdf-annotation-layer .popup {
+      outline-color: CanvasText;
+      background: ButtonFace;
+      color: ButtonText;
+    }
+    .pdf-xfa-layer {
+      --xfa-focus-outline: 2px solid CanvasText;
+    }
+    .pdf-xfa-layer *:required {
+      outline-color: SelectedItem;
+    }
+  }
+}
+
+/* Package-specific native print composition; it renders outside the viewer root. */
+.pdf-native-print-root {
+  position: fixed;
+  z-index: -2147483648;
+  top: 0;
+  left: -100000px;
+  overflow: hidden;
+  pointer-events: none;
+  color-scheme: only light;
+}
+.pdf-native-print-sheet {
+  position: relative;
+  box-sizing: border-box;
+  overflow: hidden;
+  break-after: page;
+  background: white;
+}
+.pdf-native-print-sheet:last-child {
+  break-after: auto;
+}
+.pdf-native-print-sheet > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.pdf-native-print-content {
+  position: relative;
+  overflow: hidden;
+}
+.pdf-native-print-slot {
+  position: absolute;
+  box-sizing: border-box;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+  transform-origin: 0 0;
+}
+/* Functional print subset adapted from Mozilla PDF.js 6.3 XFA viewer CSS (Apache-2.0). */
+.pdf-native-print-slot,
+.pdf-native-print-slot * {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  background-color: transparent;
+  font: inherit;
+  font-style: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  text-decoration: inherit;
+}
+.pdf-native-print-slot > .xfaLayer {
+  transform-origin: 0 0;
+}
+.pdf-native-print-slot > .xfaFont {
+  color: #000;
+  font: normal 10px/1.2 sans-serif;
+  font-kerning: none;
+  letter-spacing: 0;
+  text-decoration: none;
+  vertical-align: 0;
+}
+.pdf-native-print-slot .xfaPage {
+  position: relative;
+  overflow: hidden;
+}
+.pdf-native-print-slot .xfaContentarea {
+  position: absolute;
+}
+.pdf-native-print-slot :is(.xfaCaption, .xfaCaptionForCheckButton) {
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.pdf-native-print-slot .xfaCaptionForCheckButton {
+  flex: 1 1 auto;
+}
+.pdf-native-print-slot
+  :is(
+    .xfaLabel,
+    .xfaWrapped,
+    .xfaTextfield,
+    .xfaSelect,
+    .xfaButton,
+    .xfaCheckbox,
+    .xfaRadio,
+    .xfaRich,
+    .xfaImage
+  ) {
+  width: 100%;
+  height: 100%;
+}
+.pdf-native-print-slot
+  :is(
+    .xfaLeft,
+    .xfaRight,
+    .xfaTop,
+    .xfaBottom,
+    .xfaLrTb,
+    .xfaRlTb,
+    .xfaTb,
+    .xfaLr,
+    .xfaRl,
+    .xfaTable,
+    .xfaRow,
+    .xfaRlRow
+  ) {
+  display: flex;
+  align-items: stretch;
+}
+.pdf-native-print-slot :is(.xfaLeft, .xfaRight) {
+  flex-direction: row;
+  align-items: center;
+}
+.pdf-native-print-slot .xfaRight {
+  flex-direction: row-reverse;
+}
+.pdf-native-print-slot :is(.xfaTop, .xfaBottom, .xfaLrTb, .xfaRlTb, .xfaTb, .xfaTable) {
+  flex-direction: column;
+}
+.pdf-native-print-slot .xfaTb > div {
+  justify-content: left;
+}
+.pdf-native-print-slot .xfaBottom {
+  flex-direction: column-reverse;
+}
+.pdf-native-print-slot :is(.xfaLr, .xfaRow) {
+  flex-direction: row;
+}
+.pdf-native-print-slot :is(.xfaRl, .xfaRlRow) {
+  flex-direction: row-reverse;
+}
+.pdf-native-print-slot :is(.xfaPosition, .xfaArea) {
+  position: relative;
+}
+.pdf-native-print-slot .xfaValignMiddle {
+  display: flex;
+  align-items: center;
+}
+.pdf-native-print-slot .xfaBorder {
+  position: absolute;
+  background: transparent;
+  pointer-events: none;
+}
+.pdf-native-print-slot :is(.xfaTextfield, .xfaSelect) {
+  flex: 1 1 auto;
+  border: 0;
+  resize: none;
+}
+.pdf-native-print-slot :is(.xfaCheckbox, .xfaRadio) {
+  flex: 0 0 auto;
+}
+.pdf-native-print-slot .xfaLink {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.pdf-native-print-slot .xfaRich {
+  white-space: pre-wrap;
+}
+.pdf-native-print-slot .xfaImage {
+  object-position: left top;
+  object-fit: contain;
+}
+
+@media print {
+  /*
+   * Controlled native printing renders from a package-owned body child.
+   * Neutralize host-app viewport sizing/clipping so all prepared sheets can
+   * participate in paged layout, while hiding the application's normal UI.
+   */
+  html:has(body > .pdf-native-print-root[data-pdf-print-job]),
+  body:has(> .pdf-native-print-root[data-pdf-print-job]) {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    contain: none !important;
+  }
+  body:has(> .pdf-native-print-root[data-pdf-print-job])
+    > :not(.pdf-native-print-root[data-pdf-print-job]) {
+    display: none !important;
+  }
+  body > .pdf-native-print-root[data-pdf-print-job] {
+    position: static !important;
+    inset: auto !important;
+    z-index: auto !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+}

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, user-scalable=no, interactive-widget=overlays-content"
+    />
+    <meta
+      name="description"
+      content="Interactive demo of the @unilarva/pdfjs-viewer browser PDF viewer."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>PDF Viewer demo — @unilarva/pdfjs-viewer</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
+    <link rel="stylesheet" href="./default-ui.css" />
+    <link rel="stylesheet" href="./demo.css" />
+  </head>
+  <body>
+    <main class="demo-shell">
+      <header class="demo-header">
+        <div class="demo-toolbar">
+          <div class="demo-introduction">
+            <h1>@unilarva/<wbr />pdfjs&#x2011;viewer</h1>
+            <output id="demo-status" class="demo-status" aria-live="polite">Loading…</output>
+            <p>Enter a PDF URL, choose a local file, or drop one into the URL field.</p>
+          </div>
+          <button
+            id="pdf-change-button"
+            class="demo-change-button"
+            type="button"
+            aria-controls="pdf-controls"
+            aria-expanded="false"
+          >
+            Change PDF
+          </button>
+        </div>
+
+        <details id="pdf-controls" class="demo-controls" open>
+          <summary>PDF source options</summary>
+          <div class="demo-controls-content">
+            <form id="pdf-form" class="demo-form">
+              <label for="pdf-url">PDF URL</label>
+              <div class="demo-input-row">
+                <input
+                  id="pdf-url"
+                  name="pdf"
+                  type="text"
+                  inputmode="url"
+                  value="./sample.pdf"
+                  required
+                  spellcheck="false"
+                  autocomplete="url"
+                />
+                <input id="pdf-file" type="file" accept="application/pdf,.pdf" hidden />
+                <button type="submit">Load URL</button>
+                <button id="pdf-file-button" type="button">Open file</button>
+              </div>
+              <p class="demo-help">
+                Remote servers must permit cross-origin PDF requests. The bundled
+                <button id="sample-pdf-button" class="demo-sample-pdf" type="button">
+                  ./sample.pdf
+                </button>
+                works without network access. Local files are loaded only in this browser session.
+              </p>
+            </form>
+          </div>
+        </details>
+      </header>
+
+      <section id="pdf-viewer" class="demo-viewer" aria-label="PDF viewer"></section>
+    </main>
+
+    <script type="module" src="./demo.js"></script>
+  </body>
+</html>

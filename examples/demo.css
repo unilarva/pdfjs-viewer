@@ -1,0 +1,286 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  background: Canvas;
+  color: CanvasText;
+}
+
+.demo-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  /* Keep the fixed application canvas independent of dynamic browser-UI
+     viewport changes. */
+  height: 100vh;
+  height: 100svh;
+  overflow: hidden;
+}
+
+.demo-header {
+  display: grid;
+  grid-template-columns: minmax(14rem, 0.7fr) minmax(20rem, 1.3fr);
+  gap: 0.75rem 1.25rem;
+  align-items: center;
+  padding: 0.65rem clamp(0.75rem, 2vw, 1.5rem);
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+}
+
+.demo-toolbar {
+  min-width: 0;
+}
+
+.demo-introduction h1,
+.demo-introduction p {
+  margin: 0;
+}
+
+.demo-introduction h1 {
+  margin-bottom: 0.35rem;
+  font-size: clamp(1.4rem, 3vw, 1.8rem);
+}
+
+.demo-introduction p {
+  margin-top: 0.5rem;
+}
+
+.demo-change-button {
+  display: none;
+}
+
+.demo-controls summary {
+  display: none;
+}
+
+.demo-form {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.demo-form label {
+  font-weight: 700;
+}
+
+.demo-input-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.demo-input-row input {
+  min-width: 0;
+  flex: 1;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid color-mix(in srgb, CanvasText 35%, transparent);
+  border-radius: 0.35rem;
+  background: Field;
+  color: FieldText;
+  font: inherit;
+}
+
+.demo-input-row input[data-dragging="true"] {
+  outline: 2px dashed Highlight;
+  outline-offset: 2px;
+}
+
+.demo-input-row input[data-local-file="true"] {
+  border-color: color-mix(in srgb, Highlight 65%, CanvasText 35%);
+  background: color-mix(in srgb, Highlight 12%, Field);
+  color: color-mix(in srgb, Highlight 75%, FieldText);
+  font-style: italic;
+}
+
+.demo-input-row button {
+  padding: 0.4rem 0.65rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: Highlight;
+  color: HighlightText;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.demo-header .demo-input-row button:hover {
+  background: color-mix(in srgb, Highlight 85%, CanvasText);
+}
+
+.demo-help,
+.demo-status {
+  font-size: 0.85rem;
+}
+
+.demo-status {
+  display: block;
+  min-height: 1.2em;
+  font-weight: 700;
+}
+
+.demo-status[data-error="true"] {
+  color: #c62828;
+}
+
+.demo-viewer {
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  height: 100%;
+}
+
+.demo-viewer .pdf-menu-actions .pdf-text-selection-toggle-btn {
+  grid-column: 1 / -1;
+  justify-self: end;
+}
+
+.demo-nowrap {
+  white-space: nowrap;
+}
+
+.demo-sample-pdf {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: LinkText;
+  cursor: pointer;
+  font: inherit;
+  font-style: italic;
+  text-decoration: underline;
+}
+
+@media (max-width: 40rem) {
+  .demo-header {
+    grid-template-columns: 1fr;
+    gap: 0;
+    padding-block: 0;
+  }
+
+  .demo-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 3.25rem;
+  }
+
+  .demo-introduction {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .demo-introduction p {
+    display: none;
+  }
+
+  .demo-introduction h1 {
+    margin: 0;
+    font-size: 1.125rem;
+  }
+
+  .demo-status {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .demo-change-button {
+    display: inline-flex;
+    align-items: center;
+    flex: none;
+    gap: 0.45rem;
+    min-height: 2.75rem;
+    padding: 0.4rem 0.65rem;
+    border: 0;
+    border-radius: 0.35rem;
+    background: Highlight;
+    color: HighlightText;
+    font: inherit;
+    font-weight: 700;
+  }
+
+  .demo-change-button::after {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-right: 0.12rem solid currentColor;
+    border-bottom: 0.12rem solid currentColor;
+    content: "";
+    transform: translateY(-0.12rem) rotate(45deg);
+    transition: transform 160ms ease;
+  }
+
+  .demo-change-button[aria-expanded="true"]::after {
+    transform: translateY(0.12rem) rotate(225deg);
+  }
+
+  .demo-controls {
+    margin-inline: calc(-1 * clamp(0.75rem, 2vw, 1.5rem));
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transform: translateY(-0.5rem);
+    transition:
+      grid-template-rows 200ms ease,
+      opacity 160ms ease,
+      transform 200ms ease,
+      visibility 0s linear 200ms;
+    visibility: hidden;
+  }
+
+  .demo-controls summary {
+    display: none;
+  }
+
+  .demo-controls > .demo-controls-content {
+    min-height: 0;
+    overflow: clip;
+    padding: 0.65rem clamp(0.75rem, 2vw, 1.5rem);
+    border-top: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  }
+
+  .demo-controls[open] {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transform: translateY(0);
+    transition:
+      grid-template-rows 200ms ease,
+      opacity 160ms ease,
+      transform 200ms ease;
+    visibility: visible;
+  }
+
+  .demo-controls:not([open]) > .demo-controls-content {
+    display: block;
+  }
+
+  .demo-input-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .demo-input-row input {
+    grid-column: 1 / -1;
+  }
+
+  .demo-input-row button {
+    min-width: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .demo-change-button::after,
+    .demo-controls,
+    .demo-controls[open] {
+      transition: none;
+    }
+  }
+}

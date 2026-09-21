@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 256 256"
+   role="img"
+   aria-labelledby="logo-title logo-description"
+   version="1.1"
+   id="svg1"
+   sodipodi:docname="unilarva-pdfjs-viewer-logo-adaptive.svg"
+   inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <defs
+     id="defs1" />
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="0.41984465"
+     inkscape:cx="91.700585"
+     inkscape:cy="161.96467"
+     inkscape:window-width="1037"
+     inkscape:window-height="1224"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="logo-pdf-page-mark" />
+  <title
+     id="logo-title">Unilarva PdfjsViewer Logo</title>
+  <desc
+     id="logo-description">
+    A document page held inside a U-shaped viewport.
+  </desc>
+  <!--
+    Self-adapting variant for use as an external image, including README files.
+    The artwork remains transparent and responds to the user's color scheme.
+  -->
+  <style
+     id="style1">
+    svg {
+      color: #aa01cb;
+    }
+
+    #logo-u-mark {
+      opacity: 0.68;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      svg {
+        color: #e0adee;
+      }
+    }
+  </style>
+  <g
+     id="logo-u-mark"
+     inkscape:groupmode="layer"
+     inkscape:label="Unilarva U">
+    <path
+       id="logo-u-outline"
+       d="M 44,50 V 150 C 44,195 77,220 128,220 C 179,220 212,195 212,150 V 50"
+       fill="none"
+       stroke="currentColor"
+       stroke-width="22"
+       stroke-linecap="round"
+       stroke-linejoin="round" />
+  </g>
+  <g
+     id="logo-pdf-page-mark"
+     inkscape:groupmode="layer"
+     inkscape:label="PDF document">
+    <path
+       id="logo-pdf-page-outline"
+       d="M 80,46 H 151 L 176,71 V 181.764502 H 80 Z"
+       fill="none"
+       stroke="currentColor"
+       stroke-width="12"
+       stroke-linecap="round"
+       stroke-linejoin="round" />
+    <path
+       id="logo-pdf-page-fold"
+       d="M 151,46 V 71 H 176"
+       fill="none"
+       stroke="currentColor"
+       stroke-width="12"
+       stroke-linecap="round"
+       stroke-linejoin="round" />
+    <path
+       id="logo-pdf-page-text-lines"
+       d="M 104,107 H 152 M 104,133 H 152"
+       fill="none"
+       stroke="currentColor"
+       stroke-width="9"
+       stroke-linecap="round" />
+  </g>
+  <metadata
+     id="metadata1">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:title>Unilarva PdfjsViewer Logo</dc:title>
+        <dc:subject>
+          <rdf:Bag>
+            <rdf:li>unilarva</rdf:li>
+            <rdf:li>pdfjs-viewer</rdf:li>
+            <rdf:li>logo</rdf:li>
+          </rdf:Bag>
+        </dc:subject>
+        <dc:description>Adaptive version (uses official colors for light and dark schemes)</dc:description>
+        <dc:rights>
+          <cc:Agent>
+            <dc:title>Copyright © 2026 Lari Natri. Licensed under the Apache License, Version 2.0.
+The Unilarva name and logo are project marks; no trademark rights are granted.</dc:title>
+          </cc:Agent>
+        </dc:rights>
+        <cc:license
+           rdf:resource="https://www.apache.org/licenses/LICENSE-2.0.txt" />
+        <dc:date>2026-08-24</dc:date>
+        <dc:creator>
+          <cc:Agent>
+            <dc:title>Lari Natri</dc:title>
+          </cc:Agent>
+        </dc:creator>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+</svg>
