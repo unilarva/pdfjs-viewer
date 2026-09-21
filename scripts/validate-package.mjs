@@ -216,6 +216,7 @@ for (const [path, description] of [
   ["DEVICE-COMPATIBILITY.md", "device compatibility policy and qualification guide"],
   ["CHANGELOG.md", "changelog"],
   ["LICENSE", "license"],
+  ["assets/icons/.npmignore", "source-only icon documentation pack exclusion"],
   [".github/workflows/ci.yml", "standalone GitHub Actions pipeline"],
   [".github/workflows/release.yml", "Trusted Publishing release pipeline"],
   [".gitlab-ci.yml", "standalone GitLab pipeline"],
@@ -253,6 +254,15 @@ try {
   expect(
     ciWorkflow.includes("chromium:non-csp") && ciWorkflow.includes("firefox:non-csp"),
     "GitHub desktop browser gates must leave CSP coverage to the explicit CSP gate",
+  );
+  expect(
+    ciWorkflow.includes("HOME: /root"),
+    "GitHub container browser gates must provide Firefox a root-owned home",
+  );
+  expect(
+    ciWorkflow.includes("npx playwright install --with-deps chromium") &&
+      releaseWorkflow.includes("npx playwright install --with-deps chromium firefox"),
+    "clean distribution gates must install their required browsers",
   );
   expect(
     releaseWorkflow.includes('tags:\n      - "v*"'),
