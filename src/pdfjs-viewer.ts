@@ -573,6 +573,7 @@ export class PdfjsViewer {
     },
   );
   #scrollRaf: number | null = null;
+  #scrollRequestGeneration = 0;
   #scrollPendingDuringTouchZoom = false;
   #lastObservedScrollTop: number | null = null;
   #scrollMotionIdleTimer: number | null = null;
@@ -4808,7 +4809,9 @@ export class PdfjsViewer {
     if (result.change.rotationChanged)
       this.#documentThumbnails.setRotation(this.#documentView.rotation);
     if (result.deferredScrollPage != null) {
+      const scrollRequestGeneration = this.#scrollRequestGeneration;
       this.#documentLifetime.requestAnimationFrame(() => {
+        if (scrollRequestGeneration !== this.#scrollRequestGeneration) return;
         this.#scrollToPage(result.deferredScrollPage!, false, false);
         this.#reconcileRendering();
       });
@@ -6408,6 +6411,7 @@ export class PdfjsViewer {
    * @param trackMotion - Whether an instant jump should influence render direction.
    */
   #scrollToRow(index: number, smooth = true, trackMotion = true): void {
+    this.#scrollRequestGeneration++;
     index = this.#clamp(index, 0, this.#documentView.rows.length - 1);
     if (!smooth) {
       this.#cancelSmoothNavigation();

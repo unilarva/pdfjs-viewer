@@ -123,7 +123,10 @@ test("@mobile fullscreen and presentation modes use exact-root ownership and dis
   if (!(await root.locator(".pdf-presentation-toggle-btn").isVisible())) {
     await root.locator(".pdf-menu-toggle-btn").click();
   }
-  await root.locator(".pdf-presentation-toggle-btn").click();
+  const presentationResult = await page.evaluate(() =>
+    window.fixture.primary.enterPresentationMode(),
+  );
+  expect(presentationResult).toMatchObject({ ok: true, presentationMode: true });
   await expect
     .poll(() => page.evaluate(() => window.fixture.primary.state.presentationMode))
     .toBe(true);

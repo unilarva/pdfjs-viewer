@@ -299,9 +299,9 @@ try {
     "release workflow must publish the verified tested tarball",
   );
   expect(
-    releaseWorkflow.includes("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02") &&
+    releaseWorkflow.includes("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a") &&
       releaseWorkflow.includes(
-        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
       ) &&
       releaseWorkflow.includes("release-candidate") &&
       releaseWorkflow.includes("*.sha256"),
