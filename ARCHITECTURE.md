@@ -301,6 +301,10 @@ The current owners are:
   canonical `DocumentView` configuration and location, suppresses `ViewerPanels` without discarding
   open/selected state, cancels continuous gestures, requests fullscreen synchronously while user
   activation exists, and commits single-page contain fitting through the existing view transaction.
+  Entry and exit retain exclusive view-transition ownership: resize work is coalesced until the mode
+  transaction settles. An explicit presentation-page anchor, updated only by intentional navigation,
+  remains authoritative across window/container resize, delayed row measurement, scroll anchoring,
+  and deferred view scrolling.
   Exit preserves the page reached, restores the prior layout/fit/scale and same-page location,
   releases panel suppression and focus, and reconciles rendering/navigation. When fullscreen and
   presentation coexist they form one immersive session, so loss or explicit exit of either exits

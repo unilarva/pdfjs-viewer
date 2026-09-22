@@ -367,6 +367,9 @@ export class PdfjsViewer {
   #presentationInput!: PresentationInputController;
   #presentationMode = false;
   #presentationOperationGeneration = 0;
+  #presentationViewTransitionDepth = 0;
+  #presentationResizePending = false;
+  #presentationPageAnchor: number | null = null;
   #presentationSnapshot: Readonly<{
     documentGeneration: number;
     entryPage: number;
@@ -2776,75 +2779,87 @@ export class PdfjsViewer {
     if (this.#status !== "ready" || !this.#pdf) return this.#presentationFailure("not-ready");
     if (this.#presentationMode) return this.#presentationSuccess(true);
 
-    const operation = ++this.#presentationOperationGeneration;
-    const documentGeneration = this.#documentGeneration;
-    const keepPage = Math.min(this.#documentView.pageCount, Math.max(1, this.#lastEmittedPage));
-    this.#presentationSnapshot = Object.freeze({
-      documentGeneration,
-      entryPage: keepPage,
-      view: this.#documentView.capturePresentationSnapshot(),
-    });
-    this.#presentationFocusReturn =
-      this.#ownerDocument.activeElement instanceof this.#ownerWindow.HTMLElement
-        ? (this.#ownerDocument.activeElement as HTMLElement)
-        : this.#presentationToggleBtnEl;
-    this.#presentationMode = true;
-    this.#presentationInput.setActive(true);
-    this.#viewerPanels.setPresentationSuppressed(true);
-    if (
-      this.#presentationFocusReturn &&
-      !this.#docContainerEl.contains(this.#presentationFocusReturn) &&
-      !this.#presentationInput.contains(this.#presentationFocusReturn)
-    ) {
-      this.#docContainerEl.focus({ preventScroll: true });
-    }
-    this.#setModeClass(PDFJS_VIEWER_STATE_CLASSES.presentationMode, true);
-    this.#documentView.setPresentationViewport(true);
-    this.#docContainerEl.style.touchAction = "none";
-    this.#abortTransientZoomForLayoutChange();
-    this.#pointerScroll.reset(this.#pointerScrollHost());
-    this.#presentationInput.showControls(true);
-    this.#syncModeControls();
-    this.#publishPresentationChange();
-
-    const wasFullscreen = this.#viewerFullscreen.active;
-    this.#presentationFullscreenRequested =
-      !wasFullscreen && this.#features.fullscreen && this.#viewerFullscreen.canEnter;
-    const fullscreenPromise = this.#presentationFullscreenRequested
-      ? this.#viewerFullscreen.enter()
-      : Promise.resolve<ViewerFullscreenResult>(
-          wasFullscreen
-            ? Object.freeze({ status: "active", active: true })
-            : Object.freeze({ status: "unavailable", active: false }),
-        );
-    this.#presentationFullscreenPromise = fullscreenPromise;
-
+    const releaseViewTransition = this.#beginPresentationViewTransition();
     try {
-      await this.#performViewOperation({
-        pageLayout: "single",
-        fitMode: "contain",
-        refit: true,
-        keepPage,
+      const operation = ++this.#presentationOperationGeneration;
+      const documentGeneration = this.#documentGeneration;
+      const viewSnapshot = this.#documentView.capturePresentationSnapshot();
+      const keepPage = Math.min(
+        this.#documentView.pageCount,
+        Math.max(1, this.#documentView.viewportPosition(this.#lastEmittedPage).pageNo),
+      );
+      this.#presentationPageAnchor = keepPage;
+      this.#scrollRequestGeneration++;
+      this.#cancelSmoothNavigation();
+      this.#presentationSnapshot = Object.freeze({
+        documentGeneration,
+        entryPage: keepPage,
+        view: viewSnapshot,
       });
-      if (!this.#isCurrentPresentationOperation(operation, documentGeneration)) {
-        return this.#presentationFailure("cancelled");
+      this.#presentationFocusReturn =
+        this.#ownerDocument.activeElement instanceof this.#ownerWindow.HTMLElement
+          ? (this.#ownerDocument.activeElement as HTMLElement)
+          : this.#presentationToggleBtnEl;
+      this.#presentationMode = true;
+      this.#presentationInput.setActive(true);
+      this.#viewerPanels.setPresentationSuppressed(true);
+      if (
+        this.#presentationFocusReturn &&
+        !this.#docContainerEl.contains(this.#presentationFocusReturn) &&
+        !this.#presentationInput.contains(this.#presentationFocusReturn)
+      ) {
+        this.#docContainerEl.focus({ preventScroll: true });
       }
-      this.#scrollToPage(keepPage, false, false);
-      await fullscreenPromise;
-      if (this.#presentationFullscreenPromise === fullscreenPromise) {
-        this.#presentationFullscreenPromise = null;
-      }
-      if (!this.#isCurrentPresentationOperation(operation, documentGeneration)) {
-        return this.#presentationFailure("cancelled");
-      }
-      this.#presentationFullscreenRequested = false;
+      this.#setModeClass(PDFJS_VIEWER_STATE_CLASSES.presentationMode, true);
+      this.#documentView.setPresentationViewport(true);
+      this.#docContainerEl.style.touchAction = "none";
+      this.#abortTransientZoomForLayoutChange();
+      this.#pointerScroll.reset(this.#pointerScrollHost());
+      this.#presentationInput.showControls(true);
       this.#syncModeControls();
-      return this.#presentationSuccess(true);
-    } catch (cause) {
-      if (this.#isCurrentPresentationOperation(operation, documentGeneration)) {
-        await this.#exitPresentationModeInternal(true, true);
+      this.#publishPresentationChange();
+
+      const wasFullscreen = this.#viewerFullscreen.active;
+      this.#presentationFullscreenRequested =
+        !wasFullscreen && this.#features.fullscreen && this.#viewerFullscreen.canEnter;
+      const fullscreenPromise = this.#presentationFullscreenRequested
+        ? this.#viewerFullscreen.enter()
+        : Promise.resolve<ViewerFullscreenResult>(
+            wasFullscreen
+              ? Object.freeze({ status: "active", active: true })
+              : Object.freeze({ status: "unavailable", active: false }),
+          );
+      this.#presentationFullscreenPromise = fullscreenPromise;
+
+      try {
+        await this.#performViewOperation({
+          pageLayout: "single",
+          fitMode: "contain",
+          refit: true,
+          keepPage,
+        });
+        if (!this.#isCurrentPresentationOperation(operation, documentGeneration)) {
+          return this.#presentationFailure("cancelled");
+        }
+        this.#scrollToPage(keepPage, false, false);
+        await fullscreenPromise;
+        if (this.#presentationFullscreenPromise === fullscreenPromise) {
+          this.#presentationFullscreenPromise = null;
+        }
+        if (!this.#isCurrentPresentationOperation(operation, documentGeneration)) {
+          return this.#presentationFailure("cancelled");
+        }
+        this.#presentationFullscreenRequested = false;
+        this.#syncModeControls();
+        return this.#presentationSuccess(true);
+      } catch (cause) {
+        if (this.#isCurrentPresentationOperation(operation, documentGeneration)) {
+          await this.#exitPresentationModeInternal(true, true);
+        }
+        return this.#presentationFailure("cancelled", cause);
       }
-      return this.#presentationFailure("cancelled", cause);
+    } finally {
+      releaseViewTransition();
     }
   }
 
@@ -2866,97 +2881,107 @@ export class PdfjsViewer {
     exitFullscreen: boolean,
   ): Promise<PdfjsViewerPresentationModeResult> {
     if (!this.#presentationMode) return this.#presentationSuccess(false);
-    const operation = ++this.#presentationOperationGeneration;
-    const saved = this.#presentationSnapshot;
-    const presentationPage = this.#lastEmittedPage;
-    this.#cancelPendingPresentationFullscreenRequest();
-    this.#presentationMode = false;
-    this.#presentationInput.setActive(false);
-    this.#presentationFullscreenRequested = false;
-    this.#setModeClass(PDFJS_VIEWER_STATE_CLASSES.presentationMode, false);
-    this.#documentView.setPresentationViewport(false);
-    this.#docContainerEl.style.touchAction = this.#behavior.zoomGestures ? "pan-x pan-y" : "auto";
-    if (exitFullscreen && this.#viewerFullscreen.active) {
-      await this.#viewerFullscreen.exit();
-    }
-    if (operation !== this.#presentationOperationGeneration) {
-      return this.#presentationFailure("cancelled");
-    }
-    if (
-      restore &&
-      saved &&
-      saved.documentGeneration === this.#documentGeneration &&
-      this.#status === "ready" &&
-      !!this.#pdf
-    ) {
-      this.#invalidatePendingViewOperations();
-      const restorePage = presentationPage === saved.entryPage ? saved.entryPage : presentationPage;
-      const pdf = this.#pdf;
-      const pages = this.#documentPageUsage;
-      if (pdf && pages) {
-        try {
-          const row = this.#documentView.referenceRow(
-            restorePage,
-            saved.view.view.pageLayout,
-            saved.view.view.rotation,
-          );
-          const prepared = await this.#prepareRowGeometry(pages, row);
-          if (
-            operation !== this.#presentationOperationGeneration ||
-            !this.#isCurrentDocument(pdf, saved.documentGeneration)
-          ) {
-            return this.#presentationFailure("cancelled");
-          }
-          this.#recordPreparedPageGeometry(prepared);
-        } catch (cause) {
-          if (
-            operation === this.#presentationOperationGeneration &&
-            this.#isCurrentDocument(pdf, saved.documentGeneration)
-          ) {
-            this.#log(
-              "error",
-              "presentation-restore-geometry-failed",
-              "Presentation exit reused retained page geometry after exact preparation failed",
-              { page: restorePage },
-              cause,
-            );
-          }
-        }
+    const releaseViewTransition = this.#beginPresentationViewTransition();
+    try {
+      const operation = ++this.#presentationOperationGeneration;
+      const saved = this.#presentationSnapshot;
+      const presentationPage =
+        this.#presentationPageAnchor ??
+        this.#documentView.captureDocumentLocation()?.page ??
+        this.#lastEmittedPage;
+      this.#cancelPendingPresentationFullscreenRequest();
+      this.#presentationMode = false;
+      this.#presentationInput.setActive(false);
+      this.#presentationFullscreenRequested = false;
+      this.#setModeClass(PDFJS_VIEWER_STATE_CLASSES.presentationMode, false);
+      this.#documentView.setPresentationViewport(false);
+      this.#docContainerEl.style.touchAction = this.#behavior.zoomGestures ? "pan-x pan-y" : "auto";
+      if (exitFullscreen && this.#viewerFullscreen.active) {
+        await this.#viewerFullscreen.exit();
       }
-      if (
-        operation !== this.#presentationOperationGeneration ||
-        !pdf ||
-        !this.#isCurrentDocument(pdf, saved.documentGeneration)
-      ) {
+      if (operation !== this.#presentationOperationGeneration) {
         return this.#presentationFailure("cancelled");
       }
-      const restored = this.#documentView.restorePresentationSnapshot(
-        saved.view,
-        presentationPage === saved.entryPage ? undefined : presentationPage,
-      );
-      this.#applyViewResult(restored);
-      this.#handleRotationChange(restored);
-      if (presentationPage !== this.#lastEmittedPage) {
-        this.#lastEmittedPage = presentationPage;
-        if (this.#pageNumEl) this.#pageNumEl.value = String(presentationPage);
-        this.#pdfRootEl.dispatchEvent(
-          new this.#ownerWindow.CustomEvent("pdf:pagechange", {
-            detail: { page: presentationPage },
-          }),
+      if (
+        restore &&
+        saved &&
+        saved.documentGeneration === this.#documentGeneration &&
+        this.#status === "ready" &&
+        !!this.#pdf
+      ) {
+        this.#invalidatePendingViewOperations();
+        const restorePage =
+          presentationPage === saved.entryPage ? saved.entryPage : presentationPage;
+        const pdf = this.#pdf;
+        const pages = this.#documentPageUsage;
+        if (pdf && pages) {
+          try {
+            const row = this.#documentView.referenceRow(
+              restorePage,
+              saved.view.view.pageLayout,
+              saved.view.view.rotation,
+            );
+            const prepared = await this.#prepareRowGeometry(pages, row);
+            if (
+              operation !== this.#presentationOperationGeneration ||
+              !this.#isCurrentDocument(pdf, saved.documentGeneration)
+            ) {
+              return this.#presentationFailure("cancelled");
+            }
+            this.#recordPreparedPageGeometry(prepared);
+          } catch (cause) {
+            if (
+              operation === this.#presentationOperationGeneration &&
+              this.#isCurrentDocument(pdf, saved.documentGeneration)
+            ) {
+              this.#log(
+                "error",
+                "presentation-restore-geometry-failed",
+                "Presentation exit reused retained page geometry after exact preparation failed",
+                { page: restorePage },
+                cause,
+              );
+            }
+          }
+        }
+        if (
+          operation !== this.#presentationOperationGeneration ||
+          !pdf ||
+          !this.#isCurrentDocument(pdf, saved.documentGeneration)
+        ) {
+          return this.#presentationFailure("cancelled");
+        }
+        const restored = this.#documentView.restorePresentationSnapshot(
+          saved.view,
+          presentationPage === saved.entryPage ? undefined : presentationPage,
         );
+        this.#applyViewResult(restored);
+        this.#handleRotationChange(restored);
+        if (presentationPage !== this.#lastEmittedPage) {
+          this.#lastEmittedPage = presentationPage;
+          if (this.#pageNumEl) this.#pageNumEl.value = String(presentationPage);
+          this.#pdfRootEl.dispatchEvent(
+            new this.#ownerWindow.CustomEvent("pdf:pagechange", {
+              detail: { page: presentationPage },
+            }),
+          );
+        }
+        this.#syncPageLayoutControls();
+        this.#syncFitModeControls();
+        this.#updateFitUI();
       }
-      this.#syncPageLayoutControls();
-      this.#syncFitModeControls();
-      this.#updateFitUI();
+      this.#presentationSnapshot = null;
+      this.#presentationPageAnchor = null;
+      this.#viewerPanels.setPresentationSuppressed(false);
+      const focus = this.#presentationFocusReturn;
+      this.#presentationFocusReturn = null;
+      if (focus?.isConnected) focus.focus({ preventScroll: true });
+      this.#syncModeControls();
+      this.#publishPresentationChange();
+      return this.#presentationSuccess(false);
+    } finally {
+      releaseViewTransition();
     }
-    this.#presentationSnapshot = null;
-    this.#viewerPanels.setPresentationSuppressed(false);
-    const focus = this.#presentationFocusReturn;
-    this.#presentationFocusReturn = null;
-    if (focus?.isConnected) focus.focus({ preventScroll: true });
-    this.#syncModeControls();
-    this.#publishPresentationChange();
-    return this.#presentationSuccess(false);
   }
 
   #cancelPresentationMode(emit: boolean): void {
@@ -2967,6 +2992,7 @@ export class PdfjsViewer {
     this.#presentationMode = false;
     this.#presentationInput.setActive(false);
     this.#presentationSnapshot = null;
+    this.#presentationPageAnchor = null;
     this.#presentationFullscreenRequested = false;
     this.#presentationFocusReturn = null;
     this.#setModeClass(PDFJS_VIEWER_STATE_CLASSES.presentationMode, false);
@@ -2991,6 +3017,28 @@ export class PdfjsViewer {
       !!this.#pdf &&
       !this.#destroyed
     );
+  }
+
+  /** Defers resize-owned view mutations until a presentation transaction has settled. */
+  #beginPresentationViewTransition(): () => void {
+    this.#presentationViewTransitionDepth++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#presentationViewTransitionDepth--;
+      if (this.#presentationViewTransitionDepth === 0 && !this.#presentationMode) {
+        this.#presentationPageAnchor = null;
+      }
+      if (
+        this.#presentationViewTransitionDepth !== 0 ||
+        !this.#presentationResizePending ||
+        this.#destroyed
+      )
+        return;
+      this.#presentationResizePending = false;
+      this.#onResize();
+    };
   }
 
   #handleFullscreenChange(active: boolean): void {
@@ -3135,7 +3183,9 @@ export class PdfjsViewer {
         this.#presentationToggleBtnEl.setAttribute("aria-label", label);
       }
     }
-    const row = this.#documentView?.currentRowIndex(this.#lastEmittedPage) ?? 0;
+    const row =
+      this.#documentView?.currentRowIndex(this.#presentationPageAnchor ?? this.#lastEmittedPage) ??
+      0;
     const presentationReady = this.#presentationMode && this.#status === "ready";
     this.#presentationInput.setNavigationAvailability(
       presentationReady && row > 0,
@@ -3146,7 +3196,7 @@ export class PdfjsViewer {
   #presentationStep(delta: -1 | 1): void {
     if (!this.#presentationMode || !this.#canInteractWithDocument()) return;
     const row = this.#documentView.currentRowIndex(
-      this.#documentView.pageAtViewportReadingPosition(),
+      this.#presentationPageAnchor ?? this.#lastEmittedPage,
     );
     this.#scrollToRow(row + delta, false, false);
   }
@@ -4812,6 +4862,8 @@ export class PdfjsViewer {
       const scrollRequestGeneration = this.#scrollRequestGeneration;
       this.#documentLifetime.requestAnimationFrame(() => {
         if (scrollRequestGeneration !== this.#scrollRequestGeneration) return;
+        if (this.#presentationMode && this.#presentationPageAnchor !== result.deferredScrollPage)
+          return;
         this.#scrollToPage(result.deferredScrollPage!, false, false);
         this.#reconcileRendering();
       });
@@ -5335,12 +5387,16 @@ export class PdfjsViewer {
    */
   #handleResize = (): void => {
     if (!this.#docContainerEl.isConnected) return;
+    if (this.#presentationViewTransitionDepth > 0) {
+      this.#presentationResizePending = true;
+      return;
+    }
     this.#abortTransientZoomForLayoutChange();
-    this.#documentView.refreshPresentationViewport();
-
     const keepPage =
       this.#pendingNavTargetPage ??
+      (this.#presentationMode ? this.#presentationPageAnchor : null) ??
       this.#documentView.viewportPosition(this.#lastEmittedPage).pageNo;
+    this.#documentView.refreshPresentationViewport();
     if (this.#documentView.fitActive && this.#canInteractWithDocument()) {
       void this.#performViewOperation({ refit: true, keepPage }).catch(error => {
         this.#log("error", "resize-fit-failed", "PDF resize fitting failed", {}, error);
@@ -5363,10 +5419,16 @@ export class PdfjsViewer {
     this.#containerResizeRaf = this.#documentLifetime.requestAnimationFrame(() => {
       this.#containerResizeRaf = null;
       if (this.#destroyed) return;
-      this.#documentView.resize(undefined, {
+      if (this.#presentationViewTransitionDepth > 0) {
+        this.#presentationResizePending = true;
+        return;
+      }
+      const presentationPage = this.#presentationMode ? this.#presentationPageAnchor : null;
+      this.#documentView.resize(presentationPage ?? undefined, {
         refit: false,
         transientZoomActive: this.#zoomGesture.active,
       });
+      if (presentationPage != null) this.#scrollToPage(presentationPage, false, false);
       this.#updateFitUI();
       this.#scheduleScrollDerivedState();
     });
@@ -6395,7 +6457,7 @@ export class PdfjsViewer {
    * requests instead of extending the requested destination.
    */
   #navigationRowIndex(): number {
-    const pendingPage = this.#pendingNavTargetPage;
+    const pendingPage = this.#presentationPageAnchor ?? this.#pendingNavTargetPage;
     const pendingIndex =
       pendingPage == null ? undefined : this.#documentView.rowIndexForPage(pendingPage);
     return pendingIndex ?? this.#documentView.currentRowIndex(this.#lastEmittedPage);
@@ -6413,6 +6475,9 @@ export class PdfjsViewer {
   #scrollToRow(index: number, smooth = true, trackMotion = true): void {
     this.#scrollRequestGeneration++;
     index = this.#clamp(index, 0, this.#documentView.rows.length - 1);
+    if (this.#presentationMode) {
+      this.#presentationPageAnchor = this.#documentView.rows[index]?.[0] ?? 1;
+    }
     if (!smooth) {
       this.#cancelSmoothNavigation();
       // Assignment is synchronous, allowing API navigation to reprioritize before
@@ -6488,10 +6553,15 @@ export class PdfjsViewer {
       const scrollTop = this.#docContainerEl.scrollTop;
       if (this.#lastObservedScrollTop == null) this.#lastObservedScrollTop = 0;
       this.#observeRenderMotion(scrollTop);
-      const pendingPage = this.#pendingNavTargetPage;
-      const position = this.#documentView.viewportPosition(pendingPage ?? this.#lastEmittedPage);
+      const presentationPage = this.#presentationMode ? this.#presentationPageAnchor : null;
+      const pendingPage = presentationPage ?? this.#pendingNavTargetPage;
+      let position = this.#documentView.viewportPosition(pendingPage ?? this.#lastEmittedPage);
+      if (presentationPage != null && position.pageNo !== presentationPage) {
+        this.#documentView.scrollToPage(presentationPage, false, false);
+        position = this.#documentView.viewportPosition(presentationPage);
+      }
       const idx = position.rowIndex;
-      const currentPage = position.pageNo;
+      const currentPage = presentationPage ?? position.pageNo;
       const pendingIndex =
         pendingPage == null ? null : this.#documentView.rowIndexForPage(pendingPage);
       if (this.#pageNumEl) this.#pageNumEl.value = String(pendingPage ?? currentPage);
@@ -6504,14 +6574,17 @@ export class PdfjsViewer {
       this.#syncOutlineActive();
       this.#documentNavigation.scheduleNavigationStateSync(this.#navigationHost());
 
-      if (pendingPage == null && currentPage !== this.#lastEmittedPage) {
+      if (
+        (presentationPage != null || pendingPage == null) &&
+        currentPage !== this.#lastEmittedPage
+      ) {
         this.#lastEmittedPage = currentPage;
         this.#pdfRootEl.dispatchEvent(
           new this.#ownerWindow.CustomEvent("pdf:pagechange", { detail: { page: currentPage } }),
         );
         this.#emitStateChange();
       }
-      if (pendingPage != null && pendingIndex === idx) {
+      if (presentationPage == null && pendingPage != null && pendingIndex === idx) {
         this.#pendingNavTargetPage = null;
         if (!this.#smoothNavigation && !this.#pendingExplicitNavigationIntent?.usePosition)
           this.#pendingExplicitNavigationIntent = null;

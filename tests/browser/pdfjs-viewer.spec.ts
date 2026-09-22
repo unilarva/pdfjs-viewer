@@ -99,9 +99,12 @@ test("@mobile fullscreen and presentation modes use exact-root ownership and dis
   });
 
   const root = page.locator("#primary");
+  await page.evaluate(() => window.fixture.primary.navigateToPage(2));
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(2);
   await root.locator(".pdf-menu-toggle-btn").click();
   await root.locator(".pdf-fullscreen-toggle-btn").click();
   await expect.poll(() => page.evaluate(() => window.fixture.primary.state.fullscreen)).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(2);
   await expect(root).toHaveClass(/pdf-fullscreen/);
   await page.evaluate(async () => {
     await window.fixture.primary.setPageLayout("double");
@@ -701,6 +704,165 @@ test("current page follows the viewport reading anchor instead of a page-edge sl
     container.dispatchEvent(new Event("scroll"));
   });
   await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(2);
+});
+
+test("presentation mode preserves a viewport page before deferred page state is published", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const entry = await page.locator("#primary .pdf-container").evaluate(async container => {
+    const pageTwo = container.querySelector<HTMLElement>('.pdf-page[data-page="2"]');
+    if (!pageTwo) throw new Error("Missing second page");
+    const pageBeforeScroll = window.fixture.primary.state.currentPage;
+    container.scrollTop = pageTwo.offsetTop - 5;
+    container.dispatchEvent(new Event("scroll"));
+    const result = await window.fixture.primary.enterPresentationMode();
+    return {
+      pageBeforeScroll,
+      result,
+    };
+  });
+
+  expect(entry.pageBeforeScroll).toBe(1);
+  expect(entry.result).toMatchObject({ ok: true, presentationMode: true });
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(2);
+  const exit = await page.evaluate(async () => {
+    window.fixture.primary.navigateToPage(3);
+    return window.fixture.primary.exitPresentationMode();
+  });
+  expect(exit).toMatchObject({ ok: true, presentationMode: false });
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(3);
+});
+
+test("presentation transition owns resize reflow until its page is committed", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.evaluate(() => {
+    const documentState = document as Document & { fullscreenElement: Element | null };
+    let owner: Element | null = null;
+    Object.defineProperty(documentState, "fullscreenEnabled", { configurable: true, value: true });
+    Object.defineProperty(documentState, "fullscreenElement", {
+      configurable: true,
+      get: () => owner,
+    });
+    const root = document.querySelector<HTMLElement>("#primary")!;
+    root.requestFullscreen = () => {
+      owner = root;
+      root.style.height = "1080px";
+      document.dispatchEvent(new Event("fullscreenchange"));
+      window.dispatchEvent(new Event("resize"));
+      return Promise.resolve();
+    };
+    documentState.exitFullscreen = () => {
+      owner = null;
+      root.style.height = "720px";
+      document.dispatchEvent(new Event("fullscreenchange"));
+      window.dispatchEvent(new Event("resize"));
+      return Promise.resolve();
+    };
+  });
+  await page.evaluate(async () => {
+    await window.fixture.primary.load("/queue-fixture.pdf?presentation-resize");
+    await window.fixture.primary.setPageLayout("book");
+    window.fixture.primary.navigateToPage(30);
+  });
+  await page.waitForTimeout(2100);
+  const pageBeforePresentation = await page.evaluate(
+    () => window.fixture.primary.state.currentPage,
+  );
+  expect(pageBeforePresentation).toBeGreaterThanOrEqual(30);
+  expect(pageBeforePresentation).toBeLessThanOrEqual(31);
+  const embeddedHeight = await page
+    .locator("#primary .pdf-container")
+    .evaluate((element: HTMLElement) => element.clientHeight);
+
+  const entry = await page.evaluate(() => window.fixture.probePresentationResizeTransition());
+  expect(entry).toMatchObject({
+    ok: true,
+    presentationMode: true,
+    currentPage: pageBeforePresentation,
+    pageLayout: "single",
+    fitMode: "contain",
+  });
+  expect(entry.containerHeight).toBeGreaterThan(embeddedHeight);
+  await page.evaluate(async () => {
+    const root = document.querySelector<HTMLElement>("#primary")!;
+    for (const height of [900, 760, 1040, 820]) {
+      root.style.height = `${height}px`;
+      window.dispatchEvent(new Event("resize"));
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    }
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.fixture.primary.state.currentPage))
+    .toBe(pageBeforePresentation);
+  await expect
+    .poll(() =>
+      page
+        .locator(`#primary .pdf-page[data-page="${pageBeforePresentation}"]`)
+        .evaluate((element: HTMLElement) => {
+          const container = element.closest<HTMLElement>(".pdf-container")!;
+          const viewport = container.getBoundingClientRect();
+          const pageBounds = element.getBoundingClientRect();
+          const anchorY = viewport.top + container.clientTop + container.clientHeight * 0.35;
+          return anchorY >= pageBounds.top && anchorY <= pageBounds.bottom;
+        }),
+    )
+    .toBe(true);
+
+  await page.evaluate(() => window.fixture.primary.navigateToPage(35));
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(35);
+  await page.evaluate(async () => {
+    const root = document.querySelector<HTMLElement>("#primary")!;
+    for (const height of [980, 740, 1080]) {
+      root.style.height = `${height}px`;
+      window.dispatchEvent(new Event("resize"));
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    }
+  });
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(35);
+
+  const exit = await page.evaluate(() => window.fixture.primary.exitPresentationMode());
+  expect(exit).toMatchObject({ ok: true, presentationMode: false, fullscreen: false });
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(35);
+
+  await page.evaluate(() => {
+    const documentState = document as Document & { fullscreenElement: Element | null };
+    let owner: Element | null = null;
+    Object.defineProperty(documentState, "fullscreenElement", {
+      configurable: true,
+      get: () => owner,
+    });
+    const root = document.querySelector<HTMLElement>("#primary")!;
+    root.requestFullscreen = () =>
+      new Promise<void>(resolve => {
+        setTimeout(() => {
+          owner = root;
+          root.style.height = "1080px";
+          document.dispatchEvent(new Event("fullscreenchange"));
+          window.dispatchEvent(new Event("resize"));
+          resolve();
+        }, 100);
+      });
+    documentState.exitFullscreen = () => {
+      owner = null;
+      root.style.height = "720px";
+      document.dispatchEvent(new Event("fullscreenchange"));
+      window.dispatchEvent(new Event("resize"));
+      return Promise.resolve();
+    };
+  });
+  const delayedFullscreenEntry = await page.evaluate(() =>
+    window.fixture.primary.enterPresentationMode(),
+  );
+  expect(delayedFullscreenEntry).toMatchObject({
+    ok: true,
+    presentationMode: true,
+    fullscreen: true,
+  });
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(35);
+  await page.evaluate(() => window.fixture.primary.exitPresentationMode());
 });
 
 test("leading page gutter is manually reachable while initial and page-one navigation align the page top", async ({

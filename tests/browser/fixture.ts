@@ -158,6 +158,9 @@ declare global {
       probeSelectionCopyPolicies(): Promise<Record<string, boolean | number>>;
       addQueuePriorityViewer(): Promise<void>;
       addFitUnseenViewer(): Promise<void>;
+      probePresentationResizeTransition(): Promise<
+        Record<string, boolean | number | string | null>
+      >;
     };
   }
 }
@@ -541,6 +544,26 @@ window.fixture = {
   },
   failNextOptionalContentAcquisition() {
     rejectNextOptionalContentAcquisition = true;
+  },
+  async probePresentationResizeTransition() {
+    const gate = gateNextPageAcquisition();
+    const entry = primary.enterPresentationMode();
+    await gate.entered;
+    window.dispatchEvent(new Event("resize"));
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    gate.release();
+    const result = await entry;
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    return {
+      ok: result.ok,
+      presentationMode: primary.state.presentationMode,
+      currentPage: primary.state.currentPage,
+      pageLayout: primary.state.pageLayout,
+      fitMode: primary.state.fitMode,
+      containerHeight: document.querySelector<HTMLElement>("#primary .pdf-container")!.clientHeight,
+    };
   },
   async readAcroFormValues(data) {
     const task = PDFJS.getDocument({ data: Uint8Array.from(data) });

@@ -906,7 +906,8 @@ Fullscreen uses only the standard Fullscreen API and only exits when this viewer
 `document.fullscreenElement`. `state.fullscreen` is browser-authoritative; `state.canFullscreen`
 reflects feature, capability, active-view, and lifecycle gates. Expected command failures are returned
 as frozen results and published through `pdf:fullscreenerror`; ownership changes publish
-`pdf:fullscreenchange`.
+`pdf:fullscreenchange`. Entering or leaving fullscreen preserves the current viewport page through
+any resulting resize-driven refit.
 
 Presentation mode requires a ready active document. It captures the current layout, fit intent,
 rotation, explicit zoom, and reading position, then applies single-page contain fit. It requests
@@ -922,9 +923,11 @@ navigate. Continuous drag scrolling, pinch zoom, and layout, fit, and zoom mutat
 Search, outline, thumbnails, links, annotations, page-number
 jumps, document queries, downloads, forms, and layers remain operational, but destinations collapse
 to their page row and presentation navigation does not modify document-local Back/Forward history.
-The currently published page is preserved when entering. Exiting restores the original layout, fit,
-rotation, and explicit zoom around the page reached in presentation; when that page did not change,
-the exact original scroll position is restored.
+The page at the viewport's current reading position is preserved when entering, including before a
+scroll has published updated state and when either page of a spread is current. Intentional navigation
+changes the authoritative presentation page; fullscreen resizing and delayed layout measurements do
+not. Exiting restores the original layout, fit, rotation, and explicit zoom around the page reached in
+presentation; when that page did not change, the exact original scroll position is restored.
 
 Swipe or make a quick vertical primary-mouse fling up/down, or tap/click the lower/upper viewport
 third, to move silently to the next/previous page.

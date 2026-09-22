@@ -29,6 +29,7 @@
   .pdf-presentation-mode .pdf-container,
   :scope.pdf-container.pdf-presentation-mode {
     overflow: hidden;
+    overflow-anchor: none;
     overscroll-behavior: none;
     scroll-behavior: auto;
   }
