@@ -7,7 +7,6 @@ in [USAGE.md](./USAGE.md).
 
 ## Contents
 
-- [Contents](#contents)
 - [UI modes](#ui-modes)
   - [Functional text-layer CSS](#functional-text-layer-css)
   - [`default`](#default)
