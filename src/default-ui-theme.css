@@ -854,7 +854,9 @@
     position: relative;
     background: #15171a;
   }
-  .pdf-default-ui.pdf-presentation-mode .pdf-controls,
+  .pdf-default-ui.pdf-presentation-mode .pdf-controls {
+    display: none;
+  }
   .pdf-default-ui.pdf-presentation-mode .pdf-sidebar {
     visibility: hidden;
     pointer-events: none;

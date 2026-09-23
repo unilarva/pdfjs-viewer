@@ -524,7 +524,9 @@ replaces active/inactive labels in package-generated UI.
 
 Functional mode classes are `.pdf-fullscreen`, `.pdf-presentation-mode`, and
 `.pdf-presentation-controls-visible`. Import `core.css` for custom/headless row geometry and scroll
-suppression. Presentation controls should use opacity and pointer-event transitions while active;
+suppression. Custom flex or grid layouts should remove their normal control bar from layout while
+`.pdf-presentation-mode` is active so the document viewport uses the full available height.
+Presentation controls should use opacity and pointer-event transitions while active;
 do not apply `hidden`, `visibility: hidden`, or `inert` merely because the inactivity timer elapsed,
 because focused controls must remain available to keyboard users. Disable those transitions under
 `prefers-reduced-motion: reduce`, as the generated theme does.

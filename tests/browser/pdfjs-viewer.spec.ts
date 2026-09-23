@@ -163,6 +163,18 @@ test("@mobile fullscreen and presentation modes use exact-root ownership and dis
   await expect
     .poll(() => page.evaluate(() => window.fixture.primary.state.fitMode))
     .toBe("contain");
+  const presentationLayout = await root.evaluate(element => {
+    const shell = element.querySelector<HTMLElement>(".pdf-default-ui")!;
+    const controls = shell.querySelector<HTMLElement>(".pdf-controls")!;
+    const container = shell.querySelector<HTMLElement>(".pdf-container")!;
+    return {
+      controlsDisplay: getComputedStyle(controls).display,
+      shellHeight: shell.clientHeight,
+      containerHeight: container.clientHeight,
+    };
+  });
+  expect(presentationLayout.controlsDisplay).toBe("none");
+  expect(presentationLayout.containerHeight).toBe(presentationLayout.shellHeight);
   await page.evaluate(() => window.fixture.primary.navigateToPage(1));
   await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(1);
   await expect(root.locator(".pdf-container")).toBeFocused();
