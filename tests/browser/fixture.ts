@@ -6009,12 +6009,13 @@ window.fixture = {
     document.body.append(frame);
     await new Promise<void>(resolve => {
       frame.addEventListener("load", () => resolve(), { once: true });
-      frame.src = "about:blank";
+      frame.src = "/iframe-fixture.html";
     });
     const frameDocument = frame.contentDocument;
     const frameWindow = frame.contentWindow;
     if (!frameDocument || !frameWindow) throw new Error("Iframe document unavailable");
     const host = frameDocument.createElement("section");
+    host.className = "viewer-host";
     frameDocument.body.append(host);
     const ready = new Promise<void>((resolve, reject) => {
       host.addEventListener("pdf:ready", () => resolve(), { once: true });
@@ -6034,13 +6035,11 @@ window.fixture = {
       container?.dispatchEvent(
         new FrameKeyboardEvent("keydown", { key: "PageDown", bubbles: true }),
       );
-      for (
-        let frameCount = 0;
-        frameCount < 30 && viewer.state.currentPage === before;
-        frameCount++
-      ) {
+      const navigationDeadline = performance.now() + 2_000;
+      while (viewer.state.currentPage === before && performance.now() < navigationDeadline) {
         await new Promise<void>(resolve => frameWindow.requestAnimationFrame(() => resolve()));
       }
+      const viewerScopedKeyRouted = viewer.state.currentPage === before + 1;
       const FrameMouseEvent = (frameWindow as Window & typeof globalThis).MouseEvent;
       container?.dispatchEvent(
         new FrameMouseEvent("mousedown", { bubbles: true, button: 0, clientX: 100, clientY: 120 }),
@@ -6073,7 +6072,7 @@ window.fixture = {
       return {
         ready: viewer.state.status === "ready",
         ownerDocumentUsed: container?.ownerDocument === frameDocument,
-        viewerScopedKeyRouted: viewer.state.currentPage === before + 1,
+        viewerScopedKeyRouted,
         ownerWindowDragStopped: dragStarted && container?.style.cursor === "",
         shadowScrollOwnerUsed: !shadowScrollEvent.defaultPrevented,
       };

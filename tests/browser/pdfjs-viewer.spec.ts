@@ -9,9 +9,33 @@ test.beforeEach(async ({ page }, testInfo) => {
   page.on("pageerror", error =>
     console.error(`fixture page error: ${error.stack ?? error.message}`),
   );
-  page.on("console", message =>
-    console.log(`fixture console ${message.type()}: ${message.text()}`),
-  );
+  page.on("console", message => {
+    const text = message.text();
+    const isExpectedCspDiagnostic =
+      testInfo.tags.includes("@csp") &&
+      message.type() === "error" &&
+      [
+        "requires 'TrustedHTML' assignment",
+        "blocked assigning to an injection sink",
+        "requires a TrustedHTML value",
+        "Refused to apply a stylesheet",
+      ].some(fragment => text.includes(fragment));
+    const isExpectedInvalidDocumentDiagnostic =
+      testInfo.title ===
+        "load results, events, cleanup, and destroyed behavior form one terminal contract" &&
+      message.type() === "warning" &&
+      text === "Warning: Indexing all PDF objects";
+    const isExpectedIframeLayoutDiagnostic =
+      testInfo.title === "viewer-scoped keyboard routing uses the iframe owner document" &&
+      message.type() === "warning" &&
+      text.includes("Layout was forced before the page was fully loaded");
+    if (
+      !isExpectedCspDiagnostic &&
+      !isExpectedInvalidDocumentDiagnostic &&
+      !isExpectedIframeLayoutDiagnostic
+    )
+      console.log(`fixture console ${message.type()}: ${text}`);
+  });
   await page.goto(testInfo.tags.includes("@csp") ? "/csp" : "/");
   await expect(page.locator("#primary")).toHaveAttribute("data-status", "ready");
 });
@@ -3929,6 +3953,16 @@ test("inactive viewers reduce their render window and restore it when active", a
 });
 
 test("hidden owner documents reduce rendering without changing host activity", async ({ page }) => {
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        search: window.fixture.primary.state.searchPreparation,
+        outline: window.fixture.primary.state.outlinePreparation,
+        attachments: window.fixture.primary.state.attachmentsPreparation,
+      })),
+    )
+    .toEqual({ search: "ready", outline: "ready", attachments: "ready" });
+
   const stateChangesBefore = await page.evaluate(() => window.fixture.states.length);
   await page.evaluate(() => {
     const target = window as Window & { fixtureVisibilityDescriptor?: PropertyDescriptor };

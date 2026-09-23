@@ -3,12 +3,19 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { makeDemoSamplePdf } from "../../scripts/demo-pdf.mjs";
 
 test("demo sample PDF has its book outline, attachments, and odd-page chapter headings", async () => {
-  const loadingTask = getDocument({ data: new Uint8Array(makeDemoSamplePdf()) });
+  const standardFontDataUrl = fileURLToPath(
+    new URL("standard_fonts/", import.meta.resolve("pdfjs-dist/package.json")),
+  );
+  const loadingTask = getDocument({
+    data: new Uint8Array(makeDemoSamplePdf()),
+    standardFontDataUrl,
+  });
   try {
     const pdf = await loadingTask.promise;
     assert.equal(pdf.numPages, 8);

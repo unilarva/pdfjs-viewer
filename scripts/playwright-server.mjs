@@ -118,7 +118,12 @@ function makeAnnotationPdf() {
   const makeEmbeddedFile = value =>
     `<< /Type /EmbeddedFile /Length ${Buffer.byteLength(value, "binary")} >>\nstream\n${value}\nendstream`;
   const content = "BT /F1 18 Tf 36 756 Td (Rich annotation fixture) Tj ET";
-  const annotations = Array.from({ length: 21 }, (_, index) => `${8 + index} 0 R`).join(" ");
+  const annotations = [
+    ...Array.from({ length: 12 }, (_, index) => 8 + index),
+    ...Array.from({ length: 7 }, (_, index) => 22 + index),
+  ]
+    .map(objectId => `${objectId} 0 R`)
+    .join(" ");
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [7 0 R] /D << /BaseState /ON /ON [7 0 R] /Order [7 0 R] >> >> >>",
     "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>",
@@ -269,6 +274,17 @@ function makeReplacementPdf(width = 360, height = 540, label = "Replacement docu
   return Buffer.from(replacementPdf, "binary");
 }
 
+function makeInvalidPdf() {
+  const object = "<< /Type /Catalog /Pages 2 0 R >>";
+  let invalidPdf = "%PDF-1.7\n%âãÏÓ\n";
+  const objectOffset = Buffer.byteLength(invalidPdf, "binary");
+  invalidPdf += `1 0 obj\n${object}\nendobj\n`;
+  const xref = Buffer.byteLength(invalidPdf, "binary");
+  invalidPdf += `xref\n0 2\n0000000000 65535 f \n${String(objectOffset).padStart(10, "0")} 00000 n \n`;
+  invalidPdf += `trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(invalidPdf, "binary");
+}
+
 function makePrintLayoutPdf(sizes, pageLayout = null, rotations = []) {
   const pageObjectIds = Array.from({ length: sizes.length }, (_, index) => 3 + index * 2);
   const fontObjectId = 3 + sizes.length * 2;
@@ -305,6 +321,7 @@ const annotationPdf = makeAnnotationPdf();
 const acroFormPdf = makeAcroFormPdf();
 const queuePdf = makeQueuePdf();
 const replacementPdf = makeReplacementPdf();
+const invalidPdf = makeInvalidPdf();
 const giantPdf = makeReplacementPdf(12_000, 12_000, "Giant source document A");
 const a5 = [(148 * 72) / 25.4, (210 * 72) / 25.4];
 const a4 = [(210 * 72) / 25.4, (297 * 72) / 25.4];
@@ -316,6 +333,9 @@ const printA4ReplacementPdf = makePrintLayoutPdf([a4, a4], "TwoPageRight");
 const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <link rel="stylesheet" href="/default-ui.css">
 </head><body><main id="primary" class="viewer-host"></main><script type="module" src="/fixture.js"></script></body></html>`;
+const iframeHtml = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<link rel="stylesheet" href="/default-ui.css">
+</head><body></body></html>`;
 
 const mime = new Map([
   [".js", "text/javascript"],
@@ -338,6 +358,11 @@ createServer(async (req, res) => {
         "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; font-src 'self' data:; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; trusted-types pdfjs-viewer-worker; require-trusted-types-for 'script'",
       );
     res.end(html);
+    return;
+  }
+  if (url.pathname === "/iframe-fixture.html") {
+    res.setHeader("Content-Type", "text/html");
+    res.end(iframeHtml);
     return;
   }
   if (url.pathname === "/default-ui.css") {
@@ -393,7 +418,8 @@ createServer(async (req, res) => {
   }
   if (url.pathname === "/invalid-fixture.pdf") {
     res.setHeader("Content-Type", "application/pdf");
-    res.end("%PDF-1.7\ninvalid fixture");
+    res.setHeader("Content-Length", invalidPdf.length);
+    res.end(invalidPdf);
     return;
   }
   if (url.pathname === "/queue-fixture.pdf") {
