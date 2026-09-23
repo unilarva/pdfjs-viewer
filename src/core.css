@@ -40,6 +40,13 @@
     margin-block-end: 0 !important;
     align-items: center;
   }
+  :scope.pdf-presentation-mode .pdf-row.pdf-presentation-page-outgoing,
+  .pdf-presentation-mode .pdf-row.pdf-presentation-page-outgoing,
+  :scope.pdf-container.pdf-presentation-mode .pdf-row.pdf-presentation-page-outgoing {
+    position: relative;
+    z-index: 2;
+    pointer-events: none;
+  }
   :scope.pdf-presentation-mode.pdf-presentation-controls-visible .pdf-container,
   .pdf-presentation-mode.pdf-presentation-controls-visible .pdf-container {
     cursor: default;

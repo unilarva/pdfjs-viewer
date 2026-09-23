@@ -242,6 +242,8 @@ const SCROLL_MOTION_IDLE_MS = 120;
 const SMOOTH_NAVIGATION_MIN_DURATION_MS = 180;
 const SMOOTH_NAVIGATION_MAX_DURATION_MS = 500;
 const SMOOTH_NAVIGATION_PX_PER_MS = 4;
+const PRESENTATION_PAGE_TRANSITION_MS = 180;
+const PRESENTATION_PAGE_OUTGOING_CLASS = "pdf-presentation-page-outgoing";
 
 type SmoothNavigation = {
   targetTop: number;
@@ -370,6 +372,9 @@ export class PdfjsViewer {
   #presentationViewTransitionDepth = 0;
   #presentationResizePending = false;
   #presentationPageAnchor: number | null = null;
+  #presentationPageAnimations: readonly Animation[] = [];
+  #presentationPageOutgoingRow: HTMLElement | null = null;
+  #presentationPageTransitionGeneration = 0;
   #presentationSnapshot: Readonly<{
     documentGeneration: number;
     entryPage: number;
@@ -2889,6 +2894,7 @@ export class PdfjsViewer {
         this.#presentationPageAnchor ??
         this.#documentView.captureDocumentLocation()?.page ??
         this.#lastEmittedPage;
+      this.#cancelPresentationPageTransition();
       this.#cancelPendingPresentationFullscreenRequest();
       this.#presentationMode = false;
       this.#presentationInput.setActive(false);
@@ -2987,6 +2993,7 @@ export class PdfjsViewer {
   #cancelPresentationMode(emit: boolean): void {
     if (!this.#presentationMode && !this.#presentationSnapshot) return;
     const exitFullscreen = this.#viewerFullscreen?.active ?? false;
+    this.#cancelPresentationPageTransition();
     this.#cancelPendingPresentationFullscreenRequest();
     this.#presentationOperationGeneration++;
     this.#presentationMode = false;
@@ -3199,6 +3206,64 @@ export class PdfjsViewer {
       this.#presentationPageAnchor ?? this.#lastEmittedPage,
     );
     this.#scrollToRow(row + delta, false, false);
+  }
+
+  /** Cancels any in-flight visual handoff between presentation pages. */
+  #cancelPresentationPageTransition(): void {
+    this.#presentationPageTransitionGeneration++;
+    for (const animation of this.#presentationPageAnimations) animation.cancel();
+    this.#presentationPageAnimations = [];
+    this.#presentationPageOutgoingRow?.classList.remove(PRESENTATION_PAGE_OUTGOING_CLASS);
+    this.#presentationPageOutgoingRow = null;
+  }
+
+  /** Fades an outgoing presentation row over its fully visible successor. */
+  #startPresentationPageTransition(sourceIndex: number, targetIndex: number): void {
+    this.#cancelPresentationPageTransition();
+    if (
+      !this.#presentationMode ||
+      sourceIndex === targetIndex ||
+      (this.#accessibility.respectReducedMotion &&
+        this.#ownerWindow.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
+    )
+      return;
+
+    const source = this.#documentView.rowElementAt(sourceIndex);
+    const target = this.#documentView.rowElementAt(targetIndex);
+    if (!source || !target || typeof source.animate !== "function") return;
+
+    const translateY = target.offsetTop - source.offsetTop;
+    source.classList.add(PRESENTATION_PAGE_OUTGOING_CLASS);
+    this.#presentationPageOutgoingRow = source;
+    const options: KeyframeAnimationOptions = {
+      duration: PRESENTATION_PAGE_TRANSITION_MS,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+      fill: "both",
+    };
+    const animations = [
+      source.animate(
+        [
+          { opacity: 1, transform: `translateY(${translateY}px)` },
+          { opacity: 0, transform: `translateY(${translateY}px)` },
+        ],
+        options,
+      ),
+    ];
+    const generation = this.#presentationPageTransitionGeneration;
+    this.#presentationPageAnimations = animations;
+    void Promise.all(animations.map(animation => animation.finished))
+      .catch(() => undefined)
+      .then(() => {
+        if (
+          generation !== this.#presentationPageTransitionGeneration ||
+          this.#presentationPageAnimations !== animations
+        )
+          return;
+        for (const animation of animations) animation.cancel();
+        this.#presentationPageAnimations = [];
+        source.classList.remove(PRESENTATION_PAGE_OUTGOING_CLASS);
+        this.#presentationPageOutgoingRow = null;
+      });
   }
 
   // --- Public layout, rendering, zoom, and navigation controls ---
@@ -6475,11 +6540,20 @@ export class PdfjsViewer {
   #scrollToRow(index: number, smooth = true, trackMotion = true): void {
     this.#scrollRequestGeneration++;
     index = this.#clamp(index, 0, this.#documentView.rows.length - 1);
+    const presentationSourceIndex = this.#presentationMode
+      ? this.#documentView.currentRowIndex(this.#presentationPageAnchor ?? this.#lastEmittedPage)
+      : null;
     if (this.#presentationMode) {
       this.#presentationPageAnchor = this.#documentView.rows[index]?.[0] ?? 1;
     }
     if (!smooth) {
       this.#cancelSmoothNavigation();
+      if (presentationSourceIndex != null) {
+        // Establish the outgoing compositor layer while its row is still visible.
+        // Forward navigation may otherwise cull the source before it is translated
+        // back over the newly selected row.
+        this.#startPresentationPageTransition(presentationSourceIndex, index);
+      }
       // Assignment is synchronous, allowing API navigation to reprioritize before
       // the deferred scroll event gives old speculative work another admission slot.
       this.#documentView.scrollToRow(index, false, trackMotion);

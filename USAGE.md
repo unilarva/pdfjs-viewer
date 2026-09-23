@@ -919,7 +919,9 @@ explicit presentation exit also exits fullscreen. Activation order does not chan
 While presenting, Arrow keys, Page Up/Down, Space and Shift+Space move exactly one page; Home/End
 jump to the first/last page and Escape exits. Vertically dominant mouse-wheel/trackpad input is
 accumulated and throttled to one discrete page step; horizontal or Ctrl/Command wheel input does not
-navigate. Continuous drag scrolling, pinch zoom, and layout, fit, and zoom mutations are unavailable.
+navigate. Page changes fade the outgoing page over the fully visible incoming page unless the
+configured reduced-motion policy suppresses animation. Continuous drag scrolling, pinch zoom, and
+layout, fit, and zoom mutations are unavailable.
 Search, outline, thumbnails, links, annotations, page-number
 jumps, document queries, downloads, forms, and layers remain operational, but destinations collapse
 to their page row and presentation navigation does not modify document-local Back/Forward history.

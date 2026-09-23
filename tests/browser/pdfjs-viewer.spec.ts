@@ -758,6 +758,49 @@ test("presentation mode preserves a viewport page before deferred page state is 
   await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(3);
 });
 
+test("@mobile presentation navigation fades the outgoing page unless reduced motion is requested", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.evaluate(() => window.fixture.primary.enterPresentationMode());
+
+  const transition = await page.evaluate(() => {
+    window.fixture.primary.navigateToPage(2);
+    const source = document
+      .querySelector<HTMLElement>('#primary .pdf-page[data-page="1"]')
+      ?.closest<HTMLElement>(".pdf-row");
+    const target = document
+      .querySelector<HTMLElement>('#primary .pdf-page[data-page="2"]')
+      ?.closest<HTMLElement>(".pdf-row");
+    const sourceAnimation = source?.getAnimations()[0];
+    return {
+      sourceFrames: sourceAnimation?.effect?.getKeyframes(),
+      sourceDuration: sourceAnimation?.effect?.getTiming().duration,
+      sourcePosition: source ? getComputedStyle(source).position : null,
+      sourceZIndex: source ? getComputedStyle(source).zIndex : null,
+      targetAnimationCount: target?.getAnimations().length,
+    };
+  });
+
+  expect(transition.sourceDuration).toBe(180);
+  expect(transition.sourceFrames?.map(frame => frame.opacity)).toEqual(["1", "0"]);
+  expect(transition.sourceFrames?.every(frame => frame.transform !== "none")).toBe(true);
+  expect(transition.sourcePosition).toBe("relative");
+  expect(transition.sourceZIndex).toBe("2");
+  expect(transition.targetAnimationCount).toBe(0);
+
+  await page.waitForTimeout(200);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const reducedAnimationCount = await page.evaluate(() => {
+    window.fixture.primary.navigateToPage(3);
+    return Array.from(document.querySelectorAll<HTMLElement>("#primary .pdf-row")).reduce(
+      (count, row) => count + row.getAnimations().length,
+      0,
+    );
+  });
+  expect(reducedAnimationCount).toBe(0);
+});
+
 test("presentation transition owns resize reflow until its page is committed", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.evaluate(() => {
