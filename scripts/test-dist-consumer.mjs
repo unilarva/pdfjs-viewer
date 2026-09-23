@@ -200,7 +200,7 @@ try {
     for (const variant of ["standard", "legacy"]) {
       const viteRoot = resolve(consumer, variant);
       await mkdir(viteRoot);
-      await cp(resolve(fixtures, "vite"), viteRoot, { recursive: true });
+      await cp(resolve(fixtures, "vite/index.html"), resolve(viteRoot, "index.html"));
       await mkdir(resolve(viteRoot, "public"));
       await writeFile(resolve(viteRoot, "public", "fixture.pdf"), createMinimalPdf());
       await writeFile(resolve(viteRoot, "main.ts"), variantMain(variant));
