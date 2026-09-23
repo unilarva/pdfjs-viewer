@@ -98,7 +98,7 @@
     "test:browser:mobile:webkit": "node ./scripts/playwright-run.mjs --project=mobile-webkit --workers=1",
     "test:browser:mobile:webkit:docker": "node ./scripts/test-webkit-docker.mjs --project=mobile-webkit",
     "test:browser:install": "playwright install chromium firefox webkit",
-    "typecheck": "tsc -p tsconfig.build.json --noEmit --emitDeclarationOnly false",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit --emitDeclarationOnly false && tsc -p tests/browser/tsconfig.json && tsc -p tests/package-consumer/vite/tsconfig.json",
     "validate": "npm run format:check && npm run test:unit && npm run validate:architecture && node ./scripts/validate-package.mjs",
     "validate:architecture": "node ./scripts/validate-architecture.mjs",
     "validate:dist": "node ./scripts/validate-dist.mjs && npm run validate:tsdoc && npm run test:consumer",

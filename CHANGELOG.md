@@ -11,6 +11,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
   overlapped the mode transaction.
 - Removed expected browser and PDF.js warning noise from test fixtures.
 - Stabilized document-visibility and iframe keyboard-routing tests.
+- Added scoped TypeScript projects for the Playwright and Vite test harnesses so editor diagnostics
+  include their fixture globals, Node runtime types, and stylesheet declaration.
 
 ## 0.7.0
 

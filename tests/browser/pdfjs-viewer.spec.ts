@@ -773,9 +773,11 @@ test("@mobile presentation navigation fades the outgoing page unless reduced mot
       .querySelector<HTMLElement>('#primary .pdf-page[data-page="2"]')
       ?.closest<HTMLElement>(".pdf-row");
     const sourceAnimation = source?.getAnimations()[0];
+    const sourceEffect = sourceAnimation?.effect;
     return {
-      sourceFrames: sourceAnimation?.effect?.getKeyframes(),
-      sourceDuration: sourceAnimation?.effect?.getTiming().duration,
+      sourceFrames:
+        sourceEffect instanceof KeyframeEffect ? sourceEffect.getKeyframes() : undefined,
+      sourceDuration: sourceEffect?.getTiming().duration,
       sourcePosition: source ? getComputedStyle(source).position : null,
       sourceZIndex: source ? getComputedStyle(source).zIndex : null,
       targetAnimationCount: target?.getAnimations().length,
