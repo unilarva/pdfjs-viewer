@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+## 0.7.2
+
 - Fixed release workflow tag validation failing before package qualification because of shell quoting.
 - Added a fast, reduced-motion-aware fade from the outgoing page to the fully visible incoming page
   during presentation navigation.
