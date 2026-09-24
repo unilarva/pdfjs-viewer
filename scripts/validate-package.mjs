@@ -287,7 +287,11 @@ try {
     "publish job must reverify the downloaded candidate checksum",
   );
   expect(
-    releaseWorkflow.includes("Verify exact release tag"),
+    releaseWorkflow.includes("Verify exact release tag") &&
+      releaseWorkflow.includes(
+        `package_version="$(node -p 'require("./package.json").version')"`,
+      ) &&
+      releaseWorkflow.includes('test "$GITHUB_REF_NAME" = "v$package_version"'),
     "release workflow must verify tag/version equality",
   );
   expect(
