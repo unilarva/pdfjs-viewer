@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+## 0.7.1
+
 - Added a fast, reduced-motion-aware fade from the outgoing page to the fully visible incoming page
   during presentation navigation.
 - Fixed presentation mode entry and exit jumping away from the current viewport page when page

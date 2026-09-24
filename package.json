@@ -1,6 +1,6 @@
 {
   "name": "@unilarva/pdfjs-viewer",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "type": "module",
   "description": "Framework-independent, TypeScript-first browser PDF viewer built on Mozilla PDF.js, with a responsive default UI plus custom and headless modes.",
   "keywords": [
