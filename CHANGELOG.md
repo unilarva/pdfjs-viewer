@@ -4,6 +4,11 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Maintenance only: expanded package qualification to typecheck unit, browser, and consumer
+  fixtures; added a complete `test:everything` release gate; aligned test tooling with the minimum
+  supported Node 22 line; and hardened CI/release validation. This does not change the public API,
+  runtime behavior, declarations, exports, or package output.
+
 ## 0.7.2
 
 - Fixed release workflow tag validation failing before package qualification because of shell quoting.

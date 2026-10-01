@@ -22,7 +22,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run validate
-      - run: npm run typecheck
 
   pdfjs-compatibility:
     runs-on: ubuntu-latest

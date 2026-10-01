@@ -6,10 +6,12 @@ import { constants } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseExactPdfjsVersionUnion } from "./pdfjs-version-manifest.mjs";
+import { TEST_EVERYTHING_COMMANDS } from "./test-everything-commands.mjs";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJsonPath = resolve(packageDir, "package.json");
 const pkg = JSON.parse(await readFile(packageJsonPath, "utf8"));
+const packageLock = JSON.parse(await readFile(resolve(packageDir, "package-lock.json"), "utf8"));
 const versionPolicySource = await readFile(
   resolve(packageDir, "src/pdfjs-version-policy.ts"),
   "utf8",
@@ -178,7 +180,38 @@ expect(
   pkg.scripts?.["format:check"] === "prettier --check .",
   "format:check must verify formatting without modifying files",
 );
-expect(pkg.scripts?.validate?.includes("npm run format:check"), "validate must enforce formatting");
+const typecheckScopes = ["src", "test", "browser", "consumer"];
+expect(
+  pkg.scripts?.validate ===
+    "npm run format:check && npm run typecheck && npm run test:unit && npm run validate:architecture && node ./scripts/validate-package.mjs",
+  "validate must run the exact complete source gate",
+);
+expect(
+  pkg.scripts?.typecheck ===
+    typecheckScopes.map(scope => `npm run typecheck:${scope}`).join(" && "),
+  "typecheck must run every environment-scoped static gate",
+);
+for (const scope of typecheckScopes) {
+  expect(
+    typeof pkg.scripts?.[`typecheck:${scope}`] === "string",
+    `typecheck:${scope} must be declared`,
+  );
+}
+const expectedNodeTypesVersion = "22.13.17";
+const nodeTypesVersion = pkg.devDependencies?.["@types/node"];
+expect(pkg.engines?.node === ">=22.13.0", "Node engine floor must remain 22.13.0");
+expect(
+  nodeTypesVersion === expectedNodeTypesVersion,
+  `@types/node must stay on the minimum-runtime 22.13 line (${expectedNodeTypesVersion})`,
+);
+expect(
+  packageLock.packages?.[""]?.devDependencies?.["@types/node"] === nodeTypesVersion,
+  "package-lock root must match the direct @types/node development dependency",
+);
+expect(
+  packageLock.packages?.["node_modules/@types/node"]?.version === nodeTypesVersion,
+  "package-lock must resolve the exact direct @types/node development dependency",
+);
 expect(
   pkg.scripts?.["validate:dist"]?.includes("npm run test:consumer"),
   "validate:dist must run the built-package consumer test",
@@ -207,6 +240,26 @@ expect(
   typeof pkg.scripts?.["test:browser:mobile:webkit:docker"] === "string",
   "local mobile WebKit Docker script must be declared",
 );
+expect(
+  pkg.scripts?.["test:everything"] === "node ./scripts/test-everything.mjs",
+  "test:everything must run the complete-test orchestrator",
+);
+const expectedEverythingCommands = [
+  "validate",
+  "test:compatibility",
+  "build",
+  "validate:dist",
+  "test:browser",
+  "test:browser:mobile:chromium",
+  "test:browser:mobile:firefox",
+  "test:browser:webkit:docker",
+  "test:browser:mobile:webkit:docker",
+  "test:pack",
+];
+expect(
+  JSON.stringify(TEST_EVERYTHING_COMMANDS) === JSON.stringify(expectedEverythingCommands),
+  "test:everything command manifest must contain the exact complete package gate",
+);
 
 for (const [path, description] of [
   ["README.md", "README"],
@@ -227,6 +280,8 @@ for (const [path, description] of [
   ["scripts/test-dist-consumer.mjs", "built-package consumer test"],
   ["scripts/validate-public-tsdoc.mjs", "public API TSDoc validator"],
   ["scripts/test-pack-candidate.mjs", "single-candidate package gate"],
+  ["scripts/test-everything.mjs", "complete local test orchestrator"],
+  ["scripts/test-everything-commands.mjs", "complete local test command manifest"],
   ["scripts/demo-host.mjs", "demo host and policy configuration"],
   ["scripts/demo-pdf.mjs", "demo sample PDF generator"],
   ["scripts/demo-server.mjs", "demo server"],
@@ -248,8 +303,8 @@ try {
     readFile(resolve(packageDir, ".github/workflows/release.yml"), "utf8"),
   ]);
   expect(
-    ciWorkflow.includes("npm run validate") && ciWorkflow.includes("npm run typecheck"),
-    "GitHub validation must run the complete source gate and typecheck",
+    ciWorkflow.includes("npm run validate"),
+    "GitHub validation must run the complete source gate",
   );
   expect(
     ciWorkflow.includes("chromium:non-csp") && ciWorkflow.includes("firefox:non-csp"),
@@ -299,15 +354,9 @@ try {
     "release workflow must retain the exact-pack candidate",
   );
   expect(
-    releaseWorkflow.includes("npm run test:pack"),
-    "release workflow must run the exact-pack gate",
+    releaseWorkflow.includes("npm run test:everything"),
+    "release workflow must run the complete aggregate test gate",
   );
-  for (const command of [
-    "test:browser:mobile:chromium",
-    "test:browser:mobile:firefox",
-    "test:browser:mobile:webkit:docker",
-  ])
-    expect(releaseWorkflow.includes(`npm run ${command}`), `release workflow must run ${command}`);
   expect(
     releaseWorkflow.includes('npm publish "${{ steps.candidate.outputs.tarball }}"'),
     "release workflow must publish the verified tested tarball",

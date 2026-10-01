@@ -15,17 +15,13 @@ default:
 validate:
   stage: validate
   script:
-    - npm run test:unit
-    - npm run typecheck
-    - npm run validate:architecture
-    - node ./scripts/validate-package.mjs
+    - npm run validate
 
 validate-node-minimum:
   stage: validate
   image: node:22.13-bookworm
   script:
     - npm run validate
-    - npm run typecheck
 
 pdfjs-compatibility:
   stage: validate

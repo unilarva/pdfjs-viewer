@@ -22,19 +22,7 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$package_version"
       - run: npm ci
       - run: npx playwright install --with-deps chromium firefox
-      - run: npm run validate
-      - run: npm run typecheck
-      - run: npm run test:compatibility
-      - run: npm run build
-      - run: npm run validate:dist
-      - run: npm run test:browser:chromium:non-csp
-      - run: npm run test:browser:firefox:non-csp
-      - run: npm run test:browser:csp
-      - run: npm run test:browser:mobile:chromium
-      - run: npm run test:browser:mobile:firefox
-      - run: npm run test:browser:webkit:docker
-      - run: npm run test:browser:mobile:webkit:docker
-      - run: PDFJS_VIEWER_CANDIDATE_DIR="$RUNNER_TEMP/pdfjs-viewer-candidate" npm run test:pack
+      - run: PDFJS_VIEWER_CANDIDATE_DIR="$RUNNER_TEMP/pdfjs-viewer-candidate" npm run test:everything
       - name: Verify one exact release candidate
         env:
           PDFJS_VIEWER_CANDIDATE_DIR: ${{ runner.temp }}/pdfjs-viewer-candidate

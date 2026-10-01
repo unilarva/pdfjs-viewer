@@ -203,7 +203,7 @@ test("page gaps follow displayed page size across fit and explicit zoom", () => 
       preferredLayout: null,
     });
     const fittedScale = view.scale;
-    const row = view.contentElement?.children[0];
+    const row = view.contentElement?.children[0] as HTMLElement | undefined;
     assert.equal(row?.style.gap, "6px");
     assert.equal(row?.style.margin, "0 auto 8px auto");
 

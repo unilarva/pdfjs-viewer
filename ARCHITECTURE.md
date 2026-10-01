@@ -1611,13 +1611,22 @@ this guide. Controlled-native print qualification is documented in
 [`DEVICE-COMPATIBILITY.md`](./DEVICE-COMPATIBILITY.md).
 
 Contributor tooling requires Node `>=22.13.0`. From the package directory,
-install the exact lockfile, typecheck, and build:
+install the exact lockfile, run the complete source validation gate, and build:
 
 ```sh
 npm ci
-npm run typecheck
+npm run validate
 npm run build
 ```
+
+`npm run typecheck` is the aggregate static gate beneath validation. It checks published source,
+unit tests, the Playwright browser harness, and the Vite source-consumer fixture through separate
+TypeScript projects so each environment receives only its own globals and module-resolution rules.
+`tsconfig.build.json` remains the declaration-only published-source project;
+`tsconfig.test.json` checks `src/` and `tests/unit/`, permits inference for the few imported `.mjs`
+demo/test helpers, and emits nothing. Browser and consumer fixtures retain their scoped configs.
+The esbuild-based unit runner remains a separate runtime concern: bundling and executing a test is
+not a substitute for TypeScript semantic checking.
 
 To inspect the viewer interactively, start the development demo. It binds only
 `127.0.0.1` by default:
@@ -1656,6 +1665,12 @@ npm run test:browser:install
 npm run test:browser
 ```
 
+After the browser installation, `npm run test:everything` is the single complete local package
+gate. It runs source validation, both qualified PDF.js compatibility builds, the package build and
+installed-consumer checks, desktop Chromium/Firefox including CSP, mobile Chromium/Firefox,
+desktop/mobile WebKit through Docker, and the exact publishable-tarball gate. It intentionally
+requires Docker and does not install browsers or system dependencies itself.
+
 Use `npm run test:browser:chromium` for a fast check, `npm run test:browser:mobile:chromium`,
 `npm run test:browser:mobile:firefox`, and `npm run test:browser:mobile:webkit` for the
 individual synthetic-touch projects. `npm run test:browser:mobile:webkit:docker` runs the
@@ -1678,3 +1693,9 @@ complete-owner checklist, lifecycle ordering, procedure semantics, facade bounda
 and future extraction acceptance conditions remain documentary because method-name,
 size, or host-shape assertions would be brittle
 and would reward superficial compliance rather than sound ownership.
+
+`npm run validate` is the complete source gate: formatting, the aggregate environment-scoped
+typecheck, unit execution, architecture guardrails, and package metadata validation. Built-output
+and installed-consumer qualification remain in `validate:dist` because they require the emitted
+artifact. CI and release workflows call these aggregate gates rather than duplicating their
+individual commands.
