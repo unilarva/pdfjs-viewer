@@ -47,6 +47,13 @@ the package's default theme.
 > versions, review release notes and `peerDependencies` before upgrading, and treat the
 > peer dependency set, not this package version, as the PDF.js compatibility contract.
 
+**PDF.js support policy:** The priority is supporting the latest PDF.js release after
+qualification. Older releases are retained only when the same implementation supports
+them without version-specific shims, fallback branches, or legacy adapters. While this
+package is pre-1.0, a minor release may drop older PDF.js versions. Consumers can keep
+an exact pinned viewer/PDF.js pair and upgrade both together, following release notes
+and the new viewer release's `peerDependencies`.
+
 ## Guides
 
 - [Usage guide](./USAGE.md): loading, lifecycle, options, profiles, public API, events,

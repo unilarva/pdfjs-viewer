@@ -1551,6 +1551,15 @@ use `6.3.*`, `^6.3.289`, or another open range: PDF.js patch releases can change
 underdocumented DOM, CSS, and private surfaces used by forms, annotations, XFA, optional
 content, and printing.
 
+Prioritize qualifying the latest PDF.js release. Retain older qualified releases only
+while the same implementation supports them without version-specific shims, fallback
+branches, or legacy adapters; do not add scaffolding solely to preserve older-version
+support. If adapting to the latest release makes an older release incompatible, remove
+the older release from the qualified set and peer union and document the required
+upgrade pairing. During pre-1.0 development, dropping older PDF.js versions in a minor
+release is permitted. Consumers can pin an exact viewer/PDF.js pair and upgrade both
+together. Every retained release must still pass qualification.
+
 1. Discover the candidate exact release and its standard and legacy display/worker build
    pair. Keep the API and worker from that same installed package tree. Read the candidate's
    entry in the [PDF.js release notes](https://github.com/mozilla/pdf.js/releases) and compare
@@ -1578,8 +1587,9 @@ content, and printing.
    a behavior-critical contract used locally. Sentinels are drift alarms,
    not proof of emitted DOM shape. Record every intentional divergence with an identifier
    and reason. Do not turn this into a full stylesheet equality test.
-4. On a dedicated qualification branch, provisionally append the candidate to
+4. On a dedicated qualification branch, provisionally add the candidate to
    `PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS` and the ordered exact `pdfjs-dist` peer union.
+   Remove older releases that would require compatibility scaffolding under the policy above.
    Pin it as the newest package development dependency and update the lockfile. This provisional
    change is required so the actual full package, browser, tarball, and clean-consumer suites use
    the candidate; it is not a compatibility
