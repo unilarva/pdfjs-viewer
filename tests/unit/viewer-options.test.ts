@@ -8,12 +8,28 @@ import {
   normalizePrintDefaults,
   pdfjsDocumentLoadOptions,
   validateDocumentOptions,
+  normalizeScreenWakeLockPolicy,
 } from "../../src/viewer-options.js";
 import {
   validatePdfjsDocumentCapabilities,
   validatePdfjsDisplayCapabilities,
 } from "../../src/pdfjs-compatibility.js";
 import { normalizeDeviceCompatibilityRules } from "../../src/device-compatibility.js";
+
+test("screen wake lock policies accept exactly the supported selections", () => {
+  for (const policy of [
+    "never",
+    "always",
+    "fullscreen-only",
+    "presentation-only",
+    "presentation-or-fullscreen",
+  ]) {
+    assert.equal(normalizeScreenWakeLockPolicy(policy), policy);
+  }
+  for (const policy of [undefined, null, true, 1, {}, "", "fullscreen", "ALWAYS"]) {
+    assert.throws(() => normalizeScreenWakeLockPolicy(policy), RangeError);
+  }
+});
 
 function annotationStorage() {
   return {

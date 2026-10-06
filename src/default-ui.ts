@@ -161,8 +161,11 @@ function renderNormalizedPdfjsViewerUi(normalized: NormalizedGeneratedUiOptions)
   const profile = c.renderingProfile
     ? `<fieldset><legend>${escapeHtml(l.renderingProfile)}</legend><div class="pdf-rendering-profile-group">${choice(`${id}-rendering-profile`, "conservative", l.renderingConservative, "pdf-rendering-profile", true)}${choice(`${id}-rendering-profile`, "balanced", l.renderingBalanced, "pdf-rendering-profile", true)}${choice(`${id}-rendering-profile`, "aggressive", l.renderingAggressive, "pdf-rendering-profile", true)}</div></fieldset>`
     : "";
+  const screenWakeLock = c.screenWakeLock
+    ? `<fieldset><legend>${escapeHtml(l.screenWakeLock)}</legend><div class="pdf-screen-wake-lock-group">${choice(`${id}-screen-wake-lock`, "never", l.screenWakeLockNever, "pdf-screen-wake-lock", true)}${choice(`${id}-screen-wake-lock`, "always", l.screenWakeLockAlways, "pdf-screen-wake-lock", true)}${choice(`${id}-screen-wake-lock`, "fullscreen-only", l.screenWakeLockFullscreen, "pdf-screen-wake-lock", true)}${choice(`${id}-screen-wake-lock`, "presentation-only", l.screenWakeLockPresentation, "pdf-screen-wake-lock", true)}${choice(`${id}-screen-wake-lock`, "presentation-or-fullscreen", l.screenWakeLockEither, "pdf-screen-wake-lock", true)}</div></fieldset>`
+    : "";
   const menu = c.menu
-    ? `<div class="pdf-menu">${button("pdf-menu-toggle-btn", l.menu, true, ` aria-controls="${eid}-menu" aria-expanded="false"`)}<div id="${eid}-menu" class="pdf-menu-panel" hidden data-open="false" role="dialog" aria-label="${escapeHtml(l.menu)}" aria-hidden="true" inert><div class="pdf-menu-actions">${actions}</div>${modeRow}${zoom}${fitMode}${pageLayout}${rotation}${profile}</div></div>`
+    ? `<div class="pdf-menu">${button("pdf-menu-toggle-btn", l.menu, true, ` aria-controls="${eid}-menu" aria-expanded="false"`)}<div id="${eid}-menu" class="pdf-menu-panel" hidden data-open="false" role="dialog" aria-label="${escapeHtml(l.menu)}" aria-hidden="true" inert><div class="pdf-menu-actions">${actions}</div>${modeRow}${zoom}${fitMode}${pageLayout}${rotation}${screenWakeLock}${profile}</div></div>`
     : "";
   const sidebarViews = [
     c.outline ? { name: "outline" as const, label: l.outline } : null,
@@ -373,6 +376,14 @@ export function refreshGeneratedUiText(
     [".pdf-fit-mode-group label[for$='-contain']", "fitModeContain"],
     [".pdf-fit-mode-group label[for$='-width']", "fitModeWidth"],
     [".pdf-fit-mode-group label[for$='-height']", "fitModeHeight"],
+    [".pdf-screen-wake-lock-group label[for$='-never']", "screenWakeLockNever"],
+    [".pdf-screen-wake-lock-group label[for$='-always']", "screenWakeLockAlways"],
+    [".pdf-screen-wake-lock-group label[for$='-fullscreen-only']", "screenWakeLockFullscreen"],
+    [".pdf-screen-wake-lock-group label[for$='-presentation-only']", "screenWakeLockPresentation"],
+    [
+      ".pdf-screen-wake-lock-group label[for$='-presentation-or-fullscreen']",
+      "screenWakeLockEither",
+    ],
     [".pdf-rendering-profile-group label[for$='-conservative']", "renderingConservative"],
     [".pdf-rendering-profile-group label[for$='-balanced']", "renderingBalanced"],
     [".pdf-rendering-profile-group label[for$='-aggressive']", "renderingAggressive"],
@@ -428,6 +439,7 @@ export function refreshGeneratedUiText(
   for (const [selector, key] of staticText) text(selector, key);
   groupLegend(".pdf-page-layout-group", "pageLayout");
   groupLegend(".pdf-fit-mode-group", "fitMode");
+  groupLegend(".pdf-screen-wake-lock-group", "screenWakeLock");
   groupLegend(".pdf-rendering-profile-group", "renderingProfile");
   groupLegend(".pdf-rotation-controls", "rotation");
   groupLegend(".pdf-navigation-history-group", "navigationHistory");

@@ -55,6 +55,7 @@ export type {
   PdfjsViewerRotation,
   PdfjsViewerRenderingProfile,
   PdfjsViewerRenderingProfileSelection,
+  PdfjsViewerScreenWakeLockPolicy,
   PdfjsViewerAccessibilityOptions,
   PdfjsViewerAttachment,
   PdfjsViewerAttachmentDownloadFailure,

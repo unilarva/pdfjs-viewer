@@ -19,6 +19,7 @@ in [USAGE.md](./USAGE.md).
 - [Customize and localize the UI](#customize-and-localize-the-ui)
   - [Default sidebar, outline, thumbnails, attachments, and layers](#default-sidebar-outline-thumbnails-attachments-and-layers)
 - [Generated controls and accessibility](#generated-controls-and-accessibility)
+  - [Screen Wake Lock controls](#screen-wake-lock-controls)
   - [Accessibility](#accessibility)
   - [Custom panels and progress](#custom-panels-and-progress)
 - [Visual properties](#visual-properties)
@@ -138,6 +139,7 @@ markup, or the equivalent elements supplied through `uiBindings`:
 | Fit mode                                           | `.pdf-fit-mode-group` / `menu.fitMode`                                                                                                                                                             | Radios use `data-pdf-fit-mode`                                                                                                                                            |
 | Rotation                                           | `.pdf-rotate-counterclockwise-btn`, `.pdf-reset-rotation-btn`, `.pdf-rotate-clockwise-btn` / matching menu bindings                                                                                | None                                                                                                                                                                      |
 | Rendering profile                                  | `.pdf-rendering-profile-group` / `menu.renderingProfile`                                                                                                                                           | Radios use `data-pdf-rendering-profile`                                                                                                                                   |
+| Screen Wake Lock                                   | `.pdf-screen-wake-lock-group` / `menu.screenWakeLock`                                                                                                                                              | Radios use `data-pdf-screen-wake-lock` with one of the five policy values                                                                                                 |
 | Original download, filled-document download, print | `.pdf-download-btn`, `.pdf-download-filled-document-btn`, `.pdf-print-btn` / matching bindings                                                                                                     | None                                                                                                                                                                      |
 | Document progress                                  | `<progress class="pdf-document-progress">` / `documentProgress`                                                                                                                                    | Must be an `HTMLProgressElement` with an accessible name                                                                                                                  |
 | Print setup                                        | `.pdf-print-setup` / `printSetup`                                                                                                                                                                  | A controlled-native dialog requires every `PDFJS_VIEWER_UI_HOOKS.printSetup` descendant; direct descendants belong to the resolved dialog and controls belong to its form |
@@ -504,7 +506,7 @@ new PdfjsViewer({
 
 Available switches are `navigation`, `navigationHistory`, `fullscreen`, `presentation`, `fit`, `fitMode`, `rotation`, `search`, `textSelection`,
 `outline`, `thumbnails`, `attachments`, `layers`, `outlineFilter`, `menu`, `download`,
-`downloadFilledDocument`, `print`, `documentInformation`, `zoom`, `pageLayout`, and `renderingProfile`.
+`downloadFilledDocument`, `print`, `documentInformation`, `zoom`, `pageLayout`, `screenWakeLock`, and `renderingProfile`.
 Menu-contained controls require `menu`. Generated history, fullscreen, and presentation toggles share
 a two-column compact row immediately before Zoom: the labelled Navigation history fieldset contains
 Back/Forward and the labelled View mode fieldset contains Fullscreen/Presentation. Presentation also
@@ -533,6 +535,76 @@ because focused controls must remain available to keyboard users. Disable those 
 Presentation navigation keys intentionally keep this overlay hidden. Pointer holds on the bound
 `previous` and `next` buttons are package-owned: after 500 ms they jump to the first and last page,
 respectively, and suppress the subsequent synthetic click.
+
+### Screen Wake Lock controls
+
+The generated menu includes a **Keep screen on** fieldset on its own row between Rotation and
+Rendering profile. `ui.controls.screenWakeLock` defaults to `true`; setting it to `false` omits
+only the generated selector, leaving public API and custom bindings available. Disabling
+`features.screenWakeLock` suppresses generated controls and active custom bindings as well as
+wake-lock acquisition and infrastructure. All five policies remain selectable when the feature
+is enabled, even if fullscreen or presentation is disabled.
+
+Override the six static labels through `ui.labels` (or replace them with `setUiText()`):
+
+| Label key                    | English default |
+| ---------------------------- | --------------- |
+| `screenWakeLock`             | Keep screen on  |
+| `screenWakeLockNever`        | Never           |
+| `screenWakeLockAlways`       | Always          |
+| `screenWakeLockFullscreen`   | Fullscreen      |
+| `screenWakeLockPresentation` | Presentation    |
+| `screenWakeLockEither`       | Either          |
+
+**Either** means presentation or fullscreen. Custom markup owns its own labels, styles, and
+radio names; use a unique shared name per viewer's group:
+
+```html
+<fieldset class="pdf-screen-wake-lock-group">
+  <legend>Keep screen on</legend>
+  <label
+    ><input type="radio" name="manual-wake-lock" data-pdf-screen-wake-lock="never" />Never</label
+  >
+  <label
+    ><input type="radio" name="manual-wake-lock" data-pdf-screen-wake-lock="always" />Always</label
+  >
+  <label
+    ><input
+      type="radio"
+      name="manual-wake-lock"
+      data-pdf-screen-wake-lock="fullscreen-only"
+    />Fullscreen</label
+  >
+  <label
+    ><input
+      type="radio"
+      name="manual-wake-lock"
+      data-pdf-screen-wake-lock="presentation-only"
+    />Presentation</label
+  >
+  <label
+    ><input
+      type="radio"
+      name="manual-wake-lock"
+      data-pdf-screen-wake-lock="presentation-or-fullscreen"
+    />Either</label
+  >
+</fieldset>
+```
+
+`PDFJS_VIEWER_UI_HOOKS.menu.screenWakeLock` is `".pdf-screen-wake-lock-group"`.
+Alternatively supply the group as an `HTMLElement` through
+`PdfjsViewerUiBindings.menu.screenWakeLock` (`uiBindings: { menu: { screenWakeLock: groupEl } }`).
+Radios are discovered inside the resolved group via `data-pdf-screen-wake-lock`.
+Selection calls the public policy setter; API changes synchronize checked state through the
+same binding/state system as other radio groups. Consumers do not duplicate Wake Lock API
+lifecycle logic.
+
+The selector represents `state.screenWakeLock`, not actual sentinel ownership or support.
+Unsupported APIs, denial, and browser release leave it usable and the policy selected; the
+default UI intentionally displays no wake-lock failure or status feedback. See
+[Screen Wake Lock](./USAGE.md#screen-wake-lock) for policy, host activity, visibility, ownership,
+and optional logger diagnostics.
 
 ### Accessibility
 

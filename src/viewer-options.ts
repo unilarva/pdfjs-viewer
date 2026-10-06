@@ -38,6 +38,7 @@ import type {
   PdfjsViewerPrintDefaults,
   PdfjsViewerPrintMode,
   PdfjsViewerSource,
+  PdfjsViewerScreenWakeLockPolicy,
   PdfjsViewerTextQueryOptions,
   PdfjsViewerTextSelectionPersistence,
   PdfjsViewerUiBindings,
@@ -77,6 +78,7 @@ export const DEFAULT_TEXT_QUERY_OPTIONS: Readonly<NormalizedTextQueryOptions> = 
 };
 
 export interface NormalizedViewerFeatures {
+  screenWakeLock: boolean;
   navigationHistory: boolean;
   fullscreen: boolean;
   presentation: boolean;
@@ -113,6 +115,7 @@ export interface NormalizedViewerUi {
 }
 
 export interface NormalizedViewerOptions {
+  screenWakeLock: PdfjsViewerScreenWakeLockPolicy;
   behavior: NormalizedViewerBehavior;
   features: NormalizedViewerFeatures;
   accessibility: Required<PdfjsViewerAccessibilityOptions>;
@@ -490,6 +493,7 @@ const VIEWER_OPTION_KEYS = {
   logger: true,
   pageLayout: true,
   renderingProfile: true,
+  screenWakeLock: true,
   renderingProfiles: true,
   renderingProfilePolicy: true,
   deviceCompatibility: true,
@@ -610,6 +614,7 @@ function validateUiBindings(bindings: PdfjsViewerUiBindings, ownerDocument: Docu
       resetRotation: "HTMLButtonElement",
       rotateClockwise: "HTMLButtonElement",
       renderingProfile: "HTMLElement",
+      screenWakeLock: "HTMLElement",
     },
     sidebar: {
       container: "HTMLElement",
@@ -773,6 +778,9 @@ export function normalizeViewerOptions(
     throw new RangeError("PdfjsViewer: fitMode must be auto, contain, width, or height");
   if (opts.initialRotation !== undefined && ![0, 90, 180, 270].includes(opts.initialRotation))
     throw new RangeError("PdfjsViewer: initialRotation must be 0, 90, 180, or 270");
+  const screenWakeLock = normalizeScreenWakeLockPolicy(
+    opts.screenWakeLock === undefined ? "presentation-only" : opts.screenWakeLock,
+  );
   if (
     opts.renderingProfile !== undefined &&
     !["auto", "conservative", "balanced", "aggressive"].includes(opts.renderingProfile)
@@ -880,6 +888,7 @@ export function normalizeViewerOptions(
       "navigationHistory",
       "fullscreen",
       "presentation",
+      "screenWakeLock",
     ],
     "features",
   );
@@ -887,6 +896,7 @@ export function normalizeViewerOptions(
   requireOptionalBoolean(sourceFeatures.navigationHistory, "features.navigationHistory");
   requireOptionalBoolean(sourceFeatures.fullscreen, "features.fullscreen");
   requireOptionalBoolean(sourceFeatures.presentation, "features.presentation");
+  requireOptionalBoolean(sourceFeatures.screenWakeLock, "features.screenWakeLock");
   requireOptionalBoolean(sourceFeatures.thumbnails, "features.thumbnails");
   requireOptionalBoolean(sourceFeatures.attachments, "features.attachments");
   requireOptionalBoolean(sourceFeatures.layers, "features.layers");
@@ -1048,10 +1058,12 @@ export function normalizeViewerOptions(
   controls.navigationHistory &&= navigationHistory;
   controls.fullscreen &&= fullscreen;
   controls.presentation &&= presentation;
+  controls.screenWakeLock &&= sourceFeatures.screenWakeLock !== false;
   controls.print &&= printMode !== "off";
 
   return {
     uiBindings,
+    screenWakeLock,
     thumbnails: Object.freeze({ maxDpr: thumbnailMaxDpr }),
     ui: {
       mode: uiMode ?? "default",
@@ -1075,6 +1087,7 @@ export function normalizeViewerOptions(
       autoFitWidthMaxHeight,
     },
     features: {
+      screenWakeLock: sourceFeatures.screenWakeLock !== false,
       navigationHistory,
       fullscreen,
       presentation,
@@ -1109,4 +1122,23 @@ export function normalizeViewerOptions(
     },
     deviceCompatibility,
   };
+}
+
+/** Validates constructor and runtime Screen Wake Lock selections consistently. */
+export function normalizeScreenWakeLockPolicy(value: unknown): PdfjsViewerScreenWakeLockPolicy {
+  if (
+    typeof value !== "string" ||
+    ![
+      "never",
+      "always",
+      "fullscreen-only",
+      "presentation-only",
+      "presentation-or-fullscreen",
+    ].includes(value)
+  ) {
+    throw new RangeError(
+      "PdfjsViewer: screenWakeLock must be never, always, fullscreen-only, presentation-only, or presentation-or-fullscreen",
+    );
+  }
+  return value as PdfjsViewerScreenWakeLockPolicy;
 }

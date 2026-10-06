@@ -10,7 +10,137 @@ import {
   normalizeGeneratedUiOptions,
   normalizeUiTextOptions,
   renderPdfjsViewerUi,
+  refreshGeneratedUiText,
 } from "../../src/default-ui.js";
+import { PDFJS_VIEWER_UI_HOOKS } from "../../src/viewer-contracts.js";
+import { discoverViewerUi } from "../../src/viewer-ui-discovery.js";
+
+test("generated wake-lock choices occupy their own optional row with escaped labels", () => {
+  const html = renderPdfjsViewerUi({ id: "wake" });
+  assert.equal(normalizeGeneratedUiOptions({ id: "wake" }).controls.screenWakeLock, true);
+  assert.match(
+    html,
+    /<fieldset><legend>Keep screen on<\/legend><div class="pdf-screen-wake-lock-group">/,
+  );
+  assert.ok(
+    html.indexOf('class="pdf-rotation-controls"') <
+      html.indexOf('class="pdf-screen-wake-lock-group"'),
+  );
+  assert.ok(
+    html.indexOf('class="pdf-screen-wake-lock-group"') <
+      html.indexOf('class="pdf-rendering-profile-group"'),
+  );
+  const choices = [
+    ["never", "Never"],
+    ["always", "Always"],
+    ["fullscreen-only", "Fullscreen"],
+    ["presentation-only", "Presentation"],
+    ["presentation-or-fullscreen", "Either"],
+  ];
+  assert.equal((html.match(/data-pdf-screen-wake-lock=/g) ?? []).length, 5);
+  for (const [value, label] of choices) {
+    assert.match(
+      html,
+      new RegExp(
+        `type="radio" name="wake-screen-wake-lock" id="wake-screen-wake-lock-${value}" data-pdf-screen-wake-lock="${value}" disabled aria-disabled="true"`,
+      ),
+    );
+    assert.match(
+      html,
+      new RegExp(`<label for="wake-screen-wake-lock-${value}">${label}<\\/label>`),
+    );
+  }
+  for (const controls of [{ screenWakeLock: false }, { menu: false }]) {
+    assert.doesNotMatch(renderPdfjsViewerUi({ id: "wake", controls }), /pdf-screen-wake-lock/);
+  }
+  assert.match(
+    renderPdfjsViewerUi({
+      id: "wake",
+      labels: { screenWakeLock: '<Keep & "on">', screenWakeLockEither: "<Either>" },
+    }),
+    /<legend>&lt;Keep &amp; &quot;on&quot;&gt;<\/legend>/,
+  );
+  assert.match(
+    renderPdfjsViewerUi({ id: "wake", labels: { screenWakeLockEither: "<Either>" } }),
+    />&lt;Either&gt;<\/label>/,
+  );
+  assert.throws(
+    () => normalizeGeneratedUiOptions({ id: "wake", controls: { screenWakeLock: "yes" } } as never),
+    /controls\.screenWakeLock must be a boolean/,
+  );
+});
+
+test("generated wake-lock relabeling uses package-authored metadata", () => {
+  const entries = [
+    ["screenWakeLock", ".pdf-screen-wake-lock-group"],
+    ["screenWakeLockNever", ".pdf-screen-wake-lock-group label[for$='-never']"],
+    ["screenWakeLockAlways", ".pdf-screen-wake-lock-group label[for$='-always']"],
+    ["screenWakeLockFullscreen", ".pdf-screen-wake-lock-group label[for$='-fullscreen-only']"],
+    ["screenWakeLockPresentation", ".pdf-screen-wake-lock-group label[for$='-presentation-only']"],
+    [
+      "screenWakeLockEither",
+      ".pdf-screen-wake-lock-group label[for$='-presentation-or-fullscreen']",
+    ],
+  ] as const;
+  const nodes = entries.map(([key, selector]) => ({
+    key,
+    selector,
+    textContent: "",
+    marker: "",
+    setAttribute(_name: string, value: string) {
+      this.marker = value;
+    },
+  }));
+  const root = {
+    dataset: {} as Record<string, string>,
+    querySelectorAll(selector: string) {
+      if (selector === ".pdf-screen-wake-lock-group")
+        return [{ closest: () => ({ querySelector: () => nodes[0] }) }];
+      return nodes.filter(
+        node =>
+          selector === node.selector ||
+          selector === `[data-pdfjs-ui-text-content='${node.marker}']`,
+      );
+    },
+  };
+  refreshGeneratedUiText(root as never, PDFJS_VIEWER_DEFAULT_LABELS);
+  for (const node of nodes) {
+    assert.equal(node.marker, node.key);
+    assert.equal(node.textContent, PDFJS_VIEWER_DEFAULT_LABELS[node.key]);
+  }
+  const labels = { ...PDFJS_VIEWER_DEFAULT_LABELS };
+  for (const [key] of entries) labels[key] = `<${key}>`;
+  refreshGeneratedUiText(root as never, labels);
+  for (const node of nodes) assert.equal(node.textContent, labels[node.key]);
+});
+
+test("wake-lock discovery honors direct bindings and skips disabled capability", () => {
+  class FakeElement {}
+  const container = new FakeElement();
+  const group = new FakeElement();
+  let matches: unknown[] = [group];
+  const root = {
+    ownerDocument: { defaultView: { HTMLElement: FakeElement } },
+    querySelectorAll(selector: string) {
+      if (selector === PDFJS_VIEWER_UI_HOOKS.root.container) return [container];
+      if (selector === PDFJS_VIEWER_UI_HOOKS.menu.screenWakeLock) return matches;
+      return [];
+    },
+  };
+  const discover = (bindings = {}, enabled = true) =>
+    discoverViewerUi(root as never, bindings, PDFJS_VIEWER_UI_HOOKS, false, enabled).menu
+      .screenWakeLock;
+  assert.equal(discover(), group);
+  matches = [group, new FakeElement()];
+  assert.throws(() => discover(), /menu\.screenWakeLock must match exactly one element/);
+  assert.equal(discover({ menu: { screenWakeLock: group as never } }), group);
+  assert.equal(discover({}, false), null);
+  assert.equal(discover({ menu: { screenWakeLock: {} as never } }, false), null);
+  matches = [{}];
+  assert.throws(() => discover(), /menu\.screenWakeLock.*must be an FakeElement/);
+  matches = [];
+  assert.equal(discover(), null);
+});
 
 test("generated UI factory normalizes text options once", () => {
   class FakeParent {

@@ -4,6 +4,12 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Added progressive Screen Wake Lock support with five selectable policies and a
+  `"presentation-only"` default. `state.screenWakeLock` and `setScreenWakeLock(policy)`
+  expose the selected policy, not actual lock status.
+- Added a generated **Keep screen on** selector, overridable labels, and custom UI radio-group
+  bindings. Feature and generated-control switches independently disable capability and UI;
+  browser limitations remain silent in the UI and use optional structured logger diagnostics.
 - Added support for `pdfjs-dist 6.4.299` while retaining `6.3.289` with the same implementation.
 - Documented the latest-PDF.js-first support policy: retain older releases only without
   compatibility scaffolding, and allow coordinated viewer/PDF.js upgrades during pre-1.0.

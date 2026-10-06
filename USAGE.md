@@ -35,6 +35,7 @@ and demo commands belong to the
   - [Multiple viewers and navigation-state ownership](#multiple-viewers-and-navigation-state-ownership)
 - [Public controls](#public-controls)
   - [Fullscreen and presentation mode](#fullscreen-and-presentation-mode)
+  - [Screen Wake Lock](#screen-wake-lock)
   - [In-document navigation history](#in-document-navigation-history)
 - [Behavior and features](#behavior-and-features)
 - [Printing](#printing)
@@ -408,6 +409,7 @@ const viewer = new PdfjsViewer({
   fitMode: "auto", // auto | contain | width | height
   initialRotation: 0, // 0 | 90 | 180 | 270
   renderingProfile: "auto", // auto | conservative | balanced | aggressive
+  screenWakeLock: "presentation-only", // Default; see Screen Wake Lock below
   keyboard: { scope: "viewer" }, // viewer (default) | global; or false
   viewerId: "manual",
   features: { outline: { filter: true }, thumbnails: true },
@@ -496,8 +498,8 @@ even when a configured limit is too small to represent them.
 #### Inactive viewers and hidden documents
 
 `viewer.setActive()` controls that instance's presentation, rendering window, global-keyboard
-ownership, and navigation-state writes. Hosts switching between globally routed viewers should
-deactivate the old viewer and activate the new one.
+ownership, wake-lock eligibility, and navigation-state writes. Hosts switching between globally
+routed viewers should deactivate the old viewer and activate the new one.
 
 By default, the viewer also listens to its owning document's Page Visibility state. A hidden
 browser tab, minimized window, screen lock, or backgrounded mobile browser reduces the main
@@ -874,6 +876,7 @@ Useful methods include the following nonexhaustive selection:
 - `setRenderingProfile(selection)`, where `selection` is `"auto"`, `"conservative"`,
   `"balanced"`, or `"aggressive"`;
 - `setTextSelectionMode(active)` enables or disables native PDF text selection;
+- `setScreenWakeLock(policy): void` validates and updates the selected Screen Wake Lock policy;
 - `setUiText(options)` replaces package-owned dynamic labels and formatters at runtime;
 - `load(source, { initialPage, documentOptions }?)` loads the first document or replaces the
   current one using a URL, `Uint8Array`, `ArrayBuffer`, or typed source descriptor and returns a
@@ -940,6 +943,70 @@ last page. Pointer-activated control buttons release focus back to the document 
 fade again, while keyboard focus keeps them visible for accessibility.
 `state.presentationMode` and `state.canPresent` are also published through `pdf:statechange`;
 transitions publish `pdf:presentationmodechange`.
+
+### Screen Wake Lock
+
+Screen Wake Lock is optional progressive enhancement: the viewer requests a browser `"screen"`
+wake lock when its selected policy qualifies. `features.screenWakeLock` defaults to `true`, and
+the initial top-level `screenWakeLock` option defaults to `"presentation-only"`. It is mutable
+viewer state, not a `behavior` option. The package root exports
+`PdfjsViewerScreenWakeLockPolicy` with these five values:
+
+| Policy                         | When it qualifies                                                                 |
+| ------------------------------ | --------------------------------------------------------------------------------- |
+| `"never"`                      | Never requests a lock                                                             |
+| `"always"`                     | Whenever the viewer is active and its owning document is visible                  |
+| `"fullscreen-only"`            | Only when this viewer's exact root owns browser fullscreen                        |
+| `"presentation-only"`          | Only during presentation mode, including embedded presentation without fullscreen |
+| `"presentation-or-fullscreen"` | When either presentation mode or this viewer's browser fullscreen is active       |
+
+Every qualifying policy additionally requires an enabled feature, a live active viewer, a visible
+owning document, and browser permission/support. All five choices remain available even when
+fullscreen or presentation is disabled; only modes actually active can qualify.
+
+```ts
+const viewer = new PdfjsViewer({ rootEl, runtime, screenWakeLock: "always" });
+viewer.setScreenWakeLock("presentation-or-fullscreen");
+const selectedPolicy = viewer.state.screenWakeLock;
+
+// A mounted viewer in a tab-like application view must be explicitly activated/deactivated.
+viewer.setActive(currentView === "songbook");
+```
+
+The constructor and `setScreenWakeLock(policy): void` reject invalid policy values. The setter
+updates `state.screenWakeLock`, synchronizes bound controls through the normal state/UI mechanism,
+and immediately reconciles desired wake locking. Observe `pdf:statechange` to mirror the policy;
+there is no separate getter or public lock-held/support status API. The selected policy expresses
+desired behavior, not proof that a lock is held.
+
+Use `screenWakeLock: "never"` to keep the capability available without requesting locks.
+Use `features: { screenWakeLock: false }` to disable package-managed wake locking entirely:
+no acquisition, wake-lock infrastructure, generated selector, or active custom wake-lock bindings.
+The disabled feature still permits validated policy updates through the setter and state.
+To omit only the generated selector while retaining public API/custom UI support, use
+`ui: { mode: "default", controls: { screenWakeLock: false } }`. The generated **Keep screen on**
+selector and [custom UI bindings and labels](./CUSTOMIZATION.md#screen-wake-lock-controls)
+control policy only.
+
+Host activity and browser document visibility are separate. `setActive(false)` releases the
+viewer-owned lock; `setActive(true)` reevaluates eligibility. Hiding a viewer with `display: none`,
+CSS visibility, or offscreen layout does not communicate inactivity. Applications with routes or
+tab-like views must call `setActive(...)`. A hidden browser document is independently ineligible,
+even with `behavior.reduceRenderingWhenDocumentHidden: false`; becoming visible reevaluates
+eligibility without changing `state.active`.
+
+Wake locking belongs to viewer lifetime, not a loaded PDF. Under `"always"`, `load()`, replacement,
+and `close()` retain an otherwise eligible lock, including while no PDF is loaded. Mode-dependent
+policies can stop qualifying when closing exits the mode. `destroy()` ends ownership. Each viewer
+manages only sentinels it acquired itself: releasing or destroying it does not release wake locks
+independently acquired by the application or another viewer, nor guarantee that the display can sleep.
+
+Browsers and operating systems may deny or release locks. Unsupported APIs, request/reacquisition
+failures, and browser releases do not interrupt ordinary viewing or produce default-UI warnings,
+errors, or status indicators. Diagnostics use only the optional structured logger. The viewer
+automatically attempts reacquisition when still eligible after browser release or after visibility,
+activity, policy, or mode changes; this is not a guarantee of actual acquisition or uninterrupted
+screen wakefulness.
 
 ### In-document navigation history
 

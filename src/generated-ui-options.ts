@@ -31,6 +31,12 @@ export const PDFJS_VIEWER_DEFAULT_LABELS: Readonly<PdfjsViewerLabels> = {
   fitModeWidth: "Width",
   fitModeHeight: "Height",
   rotation: "Rotation",
+  screenWakeLock: "Keep screen on",
+  screenWakeLockNever: "Never",
+  screenWakeLockAlways: "Always",
+  screenWakeLockFullscreen: "Fullscreen",
+  screenWakeLockPresentation: "Presentation",
+  screenWakeLockEither: "Either",
   navigationHistory: "Navigation history",
   viewMode: "View mode",
   navigationHistoryBack: "Go back in navigation history",
@@ -229,6 +235,7 @@ export const PDFJS_VIEWER_DEFAULT_UI_CONTROLS: Readonly<Required<PdfjsViewerUiCo
   pageLayout: true,
   fitMode: true,
   rotation: true,
+  screenWakeLock: true,
   renderingProfile: true,
 };
 

@@ -36,6 +36,9 @@ declare global {
   interface Window {
     fixture: {
       primary: PdfjsViewer;
+      createScreenWakeLockViewer(
+        options: Omit<ConstructorParameters<typeof PdfjsViewer>[0], "runtime">,
+      ): PdfjsViewer;
       secondary: PdfjsViewer | null;
       states: PdfjsViewerState[];
       logs: Readonly<PdfjsViewerLogEntry>[];
@@ -534,6 +537,9 @@ document.addEventListener("securitypolicyviolation", event => {
 
 window.fixture = {
   primary,
+  createScreenWakeLockViewer(options) {
+    return new PdfjsViewer({ ...options, runtime });
+  },
   secondary,
   securityPolicyViolations,
   setPrintPermissions(mode) {

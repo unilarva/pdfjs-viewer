@@ -26,6 +26,8 @@ the package's default theme.
 - Responsive single-page and book-style spreads, touch and touchpad pinch zoom,
   drag-to-scroll, browser fullscreen, discrete-page presentation mode, and viewer-scoped
   keyboard shortcuts.
+- Progressive [Screen Wake Lock](./USAGE.md#screen-wake-lock) with selectable policies,
+  defaulting to presentation mode; browser or OS policy may prevent acquisition.
 - Search, filtered outlines, thumbnails, internal links, rotation, document metadata,
   attachments, optional-content layers, and cross-page text selection that survives view changes.
 - Visible-first, high-DPI rendering with configurable profiles that bound viewer-managed raster

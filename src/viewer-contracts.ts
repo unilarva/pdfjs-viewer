@@ -111,6 +111,8 @@ export const PDFJS_VIEWER_UI_HOOKS = {
     rotateClockwise: ".pdf-rotate-clockwise-btn",
     /** Rendering-profile control group. */
     renderingProfile: ".pdf-rendering-profile-group",
+    /** Screen Wake Lock policy control group. */
+    screenWakeLock: ".pdf-screen-wake-lock-group",
   },
   /** Host-owned content insertion slots. */
   extensions: {
@@ -295,6 +297,10 @@ export type PdfjsViewerRotation = 0 | 90 | 180 | 270;
 export type PdfjsViewerRenderingProfile = "conservative" | "balanced" | "aggressive";
 /** A concrete rendering profile or the policy-selected automatic profile. */
 export type PdfjsViewerRenderingProfileSelection = PdfjsViewerRenderingProfile | "auto";
+
+/** Desired screen-awake policy, subject to browser and OS permission. */
+export type PdfjsViewerScreenWakeLockPolicy =
+  "never" | "always" | "fullscreen-only" | "presentation-only" | "presentation-or-fullscreen";
 
 /** Strategy for finding or creating viewer UI below the supplied root element. */
 export type PdfjsViewerUiMode = "default" | "custom" | "headless";
@@ -569,6 +575,18 @@ export interface PdfjsViewerLabels {
   pageLayoutBook: string;
   /** Labels the rendering-profile group. */
   renderingProfile: string;
+  /** Labels the Screen Wake Lock policy group. */
+  screenWakeLock: string;
+  /** Labels the policy that never requests a screen wake lock. */
+  screenWakeLockNever: string;
+  /** Labels the policy for all active, visible viewing. */
+  screenWakeLockAlways: string;
+  /** Labels the exact-root fullscreen policy. */
+  screenWakeLockFullscreen: string;
+  /** Labels the presentation-mode policy. */
+  screenWakeLockPresentation: string;
+  /** Labels the presentation-or-fullscreen policy. */
+  screenWakeLockEither: string;
   /** Labels the conservative rendering profile. */
   renderingConservative: string;
   /** Labels the balanced rendering profile. */
@@ -703,6 +721,8 @@ export interface PdfjsViewerUiControlOptions {
   pageLayout?: boolean;
   /** Include rendering-profile controls in the options menu when multiple profiles are available. */
   renderingProfile?: boolean;
+  /** Include Screen Wake Lock policy radios in the options menu. */
+  screenWakeLock?: boolean;
 }
 
 /** Labels and dynamic text formatters shared by every UI mode. */
@@ -907,6 +927,8 @@ export interface PdfjsViewerUiBindings {
     rotateClockwise?: HTMLButtonElement;
     /** Contains rendering-profile radio inputs identified by `data-pdf-rendering-profile`. */
     renderingProfile?: HTMLElement;
+    /** Contains policy radio inputs identified by `data-pdf-screen-wake-lock`. */
+    screenWakeLock?: HTMLElement;
   };
   /** Direct bindings for the shared sidebar shell. */
   sidebar?: {
@@ -1006,6 +1028,8 @@ export interface PdfjsViewerFeatureOptions {
   fullscreen?: boolean;
   /** Enable discrete-page presentation mode. Defaults to `true`. */
   presentation?: boolean;
+  /** Enable viewer-owned Screen Wake Lock functionality. Defaults to `true`. */
+  screenWakeLock?: boolean;
   /** Enable selectable PDF text and its interaction mode. */
   textSelection?: boolean;
   /** Enable document search, or configure when its text index is built. */
@@ -1381,6 +1405,8 @@ export type PdfjsViewerState = Readonly<{
   rotation: PdfjsViewerRotation;
   /** Requested rendering profile selection. */
   renderingProfile: PdfjsViewerRenderingProfileSelection;
+  /** Desired Screen Wake Lock policy, not actual browser sentinel ownership. */
+  screenWakeLock: PdfjsViewerScreenWakeLockPolicy;
   /** Concrete rendering profile currently applied to the document renderer. */
   effectiveRenderingProfile: PdfjsViewerRenderingProfile;
   /** Concrete rendering profiles available for explicit selection on this viewer. */
@@ -2412,6 +2438,8 @@ export interface PdfjsViewerOptions {
   initialRotation?: PdfjsViewerRotation;
   /** Initial rendering profile; `"auto"` selects the configured device-policy default. */
   renderingProfile?: PdfjsViewerRenderingProfileSelection;
+  /** Initial Screen Wake Lock policy. Defaults to `"presentation-only"`. */
+  screenWakeLock?: PdfjsViewerScreenWakeLockPolicy;
   /** Optional partial overrides for the built-in rendering profiles. */
   renderingProfiles?: PdfjsViewerRenderingProfiles;
   /** Device-specific profile availability and `"auto"` defaults. */

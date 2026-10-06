@@ -74,6 +74,7 @@ export function discoverViewerUi(
   bindings: Readonly<PdfjsViewerUiBindings>,
   hooks: Hooks,
   discoverPrintSetup = true,
+  discoverScreenWakeLock = true,
 ) {
   const view = root.ownerDocument.defaultView;
   if (!view) throw new TypeError("PdfjsViewer: rootEl ownerDocument must have a defaultView");
@@ -523,6 +524,15 @@ export function discoverViewerUi(
         html,
         "menu.renderingProfile",
       ),
+      screenWakeLock: discoverScreenWakeLock
+        ? resolve(
+            bindings.menu?.screenWakeLock,
+            controls,
+            hooks.menu.screenWakeLock,
+            html,
+            "menu.screenWakeLock",
+          )
+        : null,
     },
     sidebar: {
       container: sidebarContainer,

@@ -25,6 +25,8 @@ inventing a second boundary in module prose.
   - [Extensible Public Contracts](#extensible-public-contracts)
   - [UI And Stylesheet Ownership](#ui-and-stylesheet-ownership)
 - [Lifecycle Hierarchy](#lifecycle-hierarchy)
+  - [Screen Wake Lock](#screen-wake-lock)
+  - [State And Document Teardown](#state-and-document-teardown)
   - [Download](#download)
 - [Core Procedures](#core-procedures)
   - [Rendering](#rendering)
@@ -105,6 +107,7 @@ All other source modules are private implementation details for package maintain
 | `document-text-presentation.ts`        | Package adapters around runtime PDF.js `TextLayer`, exact text mappings/highlights, logical selection, containment, and zoom restoration.                                               |
 | `document-view.ts`                     | Complete active-document canonical view, layout, and surface owner.                                                                                                                     |
 | `viewer-fullscreen.ts`                 | Exact-root standard Fullscreen API capability, command, reconciliation, and listener owner.                                                                                             |
+| `viewer-screen-wake-lock.ts`           | Viewer-lifetime browser Screen Wake Lock mechanics, exact sentinel ownership, serialized pending acquisition, release observation, and cleanup; no PDF.js dependency.                   |
 | `presentation-input.ts`                | Presentation-only overlay timing, keyboard, wheel, tap-zone, swipe/fling, and control long-press arbitration.                                                                           |
 | `boundary-control-press.ts`            | Shared boundary-button primary-pointer admission, movement cancellation, long-press timing, synthetic-click suppression, and reset ownership.                                           |
 | `document-location.ts`                 | Immutable normalized baseline rendered-page locations, validation/equality, and viewer-rotation conversion.                                                                             |
@@ -520,6 +523,50 @@ render-operation lifetime:
 4. **Render-document and operation lifetime** is nested in one document and owned by
    `DocumentRenderer`. The scheduler owns operation slots underneath it. Immutable
    document, result, execution, and surface identity follow work through settlement.
+
+### Screen Wake Lock
+
+`viewer-screen-wake-lock.ts` is a private viewer-lifetime mechanics owner, independent of PDF.js.
+It receives the owning window's `navigator` and a diagnostic callback, not ambient globals or
+semantic viewer state. The facade owns policy validation, selected `state.screenWakeLock`,
+feature admission, public setter/state publication, UI synchronization, and semantic reconciliation.
+It computes desired locking from feature availability, terminal lifetime, host `setActive()` state,
+owning-document visibility, browser-authoritative exact-root fullscreen, and presentation mode.
+It passes desired state to the mechanics owner and uses the existing document-visibility listener,
+not a competing owner listener. Rendering's hidden-document opt-out does not bypass wake-lock
+visibility eligibility. CSS/layout visibility is deliberately not inferred: host activity is explicit.
+
+The enabled feature defaults to `true`; selected policy defaults to `"presentation-only"`.
+The five-value `PdfjsViewerScreenWakeLockPolicy` is a package-root public contract.
+`setScreenWakeLock(policy): void` validates even when the feature is disabled and may still update
+selected policy/state, but disabled viewers create no wake-lock owner, requests, wake-lock-specific
+listeners, generated controls, or active custom bindings. There is no separate getter beyond state,
+nor a public held/support status projection. Generated/custom radios are policy controllers, never
+Wake Lock API owners; generated-control composition is separate from feature availability.
+
+Reconciliation retains a current sentinel while desired state remains true, including transitions
+between qualifying presentation/fullscreen modes. False desired state releases only this owner's
+sentinel. Pending requests remain serialized: changes update desired state and invalidate the
+acquisition generation rather than starting overlapping requests. A late success from an invalidated
+generation, after ineligibility, or after destruction must release its exact returned sentinel,
+never publish it as current. Once pending work settles, reconciliation follows the latest desired
+state. Old sentinel release events can discard only that exact current sentinel, never a newer one.
+Browser-initiated release triggers reconciliation and an eligible reacquisition attempt; visibility,
+activity, policy, and mode changes also reevaluate eligibility after failure.
+
+Ownership spans construction through terminal, idempotent `destroy()`, not document reset.
+`load()`, replacement, and `close()` do not independently release an otherwise eligible `"always"`
+lock; mode exit can naturally invalidate mode-dependent eligibility. Destruction invalidates pending
+generations, removes release listeners, and releases owned sentinels, including late acquisitions.
+An owner must never discover, replace, or release application-owned or other viewers' sentinels.
+
+Unsupported APIs, rejected requests/reacquisitions, and browser/OS releases are non-fatal progressive
+enhancement. Handle asynchronous failures without unhandled rejections and report meaningful
+diagnostics only through the existing optional structured logger/diagnostic callback, without noisy
+successful reconciliation logs or default-UI failure feedback. Selected policy remains desired
+behavior, not evidence of browser ownership; no fallback timeout-defeating hacks are used.
+
+### State And Document Teardown
 
 Observable facade state is a detached snapshot rather than a mirror of private owners.
 The facade composes canonical view state, host activity, document capabilities, and

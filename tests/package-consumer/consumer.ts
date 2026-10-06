@@ -48,6 +48,7 @@ import {
   type PdfjsViewerReadyEvent,
   type PdfjsViewerSource,
   type PdfjsViewerState,
+  type PdfjsViewerScreenWakeLockPolicy,
   type PdfjsViewerStateChangeEvent,
   type PdfjsViewerTextQueryOptions,
   type PdfjsViewerTextSelectionPersistence,
@@ -160,6 +161,7 @@ const generatedUiOptions = {
   formatters: { searchResultPosition: (current, total) => `${current} of ${total}` },
   direction: "ltr",
   controls: {
+    screenWakeLock: true,
     print: true,
     renderingProfile: false,
     textSelection: true,
@@ -178,6 +180,7 @@ const viewerOptions = {
   runtime: new PdfjsViewerRuntime({ pdfjs: pdfjsModule, workerSrc: "/pdf.worker.min.mjs" }),
   defaultDocumentOptions: { withCredentials: true },
   features: {
+    screenWakeLock: true,
     navigationHistory: true,
     textSelection: true,
     search: { prepareOnLoad: true },
@@ -200,6 +203,7 @@ const viewerOptions = {
     initialSidebarView: "auto",
   },
   fitMode: "auto" as PdfjsViewerFitModeSelection,
+  screenWakeLock: "always" satisfies PdfjsViewerScreenWakeLockPolicy,
   initialRotation: 90 as PdfjsViewerRotation,
   shareableNamedDestinationPrefix: "section:",
   navigationState: {
@@ -320,6 +324,7 @@ const bindingOptions = {
     menu: {
       textSelectionToggle,
       fitMode: fitModeGroup,
+      screenWakeLock: document.createElement("fieldset"),
       rotateCounterclockwise,
       resetRotation,
       rotateClockwise,
@@ -330,6 +335,10 @@ const bindingOptions = {
 } satisfies PdfjsViewerOptions;
 
 function exerciseTextSelection(viewer: PdfjsViewer): void {
+  viewer.setScreenWakeLock("presentation-or-fullscreen");
+  const screenWakeLock: PdfjsViewerScreenWakeLockPolicy = viewer.state.screenWakeLock;
+  void screenWakeLock;
+  void PDFJS_VIEWER_UI_HOOKS.menu.screenWakeLock;
   viewer.setTextSelectionMode(true);
   viewer.navigateToPage(2);
   void viewer.goBack();

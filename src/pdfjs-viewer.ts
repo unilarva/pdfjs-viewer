@@ -52,6 +52,7 @@ import {
   normalizePrintOptions,
   normalizeTextQueryOptions,
   normalizeViewerOptions,
+  normalizeScreenWakeLockPolicy,
   validateDocumentOptions,
   type NormalizedPdfSource,
   type NormalizedViewerBehavior,
@@ -64,6 +65,7 @@ import {
 } from "./pdfjs-compatibility.js";
 import { discoverViewerUi } from "./viewer-ui-discovery.js";
 import { ViewerPanels } from "./viewer-panels.js";
+import { ViewerScreenWakeLock } from "./viewer-screen-wake-lock.js";
 import {
   ViewerFullscreen,
   type ViewerFullscreenFailureResult,
@@ -165,6 +167,7 @@ import type {
   PdfjsViewerRotation,
   PdfjsViewerRenderingProfile,
   PdfjsViewerRenderingProfileSelection,
+  PdfjsViewerScreenWakeLockPolicy,
   PdfjsViewerRenderingProfileSettings,
   PdfjsViewerSidebarView,
   PdfjsViewerLabels,
@@ -364,6 +367,9 @@ export class PdfjsViewer {
   // --- Fullscreen and presentation modes ---
 
   #viewerFullscreen!: ViewerFullscreen;
+  #viewerScreenWakeLock: ViewerScreenWakeLock | null = null;
+  #screenWakeLock: PdfjsViewerScreenWakeLockPolicy = "presentation-only";
+  #screenWakeLockInputs: HTMLInputElement[] = [];
   #fullscreenToggleBtnEl: HTMLButtonElement | null = null;
   #presentationToggleBtnEl: HTMLButtonElement | null = null;
   #presentationInput!: PresentationInputController;
@@ -683,6 +689,7 @@ export class PdfjsViewer {
     this.#behavior = normalized.behavior;
     this.#documentVisible = this.#ownerDocument.visibilityState === "visible";
     this.#features = normalized.features;
+    this.#screenWakeLock = normalized.screenWakeLock;
     validatePdfjsDisplayCapabilities(this.#pdfjs, {
       text: this.#features.textSelection,
       annotations:
@@ -760,6 +767,7 @@ export class PdfjsViewer {
         this.#uiBindings,
         PDFJS_VIEWER_UI_HOOKS,
         printRoute.route === "controlled-native",
+        this.#features.screenWakeLock,
       );
       this.#downloadBtnEl = ui.download;
       this.#downloadFilledDocumentBtnEl = ui.downloadFilledDocument;
@@ -1015,6 +1023,16 @@ export class PdfjsViewer {
       this.#resetRotationBtnEl = ui.menu.resetRotation;
       this.#rotateClockwiseBtnEl = ui.menu.rotateClockwise;
 
+      // --- Viewer-lifetime wake-lock policy controls (optional) ---
+      this.#screenWakeLockInputs = Array.from(
+        ui.menu.screenWakeLock?.querySelectorAll<HTMLInputElement>(
+          'input[type="radio"][data-pdf-screen-wake-lock]',
+        ) ?? [],
+      );
+      for (const input of this.#screenWakeLockInputs) {
+        normalizeScreenWakeLockPolicy(input.dataset.pdfScreenWakeLock);
+        this.#enableReadyControl(input);
+      }
       // --- Rendering profile toggles (optional) ---
       this.#renderingProfileGroupEl = ui.menu.renderingProfile;
       this.#renderingProfileToggleConservativeEl =
@@ -1353,7 +1371,7 @@ export class PdfjsViewer {
       // --- UI wiring & initialization ---
       this.#wireUI();
       this.#on(this.#ownerWindow, "resize", this.#onResize);
-      if (this.#behavior.reduceRenderingWhenDocumentHidden) {
+      if (this.#behavior.reduceRenderingWhenDocumentHidden || this.#features.screenWakeLock) {
         this.#on(this.#ownerDocument, "visibilitychange", () =>
           this.#handleDocumentVisibilityChange(),
         );
@@ -1432,6 +1450,14 @@ export class PdfjsViewer {
       // --- Attach the document-free viewer to its runtime ---
       getPdfjsViewerRuntimeAccess(this.#runtime).attachViewer();
       this.#runtimeAttached = true;
+      if (this.#features.screenWakeLock) {
+        this.#viewerScreenWakeLock = new ViewerScreenWakeLock(
+          this.#ownerWindow.navigator,
+          (level, event, message, cause) => this.#log(level, event, message, {}, cause),
+        );
+        this.#reconcileScreenWakeLock();
+      }
+      this.#syncScreenWakeLockControls();
     } catch (error) {
       this.#rollbackConstruction();
       throw error;
@@ -1454,6 +1480,7 @@ export class PdfjsViewer {
    */
   public destroy(): void {
     if (this.#destroyed) return;
+    this.#viewerScreenWakeLock?.destroy();
     this.#cancelPresentationMode(false);
     if (this.#viewerFullscreen) void this.#viewerFullscreen.exit();
     this.#viewerFullscreen?.destroy();
@@ -1538,7 +1565,8 @@ export class PdfjsViewer {
    * overlay UI is forced hidden and outside-click closers are disabled so it
    * cannot interfere with other views. Effective rendering activity also becomes
    * inactive, reducing speculative buffering and offscreen raster retention.
-   * Owner-document visibility contributes to rendering activity independently
+   * Inactivity also releases viewer-owned screen wake locks. Owner-document
+   * visibility contributes to rendering and wake-lock eligibility independently
    * and never changes this host-owned state.
    *
    * @param active - Whether the host currently presents this viewer as active.
@@ -1551,6 +1579,7 @@ export class PdfjsViewer {
     const next = !!active;
     if (this.#hostActive === next) {
       this.#syncRuntimeActiveViewer(next);
+      this.#reconcileScreenWakeLock();
       return;
     }
     if (!next) {
@@ -1558,6 +1587,7 @@ export class PdfjsViewer {
       void this.#viewerFullscreen.exit();
     }
     this.#hostActive = next;
+    this.#reconcileScreenWakeLock();
     this.#syncModeControls();
     this.#syncRuntimeActiveViewer(next);
     this.#viewerPanels.setHostActive(this.#hostActive);
@@ -1595,11 +1625,13 @@ export class PdfjsViewer {
     if (this.#pdf && this.#documentView.hasRows) this.#reconcileRendering();
   }
 
-  /** Reconciles raster activity without changing host-owned active state or UI ownership. */
+  /** Reconciles visibility eligibility without changing host-owned active state or UI ownership. */
   #handleDocumentVisibilityChange(): void {
     const visible = this.#ownerDocument.visibilityState === "visible";
     if (this.#documentVisible === visible) return;
     this.#documentVisible = visible;
+    this.#reconcileScreenWakeLock();
+    if (!this.#behavior.reduceRenderingWhenDocumentHidden) return;
     this.#syncRenderingActivity();
     const renderer = this.#documentRenderer.snapshot();
     this.#log(
@@ -1717,6 +1749,7 @@ export class PdfjsViewer {
       fitActive: this.#documentView.fitActive,
       rotation: this.#documentView.rotation,
       renderingProfile: this.#renderingProfileSelection,
+      screenWakeLock: this.#screenWakeLock,
       effectiveRenderingProfile: this.#renderingProfile,
       availableRenderingProfiles: this.#availableRenderingProfiles,
       sourceUrl: this.#pdfUrl,
@@ -2806,6 +2839,7 @@ export class PdfjsViewer {
           ? (this.#ownerDocument.activeElement as HTMLElement)
           : this.#presentationToggleBtnEl;
       this.#presentationMode = true;
+      this.#reconcileScreenWakeLock();
       this.#presentationInput.setActive(true);
       this.#viewerPanels.setPresentationSuppressed(true);
       if (
@@ -2897,6 +2931,7 @@ export class PdfjsViewer {
       this.#cancelPresentationPageTransition();
       this.#cancelPendingPresentationFullscreenRequest();
       this.#presentationMode = false;
+      this.#reconcileScreenWakeLock();
       this.#presentationInput.setActive(false);
       this.#presentationFullscreenRequested = false;
       this.#setModeClass(PDFJS_VIEWER_STATE_CLASSES.presentationMode, false);
@@ -2997,6 +3032,7 @@ export class PdfjsViewer {
     this.#cancelPendingPresentationFullscreenRequest();
     this.#presentationOperationGeneration++;
     this.#presentationMode = false;
+    this.#reconcileScreenWakeLock();
     this.#presentationInput.setActive(false);
     this.#presentationSnapshot = null;
     this.#presentationPageAnchor = null;
@@ -3049,6 +3085,7 @@ export class PdfjsViewer {
   }
 
   #handleFullscreenChange(active: boolean): void {
+    this.#reconcileScreenWakeLock();
     this.#setModeClass(PDFJS_VIEWER_STATE_CLASSES.fullscreen, active);
     this.#syncModeControls();
     this.#pdfRootEl.dispatchEvent(
@@ -3620,6 +3657,45 @@ export class PdfjsViewer {
     this.#emitStateChange();
   }
 
+  /**
+   * Selects desired screen-awake behavior and reconciles viewer-owned wake locks.
+   * The policy remains selectable when the feature is disabled, but cannot acquire a lock.
+   * Inspect the current selection through {@link state}; platform failure does not change it.
+   * @throws {RangeError} When the policy is invalid.
+   * @throws When called after {@link destroy}.
+   */
+  public setScreenWakeLock(policy: PdfjsViewerScreenWakeLockPolicy): void {
+    this.#assertAlive("setScreenWakeLock");
+    const next = normalizeScreenWakeLockPolicy(policy);
+    const changed = this.#screenWakeLock !== next;
+    this.#screenWakeLock = next;
+    this.#syncScreenWakeLockControls();
+    this.#reconcileScreenWakeLock();
+    if (changed) this.#emitStateChange();
+  }
+
+  /** Bound radios represent desired policy, never actual browser lock ownership. */
+  #syncScreenWakeLockControls(): void {
+    for (const input of this.#screenWakeLockInputs) {
+      input.checked = input.dataset.pdfScreenWakeLock === this.#screenWakeLock;
+    }
+  }
+
+  /** Supplies semantic eligibility to the viewer-lifetime browser API owner. */
+  #reconcileScreenWakeLock(): void {
+    if (!this.#viewerScreenWakeLock) return;
+    const fullscreen = this.#viewerFullscreen?.active ?? false;
+    const policyMatches =
+      this.#screenWakeLock === "always" ||
+      (this.#screenWakeLock === "fullscreen-only" && fullscreen) ||
+      (this.#screenWakeLock === "presentation-only" && this.#presentationMode) ||
+      (this.#screenWakeLock === "presentation-or-fullscreen" &&
+        (this.#presentationMode || fullscreen));
+    this.#viewerScreenWakeLock.reconcile(
+      !this.#destroyed && this.#hostActive && this.#documentVisible && policyMatches,
+    );
+  }
+
   /** Enables or disables native PDF text-selection interaction mode. */
   public setTextSelectionMode(active: boolean): void {
     if (this.#destroyed)
@@ -4023,6 +4099,7 @@ export class PdfjsViewer {
    * close/replacement deliberately preserve this infrastructure and custom UI.
    */
   #releaseViewerInfrastructure(): void {
+    this.#viewerScreenWakeLock?.destroy();
     this.#previousBoundaryControlPress?.reset();
     this.#nextBoundaryControlPress?.reset();
     this.#presentationInput.destroy();
@@ -4048,6 +4125,7 @@ export class PdfjsViewer {
   }
 
   #rollbackConstruction(): void {
+    runCleanup(() => this.#viewerScreenWakeLock?.destroy());
     runCleanup(() =>
       (this.#presentationInput as PresentationInputController | undefined)?.destroy(),
     );
@@ -5942,6 +6020,13 @@ export class PdfjsViewer {
   }
 
   #wireViewControls(): void {
+    for (const input of this.#screenWakeLockInputs) {
+      this.#on(input, "change", () => {
+        if (input.checked) {
+          this.setScreenWakeLock(normalizeScreenWakeLockPolicy(input.dataset.pdfScreenWakeLock));
+        }
+      });
+    }
     // Page layout toggle (if present in markup)
     const containViewFailure = (operation: Promise<void>) =>
       void operation.catch(error => {
