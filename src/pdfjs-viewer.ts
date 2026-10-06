@@ -6733,8 +6733,20 @@ export class PdfjsViewer {
       this.#syncOutlineActive();
       this.#documentNavigation.scheduleNavigationStateSync(this.#navigationHost());
 
+      const reachedPendingRow =
+        presentationPage == null && pendingPage != null && pendingIndex === idx;
+      if (reachedPendingRow) {
+        this.#pendingNavTargetPage = null;
+        if (!this.#smoothNavigation && !this.#pendingExplicitNavigationIntent?.usePosition)
+          this.#pendingExplicitNavigationIntent = null;
+        this.#pendingNavClearTimer = this.#documentLifetime.clearTimeout(
+          this.#pendingNavClearTimer,
+        );
+      }
+      // Publish arrival in this frame: the final animation write may not produce
+      // another scroll callback after pending-target ownership is released.
       if (
-        (presentationPage != null || pendingPage == null) &&
+        (presentationPage != null || pendingPage == null || reachedPendingRow) &&
         currentPage !== this.#lastEmittedPage
       ) {
         this.#lastEmittedPage = currentPage;
@@ -6742,14 +6754,6 @@ export class PdfjsViewer {
           new this.#ownerWindow.CustomEvent("pdf:pagechange", { detail: { page: currentPage } }),
         );
         this.#emitStateChange();
-      }
-      if (presentationPage == null && pendingPage != null && pendingIndex === idx) {
-        this.#pendingNavTargetPage = null;
-        if (!this.#smoothNavigation && !this.#pendingExplicitNavigationIntent?.usePosition)
-          this.#pendingExplicitNavigationIntent = null;
-        this.#pendingNavClearTimer = this.#documentLifetime.clearTimeout(
-          this.#pendingNavClearTimer,
-        );
       }
     });
   }

@@ -13,6 +13,9 @@ import { installTestPlatform } from "./test-platform.js";
 class FakeClassList {
   readonly #values = new Set<string>();
   constructor(private readonly owner: FakeElement) {}
+  add(name: string): void {
+    this.toggle(name, true);
+  }
   toggle(name: string, force?: boolean): void {
     if (force) this.#values.add(name);
     else this.#values.delete(name);
@@ -155,6 +158,85 @@ function owner(
     },
   );
 }
+
+test("a selection change supersedes an opening reveal waiting for a sidebar transition", async () => {
+  const frames: FrameRequestCallback[] = [];
+  const finished = deferred<Animation>();
+  class FakeTransition {
+    readonly finished = finished.promise;
+  }
+  const platform = installTestPlatform(() => new FakeElement() as unknown as Element, {
+    AbortController: globalThis.AbortController,
+    CSSTransition: FakeTransition as unknown as typeof CSSTransition,
+    requestAnimationFrame: callback => frames.push(callback),
+    getComputedStyle: () => ({ overflowY: "auto" }) as CSSStyleDeclaration,
+  });
+  try {
+    const scrolls: ScrollToOptions[] = [];
+    const sidebar = Object.assign(new FakeElement(), {
+      scrollHeight: 200,
+      clientHeight: 40,
+      clientTop: 0,
+      scrollTop: 0,
+      getAnimations: () => [new FakeTransition() as unknown as Animation],
+      getBoundingClientRect: () => ({ top: 0 }),
+      scrollTo: (options: ScrollToOptions) => scrolls.push(options),
+    });
+    const link = Object.assign(new FakeElement("BUTTON"), {
+      className: "pdf-outline-link",
+      getBoundingClientRect: () => ({ top: 80, bottom: 100 }),
+    });
+    const item = new FakeElement("LI");
+    item.dataset.outlineKey = "second";
+    item.append(link);
+    const content = new FakeElement();
+    sidebar.append(content);
+    content.append(item);
+    let selected = false;
+    link.classList.add = () => {
+      selected = true;
+    };
+    content.querySelectorAll = <T>() => [item as T];
+    content.querySelector = <T>() => (selected ? (link as T) : null);
+    const presentation = new DocumentOutlinePresentation(
+      {
+        sidebar: sidebar as unknown as HTMLElement,
+        content: content as unknown as HTMLElement,
+        filter: null,
+        filterInput: null,
+      },
+      {
+        filterEnabled: false,
+        filterLabel: "Filter",
+        untitledLabel: "(Untitled)",
+        noOutlineLabel: "Empty",
+        preparationLabel: "Preparing",
+        preparationErrorLabel: "Failed",
+        filterOptions: { caseSensitive: false, diacritics: "smart" },
+        viewerId: "test-viewer",
+      },
+      {
+        select() {},
+        preparationStateChanged() {},
+        preparationCompleted() {},
+        isOpen: () => true,
+        isOverlay: () => false,
+        hasTouch: () => false,
+        scrollBehavior: () => "smooth",
+      },
+    );
+    presentation.open();
+    presentation.setActiveKey("second");
+    assert.deepEqual(scrolls, [{ top: 60, behavior: "smooth" }]);
+    finished.resolve({} as Animation);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    for (const frame of frames) frame(0);
+    assert.deepEqual(scrolls, [{ top: 60, behavior: "smooth" }]);
+    presentation.destroy();
+  } finally {
+    platform.restore();
+  }
+});
 
 test("joins one preparation handoff and publishes its current outcome once", async () => {
   const work = deferred<DocumentOutlinePreparationOutcome>();

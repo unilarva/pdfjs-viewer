@@ -2319,6 +2319,33 @@ test("annotation destination resolution survives neutral input and yields to a n
   await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(3);
 });
 
+test("annotation navigation publishes arrival even without a later native scroll event", async ({
+  page,
+}) => {
+  const internalLink = page.locator(
+    "#primary .linkAnnotation[data-internal-link] > a.pdf-annotation-link",
+  );
+  await expect(internalLink).toBeVisible();
+  await page.evaluate(() => {
+    // Model a busy engine jumping straight to the final animation frame, with no
+    // subsequent native scroll callback to repair an unpublished arrival.
+    const requestFrame = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = callback => requestFrame(time => callback(time * 100));
+    window.addEventListener(
+      "scroll",
+      event => {
+        if (event.target === document.querySelector("#primary .pdf-container"))
+          event.stopImmediatePropagation();
+      },
+      true,
+    );
+  });
+  await internalLink.dispatchEvent("click");
+  await expect(page.locator("#primary .pdf-page-number-input")).toHaveValue("2");
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(2);
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.canGoBack)).toBe(true);
+});
+
 test("real AnnotationLayer keeps package classes and core geometry in headless UI", async ({
   page,
 }) => {

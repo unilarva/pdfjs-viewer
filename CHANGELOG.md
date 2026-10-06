@@ -4,6 +4,9 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Fixed a delayed sidebar-opening reveal overriding a newer outline selection's smooth scroll.
+- Fixed positional PDF-link navigation leaving `state.currentPage` stale when the last animation
+  frame reaches its destination without a subsequent native scroll callback.
 - Added progressive Screen Wake Lock support with five selectable policies and a
   `"presentation-only"` default. `state.screenWakeLock` and `setScreenWakeLock(policy)`
   expose the selected policy, not actual lock status.

@@ -264,7 +264,11 @@ export class DocumentOutlinePresentation {
     next?.classList.add("pdf-outline-current");
     if (previous !== next) {
       if (reason === "opening") this.#scheduleReveal();
-      else this.#scrollActiveIntoView(this.#callbacks.scrollBehavior());
+      else {
+        // A delayed opening reveal must not replace a newer selection's smooth scroll.
+        this.cancelReveal();
+        this.#scrollActiveIntoView(this.#callbacks.scrollBehavior());
+      }
     }
   }
 
