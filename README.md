@@ -71,8 +71,8 @@ and the new viewer release's `peerDependencies`.
   Automated mobile projects use desktop engine binaries with a touch-capable narrow
   viewport; they are interaction regressions, not physical Android/iOS qualification.
   Native selection handles and system print UI remain browser-owned.
-- The consuming application must install the exact `pdfjs-dist` version declared in this
-  release's `peerDependencies` (currently `6.3.289`). The package does not bundle PDF.js,
+- The consuming application must install an exact `pdfjs-dist` version declared in this
+  release's `peerDependencies` (currently `6.3.289` or `6.4.299`). The package does not bundle PDF.js,
   its worker, fonts, CMaps, ICC data, or WASM assets.
 - An ESM-capable bundler or browser setup. There is no CommonJS build.
 - A browser document when constructing a viewer. SSR tooling can import the package,
@@ -92,7 +92,7 @@ Only documented entry points are public. Implementation modules below `dist/` ar
 Install the viewer and its exact PDF.js peer:
 
 ```sh
-npm install --save-exact @unilarva/pdfjs-viewer pdfjs-dist@6.3.289
+npm install --save-exact @unilarva/pdfjs-viewer pdfjs-dist@6.4.299
 ```
 
 Give the host an explicit height; otherwise the scrollable document area can collapse:

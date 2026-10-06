@@ -267,7 +267,7 @@ function requireRule(rules, [selector, property, value], label, category, versio
   const values = rules.get(normalizeSelector(selector));
   if (!values)
     errors.push(`${category}: ${label} selector ${selector} is missing for PDF.js ${version}`);
-  else if (values.get(property) !== value)
+  else if (values.get(property)?.replace(/\s+/g, " ").trim() !== value)
     errors.push(
       `${category}: ${label} selector ${selector} requires ${property}: ${value} for PDF.js ${version}`,
     );

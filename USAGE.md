@@ -57,8 +57,8 @@ and demo commands belong to the
   Automated mobile projects exercise desktop engine binaries with a touch-capable narrow viewport;
   they are synthetic interaction regressions, not physical Android/iOS browser qualification.
   Native OS selection handles and system print UI remain browser-owned.
-- `pdfjs-dist 6.3.289`, installed by the consuming application. This is the only currently
-  qualified release and the current release's exact supported version; each release's `peerDependencies` declaration is
+- `pdfjs-dist 6.3.289` or `6.4.299`, installed by the consuming application. These are the currently
+  qualified releases; each release's `peerDependencies` declaration is
   authoritative. This package does not bundle PDF.js, its worker, fonts, CMaps, ICC data,
   or WASM assets.
 - A bundler or browser setup that supports ESM. There is no CommonJS build.
@@ -89,7 +89,7 @@ review the license obligations appropriate to their distribution model.
 ### 1. Install dependencies
 
 ```sh
-npm install --save-exact @unilarva/pdfjs-viewer pdfjs-dist@6.3.289
+npm install --save-exact @unilarva/pdfjs-viewer pdfjs-dist@6.4.299
 ```
 
 `pdfjs-dist` is a peer dependency. Keep the API and worker from the same installed
@@ -345,7 +345,7 @@ JavaScript MIME type. Pin CDN URLs to the exact installed `pdfjs-dist` version.
 ```ts
 const runtime = new PdfjsViewerRuntime({
   pdfjs,
-  workerSrc: "https://static.example.com/pdfjs/6.3.289/pdf.worker.min.mjs",
+  workerSrc: "https://static.example.com/pdfjs/6.4.299/pdf.worker.min.mjs",
 });
 const viewer = new PdfjsViewer({ rootEl, runtime });
 await viewer.load(pdfUrl);

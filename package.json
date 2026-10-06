@@ -113,7 +113,7 @@
     "format:check": "prettier --check ."
   },
   "peerDependencies": {
-    "pdfjs-dist": "6.3.289"
+    "pdfjs-dist": "6.3.289 || 6.4.299"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
@@ -121,7 +121,7 @@
     "css-loader": "^7.1.2",
     "esbuild": "^0.28.1",
     "mini-css-extract-plugin": "^2.9.4",
-    "pdfjs-dist": "6.3.289",
+    "pdfjs-dist": "6.4.299",
     "postcss": "8.5.26",
     "postcss-selector-parser": "7.1.5",
     "prettier": "^3.9.6",

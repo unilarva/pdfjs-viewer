@@ -1486,7 +1486,8 @@ annotation security and persistence, page-DOM virtualization, and multi-document
 
 ### Publication Boundary
 
-This package release qualifies only `pdfjs-dist 6.3.289`. The public frozen version set and ordered
+This package release qualifies `pdfjs-dist 6.3.289` and `6.4.299`. Both use the same implementation
+without version-specific compatibility scaffolding. The public frozen version set and ordered
 exact peer union are mechanically kept identical; compatibility installers and CI iterate the peer
 union, while the package development pin selects its newest entry. `pdfjs-compatibility.ts`
 is the complete owner for all PDF.js compatibility casts and capability checks. CI exercises every

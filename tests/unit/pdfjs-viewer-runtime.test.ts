@@ -139,12 +139,18 @@ test("failed worker global installation rolls back globals, lease, and owned wor
 
 test("PDF.js version policy freezes qualified releases and rejects unsupported defaults", () => {
   assert.equal(Object.isFrozen(PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS), true);
-  assert.deepEqual(PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS, ["6.3.289"]);
+  assert.deepEqual(PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS, ["6.3.289", "6.4.299"]);
+  for (const version of PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS) {
+    const pdfjs = pdfjsGlobals("previous.js", null);
+    pdfjs.version = version;
+    const runtime = new PdfjsViewerRuntime({ pdfjs, workerPort: worker() });
+    runtime.destroy();
+  }
   const candidate = pdfjsGlobals("previous.js", null);
   candidate.version = "6.2.999";
   assert.throws(
     () => new PdfjsViewerRuntime({ pdfjs: candidate, workerPort: worker() }),
-    /qualified releases \(6\.3\.289\)/,
+    /qualified releases \(6\.3\.289, 6\.4\.299\)/,
   );
   assert.throws(
     () =>
@@ -168,7 +174,7 @@ test("unqualified PDF.js admission logs but does not bypass structural runtime c
     logger: entry => logs.push(entry),
   });
   assert.equal(logs[0]?.event, "unqualified-pdfjs-version");
-  assert.deepEqual(logs[0]?.details?.qualifiedVersions, ["6.3.289"]);
+  assert.deepEqual(logs[0]?.details?.qualifiedVersions, ["6.3.289", "6.4.299"]);
   runtime.destroy();
   assert.throws(
     () =>

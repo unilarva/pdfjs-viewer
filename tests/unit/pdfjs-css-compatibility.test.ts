@@ -48,6 +48,46 @@ test("CSS qualification reports category, selector, declaration, and version dri
   );
 });
 
+test("CSS qualification tolerates wrapped values but rejects changed transforms", async () => {
+  const { validatePdfjsCssCompatibility } = await import(
+    `${process.cwd()}/scripts/pdfjs-css-compatibility.mjs`
+  );
+  const manifest = [
+    {
+      category: "text",
+      upstream: [
+        [
+          ".upstream",
+          "transform",
+          "rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv))",
+        ],
+      ],
+      local: [],
+      sentinels: [],
+      divergences: [{ id: "fixture", reason: "Fixture checks wrapped text transforms." }],
+    },
+  ] as const;
+  const candidate = {
+    upstreamCss: `.upstream {
+      transform: rotate(var(--rotate)) scaleX(var(--scale-x))
+        scale(var(--min-font-size-inv));
+    }`,
+    localCss: "",
+    runtimeSource: "",
+    version: "6.4.299",
+    manifest,
+  };
+  validatePdfjsCssCompatibility(candidate);
+  assert.throws(
+    () =>
+      validatePdfjsCssCompatibility({
+        ...candidate,
+        upstreamCss: candidate.upstreamCss.replace("scaleX", "scaleY"),
+      }),
+    /upstream selector \.upstream requires transform/,
+  );
+});
+
 test("CSS qualification preserves commas inside multiline functional selectors", async () => {
   const { validatePdfjsCssCompatibility } = await import(
     `${process.cwd()}/scripts/pdfjs-css-compatibility.mjs`
