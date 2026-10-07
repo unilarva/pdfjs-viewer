@@ -336,6 +336,7 @@ export class ViewerPrintSetup {
   }
 
   #open(): void {
+    if (this.#dialog.open) return;
     const opener = this.#callbacks.closeTransientUi();
     const generation = this.#callbacks.generation();
     if (this.#documentGeneration !== generation) {

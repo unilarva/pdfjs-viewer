@@ -98,6 +98,7 @@ declare global {
       probePrintAdapterData(): Promise<Record<string, unknown>>;
       probePrintAdapterRevision(): Promise<Record<string, unknown>>;
       probePrintFeaturePolicies(): Promise<Record<string, unknown>>;
+      probePrintKeyboardShortcut(): Promise<Record<string, boolean>>;
       probeDeviceCompatibility(): Promise<Record<string, unknown>>;
       probeAutomaticPrintLayouts(): Promise<Record<string, unknown>>;
       probePrintSetupPreflight(): Promise<Record<string, unknown>>;
@@ -2901,6 +2902,144 @@ window.fixture = {
         : firefoxAndroidSpread?.reason,
       defaultAfter: defaultAfter.ok ? defaultAfter.nativeCapabilities : null,
     };
+  },
+  async probePrintKeyboardShortcut() {
+    printPermissions = "high";
+    const viewers: PdfjsViewer[] = [];
+    const hosts: HTMLElement[] = [];
+    const create = async (
+      options: Partial<ConstructorParameters<typeof PdfjsViewer>[0]> = {},
+      load = true,
+    ) => {
+      const host = document.createElement("section");
+      host.style.cssText = "width:600px;height:600px";
+      document.body.append(host);
+      hosts.push(host);
+      const viewer = new PdfjsViewer({
+        rootEl: host,
+        runtime,
+        ui: "headless",
+        deviceCompatibility: fixtureDeviceCompatibility,
+        features: { print: { mode: "native" } },
+        ...options,
+      });
+      viewers.push(viewer);
+      if (load && !(await viewer.load("/fixture.pdf")).ok)
+        throw new Error("Print keyboard fixture did not load");
+      return { host, viewer };
+    };
+    const press = (target: EventTarget, options: KeyboardEventInit = {}) => {
+      const event = new KeyboardEvent("keydown", {
+        key: "p",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+        ...options,
+      });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const results: Record<string, boolean> = {};
+    const originalOpen = window.open;
+    try {
+      const native = await create({ ui: "default" });
+      results.viewerScopeOutsideUntouched = !press(window);
+      results.ctrlOpensSetup = press(native.host);
+      const dialog = native.host.querySelector<HTMLDialogElement>(".pdf-print-setup")!;
+      results.setupOpen = dialog.open;
+      const range = dialog.querySelector<HTMLInputElement>(".pdf-print-range")!;
+      range.value = "2";
+      results.cmdHandledInInput = press(range, { ctrlKey: false, metaKey: true, key: "P" });
+      results.setupPreserved = dialog.open && range.value === "2";
+      results.repeatHandled = press(native.host, { repeat: true });
+      results.shiftUntouched = !press(native.host, { shiftKey: true });
+      results.altUntouched = !press(native.host, { altKey: true });
+      results.compositionUntouched = !press(native.host, { isComposing: true });
+      results.unmodifiedUntouched = !press(native.host, { ctrlKey: false });
+      let setupClicks = 0;
+      native.host.querySelector(".pdf-print-btn")!.addEventListener("click", () => setupClicks++);
+      native.host.addEventListener("keydown", event => event.preventDefault(), {
+        capture: true,
+        once: true,
+      });
+      press(native.host);
+      results.preventedUntouched = setupClicks === 0;
+      dialog.close();
+      native.viewer.setActive(false);
+      results.inactiveUntouched = !press(native.host);
+
+      for (const [name, options, load] of [
+        ["disabled", { features: { print: "off" } }, true],
+        [
+          "unsupported",
+          {
+            deviceCompatibility: unsupportedDeviceCompatibility,
+            features: { print: { mode: "native", browserFallback: false } },
+          },
+          true,
+        ],
+        ["keyboardDisabled", { keyboard: false }, true],
+        ["notReady", {}, false],
+      ] as const) {
+        const created = await create(options, load);
+        results[`${name}Untouched`] = !press(created.host);
+      }
+      printPermissions = "denied";
+      const denied = await create();
+      results.permissionDeniedUntouched = !press(denied.host);
+      printPermissions = "high";
+
+      let openedSources = 0;
+      window.open = (() => ({
+        opener: window,
+        closed: false,
+        close() {},
+        location: {
+          replace() {
+            openedSources++;
+          },
+        },
+      })) as unknown as typeof window.open;
+      const browser = await create({ features: { print: "browser" } });
+      results.browserSourceHandled = press(browser.host);
+      for (let frame = 0; frame < 30 && openedSources === 0; frame++)
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      results.browserSourceOpened = openedSources === 1;
+
+      let calls = 0;
+      let finish!: () => void;
+      const pending = new Promise<void>(resolve => {
+        finish = resolve;
+      });
+      const adapter = await create({
+        features: { print: "adapter" },
+        printAdapter: async () => {
+          calls++;
+          await pending;
+          return { status: "adapter-completed" };
+        },
+      });
+      results.headlessAdapterHandled = press(adapter.host);
+      results.busyHandled = press(adapter.host);
+      results.adapterRepeatHandled = press(adapter.host, { repeat: true });
+      for (let frame = 0; frame < 30 && calls === 0; frame++)
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      results.oneAdapterInvocation = calls === 1;
+      finish();
+
+      const global = await create({ keyboard: { scope: "global" }, ui: "default" });
+      results.globalHandled = press(window);
+      results.globalSetupOpen =
+        global.host.querySelector<HTMLDialogElement>(".pdf-print-setup")!.open;
+      global.viewer.setActive(false);
+      results.noGlobalOwnerUntouched = !press(window);
+      return results;
+    } finally {
+      window.open = originalOpen;
+      for (const viewer of viewers) viewer.destroy();
+      for (const host of hosts) host.remove();
+      printPermissions = "runtime";
+    }
   },
   async probeAuthenticatedPrintSource() {
     printPermissions = "high";

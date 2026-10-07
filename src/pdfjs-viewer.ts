@@ -432,6 +432,7 @@ export class PdfjsViewer {
   #downloadFilledDocumentBusy = false;
   #printBtnEl: HTMLButtonElement | null = null;
   #viewerPrintSetup: ViewerPrintSetup | null = null;
+  #printActionBusy = false;
   #documentInformationBtnEl: HTMLButtonElement | null = null;
   #viewerDocumentInformation: ViewerDocumentInformation | null = null;
 
@@ -2246,7 +2247,7 @@ export class PdfjsViewer {
     return resolveViewerPrintRoute(mode, capabilities, this.#printFeature.browserFallback);
   }
 
-  #logPrintRoute(trigger: "button" | "public-api", route = this.#printRoute()): void {
+  #logPrintRoute(trigger: "button" | "keyboard" | "public-api", route = this.#printRoute()): void {
     this.#log("debug", "print-route-selected", "Selected print route", {
       trigger,
       configuredMode: route.configuredMode,
@@ -6219,12 +6220,21 @@ export class PdfjsViewer {
     // Print button
     const printButton = this.#printBtnEl;
     if (printButton && !this.#viewerPrintSetup)
-      this.#on(printButton, "click", () => {
-        this.#closeTransientUi();
-        this.#logPrintRoute("button");
-        void this.#executePrint({}, false).catch(error => {
-          this.#log("error", "print-failed", "Print action failed", { error });
-        });
+      this.#on(printButton, "click", () => this.#runPrintAction("button"));
+  }
+
+  /** Runs a direct UI print action without admitting overlapping invocations. */
+  #runPrintAction(trigger: "button" | "keyboard"): void {
+    if (this.#printActionBusy) return;
+    this.#printActionBusy = true;
+    this.#closeTransientUi();
+    this.#logPrintRoute(trigger);
+    void this.#executePrint({}, false)
+      .catch(error => {
+        this.#log("error", "print-failed", "Print action failed", { error });
+      })
+      .finally(() => {
+        this.#printActionBusy = false;
       });
   }
 
@@ -7226,6 +7236,24 @@ export class PdfjsViewer {
    */
   #handleKeyboardEvent(e: KeyboardEvent): void {
     if (e.key === "Tab") return; // never hijack focus nav
+
+    // Leave browser printing intact unless this viewer can take ownership.
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      e.key.toLowerCase() === "p" &&
+      !e.altKey &&
+      !e.shiftKey &&
+      !e.defaultPrevented &&
+      !e.isComposing &&
+      this.#hostActive &&
+      this.state.canPrint
+    ) {
+      e.preventDefault();
+      if (e.repeat || this.#printActionBusy || this.#printState().phase !== "idle") return;
+      if (this.#viewerPrintSetup) this.#printBtnEl?.click();
+      else this.#runPrintAction("keyboard");
+      return;
+    }
 
     // --- Search (Ctrl/Cmd+F) ---
     if (this.#searchInputEl && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {

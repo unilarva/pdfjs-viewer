@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Added Ctrl/Command+P to open print setup or invoke the configured print route when keyboard
+  shortcuts are enabled and the active viewer can print, preserving browser printing otherwise.
 - Fixed a delayed sidebar-opening reveal overriding a newer outline selection's smooth scroll.
 - Fixed positional PDF-link navigation leaving `state.currentPage` stale when the last animation
   frame reaches its destination without a subsequent native scroll callback.

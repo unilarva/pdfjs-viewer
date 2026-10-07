@@ -1236,6 +1236,11 @@ transient pinch, wheel, and slider feedback remains continuous until commit.
   window-level commands to the active `viewerId`, while `keyboard: false` installs no
   keyboard handler. Editable controls remain protected. Supported navigation includes
   arrows, Page Up/Down, Space, Home/End, Escape for panels, and F3/Shift+F3 for search.
+  Ctrl/Command+P opens the print setup dialog when bound, or invokes the configured print
+  route directly (including in headless mode). It follows the same keyboard scope and
+  requires an active viewer with `state.canPrint === true`; otherwise browser printing
+  remains untouched. Modified Alt/Shift variants are not intercepted, and repeated presses
+  do not start overlapping print actions or reset an open setup dialog.
 - **Document data and downloads:** `getDocumentData({ document })` returns detached bytes for the
   `"original"` document (the default) or the document `"with-form-values"`. Concurrent original
   reads share one PDF.js `getData()` operation, but every successful caller receives its own array.

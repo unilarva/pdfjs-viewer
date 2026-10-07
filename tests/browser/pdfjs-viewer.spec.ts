@@ -5831,6 +5831,13 @@ test("print adapters can request byte-backed document data with lifecycle cancel
   });
 });
 
+test("print keyboard shortcuts respect availability, scope, setup, and duplicate admission", async ({
+  page,
+}) => {
+  const results = await page.evaluate(() => window.fixture.probePrintKeyboardShortcut());
+  for (const [name, passed] of Object.entries(results)) expect(passed, name).toBe(true);
+});
+
 test("explicit print modes own routing, setup, logs, and operational state", async ({ page }) => {
   await expect(page.evaluate(() => window.fixture.probePrintFeaturePolicies())).resolves.toEqual({
     offControlAbsent: true,
