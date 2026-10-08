@@ -3,10 +3,46 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import postcss from "postcss";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { makeDemoSamplePdf } from "../../scripts/demo-pdf.mjs";
+
+test("demo presentation styles are confined to the header, outside the default viewer", async () => {
+  const css = postcss.parse(await readFile("examples/demo.css", "utf8"));
+  css.walkRules(rule => {
+    let parent: postcss.Root | postcss.Document | postcss.AtRule | postcss.Rule | undefined =
+      rule.parent;
+    while (parent && !(parent.type === "atrule" && parent.name === "scope")) {
+      parent = parent.parent;
+    }
+    if (parent?.type === "atrule") {
+      assert.equal(parent.params, "(.demo-header)");
+    } else {
+      assert.ok(["html,\nbody", ".demo-shell"].includes(rule.selector), rule.selector);
+      rule.walkDecls(declaration => {
+        assert.ok(
+          [
+            "margin",
+            "height",
+            "overflow",
+            "overscroll-behavior",
+            "display",
+            "grid-template-rows",
+          ].includes(declaration.prop),
+          `Only outer page layout may be unscoped: ${declaration.prop}`,
+        );
+      });
+    }
+    assert.doesNotMatch(rule.selector, /(?:\.pdf-|#pdf-viewer|\.demo-viewer)/);
+    rule.walkDecls(declaration => assert.ok(!declaration.prop.startsWith("--pdf-")));
+  });
+  const html = await readFile("examples/index.html", "utf8");
+  assert.match(html, /<section id="pdf-viewer" aria-label="PDF viewer"><\/section>/);
+  assert.match(html, /href="\.\/default-ui\.css"/);
+});
 
 test("demo sample PDF has its book outline, attachments, and odd-page chapter headings", async () => {
   const standardFontDataUrl = fileURLToPath(

@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Removed demo-specific viewer styling so the demo showcases the unmodified generated default UI;
+  demo presentation styles are scoped to its header.
 - **Breaking: requires `pdfjs-dist 6.4.299`; PDF.js 6.3 is no longer supported.**
   Upgrade the display module, matching worker, and supporting PDF.js assets together.
   Both standard and legacy builds of the required release remain supported.
