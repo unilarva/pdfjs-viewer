@@ -136,6 +136,8 @@ export interface DocumentViewRendererPort {
   invalidateView(options: Readonly<{ retainPlaceholders: boolean; graceMs: number }>): void;
   /** Reconciles raster and presentation work against current view demand. */
   reconcile(view: Readonly<RenderViewSnapshot>, demand: Readonly<RenderPresentationDemand>): void;
+  /** Suspends optional crop work while existing imagery is transiently transformed. */
+  setInteractionActive(active: boolean): void;
 }
 
 /** Narrow text-presentation capability consumed by the document view. */
@@ -981,6 +983,7 @@ export class DocumentView {
 
   /** Applies horizontal overflow policy for canonical or transient zoom state. */
   updateHorizontalScrollLock(transientZoomActive: boolean): void {
+    this.#renderer.setInteractionActive(transientZoomActive);
     if (!this.#container.isConnected) return;
     this.#syncContentWidth();
     const fits = this.#layout.rowFitsHorizontally(
@@ -1430,7 +1433,51 @@ export class DocumentView {
           : { width: this.#layout.basePageWidth, height: this.#layout.basePageHeight },
       );
     }
+    const visibleRange = this.#layout.visibleRowRange(
+      this.#container.scrollTop,
+      this.#container.clientHeight,
+      this.#scale,
+    );
+    const visiblePageRegions = new Map<
+      number,
+      Readonly<import("./detail-render-planner.js").DetailRegion>
+    >();
+    // Read only visible surfaces. These actual intersections include horizontal
+    // panning, centered spreads, presentation rows and fractional layout offsets.
+    if (!this.#container.classList.contains("pdf-pinch-active")) {
+      const container = this.#container.getBoundingClientRect();
+      const left = container.left + this.#container.clientLeft;
+      const top = container.top + this.#container.clientTop;
+      const right = left + this.#container.clientWidth;
+      const bottom = top + this.#container.clientHeight;
+      for (let row = visibleRange.first; row <= visibleRange.last; row++) {
+        for (const pageNo of this.#layout.rows[row] ?? []) {
+          const wrapper = this.#layout.pageWrapFor(pageNo);
+          if (!wrapper) continue;
+          const rect = wrapper.getBoundingClientRect();
+          if (!(rect.width > 0 && rect.height > 0)) continue;
+          const x = Math.max(left, rect.left);
+          const y = Math.max(top, rect.top);
+          const width = Math.min(right, rect.right) - x;
+          const height = Math.min(bottom, rect.bottom) - y;
+          if (width <= 0 || height <= 0) continue;
+          const size = this.#layout.pageSizeFor(pageNo, this.#rotation);
+          const scaleX = (size.width * this.#scale) / rect.width;
+          const scaleY = (size.height * this.#scale) / rect.height;
+          visiblePageRegions.set(
+            pageNo,
+            Object.freeze({
+              x: (x - rect.left) * scaleX,
+              y: (y - rect.top) * scaleY,
+              width: width * scaleX,
+              height: height * scaleY,
+            }),
+          );
+        }
+      }
+    }
     return Object.freeze({
+      visiblePageRegions,
       topologyRevision: this.#layout.topologyRevision,
       pageGeometryRevision: this.#layout.pageGeometryRevision,
       rows: this.#layout.rows,
@@ -1439,11 +1486,7 @@ export class DocumentView {
         top: this.#container.scrollTop,
         height: this.#container.clientHeight,
       }),
-      visibleRange: this.#layout.visibleRowRange(
-        this.#container.scrollTop,
-        this.#container.clientHeight,
-        this.#scale,
-      ),
+      visibleRange,
       motion: this.#motion,
       scale: this.#scale,
       rotation: this.#rotation,

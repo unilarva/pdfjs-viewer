@@ -583,6 +583,7 @@ export class PdfjsViewer {
         this.#terminalLoadError = Object.freeze({ error });
         this.#settleInitialRenderWaiter();
       },
+      annotationOperatorIds: () => this.#pdfjs.OPS,
       diagnostic: entry => this.#log(entry.level, entry.event, entry.message, entry.details),
       primaryPressureChanged: pressure => this.#rasterWorkCoordinator.setPrimaryPressure(pressure),
     },

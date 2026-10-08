@@ -53,13 +53,22 @@ import {
   type RenderOperation,
 } from "./render-scheduler.js";
 import type { PdfjsViewerRenderingProfileSettings } from "./viewer-contracts.js";
-import { startPdfPageRenderTask } from "./pdfjs-compatibility.js";
+import { ownedPdfPageRenderOperatorList, startPdfPageRenderTask } from "./pdfjs-compatibility.js";
 import type { PrimaryRasterPressure } from "./raster-work-coordinator.js";
+import {
+  detailRegionContains,
+  planDetailRaster,
+  type DetailRegion,
+  type DetailRaster,
+} from "./detail-render-planner.js";
 
 const BYTES_PER_MIB = 1024 * 1024;
 const DPR_EPSILON = 1e-6;
 const PAGE_GEOMETRY_EPSILON = 1e-6;
 const MAX_RASTER_ATTEMPTS = 3;
+
+/** Separates unsupported backing stores from ordinary PDF operator failures. */
+class CanvasAllocationError extends Error {}
 
 /** Immutable output dimensions and resource facts selected for one render. */
 interface RenderBudget {
@@ -95,6 +104,8 @@ export interface RenderSurfaceRegistry {
 
 /** Detached immutable layout and viewport facts for one reconciliation. */
 export interface RenderViewSnapshot {
+  /** Actual page-local intersections; omitted by non-DOM renderer tests/hosts. */
+  readonly visiblePageRegions?: ReadonlyMap<number, Readonly<DetailRegion>>;
   readonly topologyRevision: number;
   readonly pageGeometryRevision: number;
   readonly rows: readonly (readonly number[])[];
@@ -151,6 +162,11 @@ interface DocumentRendererDiagnostic {
 
 /** Reentrant cross-owner effects. All callbacks are optional and non-fatal. */
 interface DocumentRendererCallbacks {
+  /** Uses the injected PDF.js module's operation IDs without a second runtime import. */
+  readonly annotationOperatorIds?: () => Readonly<{
+    beginAnnotation: number;
+    endAnnotation: number;
+  }>;
   readonly observedPageGeometry?: (pageNo: number, width: number, height: number) => void;
   readonly present?: (context: Readonly<RenderPresentationContext>) => void | Promise<void>;
   readonly evicted?: (pageNo: number, lease: Readonly<RenderSurfaceLease>) => void;
@@ -164,6 +180,8 @@ interface DocumentRendererCallbacks {
 
 /** Detached aggregate state for facade lifecycle diagnostics only. */
 interface DocumentRendererSnapshot {
+  readonly detailBytes: number;
+  readonly detailCanvasCount: number;
   readonly documentId: number;
   readonly ready: boolean;
   readonly queuedPageCount: number;
@@ -201,12 +219,23 @@ interface RenderOutput {
   readonly operation: RenderOperation | null;
   readonly rasterState: MainRasterState;
   readonly annotationCanvasMap: Map<string, HTMLCanvasElement>;
+  readonly annotationCanvasIds: ReadonlySet<string>;
 }
 
 interface OperationContext {
   readonly documentId: number;
   readonly lease: Readonly<RenderSurfaceLease>;
   readonly rasterState: MainRasterState;
+}
+
+interface DetailTarget {
+  readonly base: RenderOutput;
+  readonly raster: Readonly<DetailRaster>;
+  readonly requestedDpr: number;
+}
+
+interface DetailOutput extends DetailTarget {
+  readonly canvas: HTMLCanvasElement;
 }
 
 interface PresentationRequest {
@@ -266,11 +295,19 @@ export class DocumentRenderer {
   #ownsPages = false;
   #documentId = 0;
   #renderingActive = true;
+  #interactionActive = false;
   #rasterState: MainRasterState = Object.freeze({ optionalContentRevision: 0, annotationMode: 1 });
   #admissionSuspensions = new Set<symbol>();
   #backgroundRasterWaiting = false;
   #view: RenderViewSnapshot | null = null;
   #outputs = new Map<number, RenderOutput>();
+  #detailTargets = new Map<number, DetailTarget>();
+  #detailOutputs = new Map<number, DetailOutput>();
+  #detailOperations = new Map<RenderOperation, DetailTarget>();
+  #waitingForDetailMemory = false;
+  #detailFailures = new WeakMap<RenderOutput, number>();
+  #detailTimer: number | null = null;
+  #detailDiagnostics = new Map<number, string>();
   #operationContexts = new WeakMap<RenderOperation, OperationContext>();
   #activeAnnotationCanvasMaps = new Map<RenderOperation, Map<string, HTMLCanvasElement>>();
   #annotationCanvasOwners = new Map<object, Set<HTMLCanvasElement>>();
@@ -286,6 +323,8 @@ export class DocumentRenderer {
   #initialReadinessCompleted = new Set<number>();
   #rasterFailureAttempts = new Map<string, number>();
   #terminalRasterRequirements = new Set<string>();
+  #pageRenderDprLimits = new Map<number, Readonly<{ scale: number; dpr: number }>>();
+  #allocationFailureAttempts = new Map<string, number>();
   #reflowing = false;
   #preserveReflowOutput = false;
   #placeholderTimer: number | null = null;
@@ -296,6 +335,7 @@ export class DocumentRenderer {
   #geometryRevision = 0;
   #primaryPressure: PrimaryRasterPressure = "idle";
   #reconciling = false;
+  #reconcileAgain = false;
   #cachedTopologyRevision: number | null = null;
   #cachedGeometryRevision: number | null = null;
   #cachedGeometryRotation: RenderViewSnapshot["rotation"] | null = null;
@@ -445,7 +485,7 @@ export class DocumentRenderer {
 
   /** All main raster still owned after exclusive draining and eviction. */
   rasterBytesForExclusiveWork(): number {
-    let bytes = 0;
+    let bytes = this.#detailBytes();
     for (const output of this.#outputs.values()) {
       bytes += output.lease.canvas.width * output.lease.canvas.height * 4;
     }
@@ -473,6 +513,7 @@ export class DocumentRenderer {
     this.#ownsPages = false;
     if (pages && ownsPages) void pages.close();
     this.#view = null;
+    this.#interactionActive = false;
     this.#cachedTopologyRevision = null;
     this.#cachedGeometryRevision = null;
     this.#cachedGeometryRotation = null;
@@ -490,8 +531,12 @@ export class DocumentRenderer {
     this.#initialReadinessCompleted.clear();
     this.#rasterFailureAttempts.clear();
     this.#terminalRasterRequirements.clear();
+    this.#pageRenderDprLimits.clear();
+    this.#allocationFailureAttempts.clear();
     this.#clearPlaceholderTimer();
     this.#resetDiagnosticThrottle();
+    this.#clearDetails();
+    this.#detailFailures = new WeakMap();
     this.#scheduler.reset(task => safely(() => task.cancel()));
     for (const [operation, map] of this.#activeAnnotationCanvasMaps) {
       this.#retainAnnotationOwner(operation, map);
@@ -517,13 +562,22 @@ export class DocumentRenderer {
 
   /** Applies concrete raster policy and reconciles current output. */
   setProfile(profile: string, settings: PdfjsViewerRenderingProfileSettings): void {
+    if (profile === this.#profile && settings === this.#settings) return;
     this.#profile = profile;
     this.#settings = settings;
+    this.#pageRenderDprLimits.clear();
+    this.#allocationFailureAttempts.clear();
     this.#lastPlanSignature = "";
     this.#clearPlaceholderTimer();
     this.#cancelOperations();
     for (const output of [...this.#outputs.values()]) {
-      if (output.state === "placeholder") this.#evictOutput(output);
+      if (
+        output.state === "placeholder" ||
+        output.lease.canvas.width > settings.maxCanvasDimension ||
+        output.lease.canvas.height > settings.maxCanvasDimension ||
+        output.budget.pixelCount > settings.maxCanvasPixels
+      )
+        this.#evictOutput(output);
     }
     if (this.#view) this.#reconcileCurrent(true);
   }
@@ -534,6 +588,23 @@ export class DocumentRenderer {
     this.#renderingActive = active;
     this.#lastPlanSignature = "";
     if (this.#view) this.#reconcileCurrent(true);
+  }
+
+  /** Keeps current imagery but suspends optional crop work during transient zoom. */
+  setInteractionActive(active: boolean): void {
+    if (this.#interactionActive === active) return;
+    this.#interactionActive = active;
+    if (active) {
+      if (this.#detailTimer != null) this.#timerWindow()?.clearTimeout(this.#detailTimer);
+      this.#detailTimer = null;
+      this.#detailTargets.clear();
+      this.#scheduler.cancelIncompatible(
+        operation => operation.kind !== "detail",
+        task => safely(() => task.cancel()),
+      );
+    } else {
+      this.#scheduleDetails();
+    }
   }
 
   /** Suspends speculative buffering while a lower-priority raster owner is waiting. */
@@ -645,7 +716,9 @@ export class DocumentRenderer {
         }
       }
     }
-    this.#view = this.#detachView(view);
+    const detached = this.#detachView(view);
+    if (!this.#view || !this.#sameView(this.#view, detached)) this.#view = detached;
+    this.#scheduleDetails();
     this.#reconcileCurrent(false);
     this.#enqueueDemandedPresentations();
   }
@@ -697,6 +770,8 @@ export class DocumentRenderer {
       committedBytes,
       placeholderBytes,
       directMutatingBytes,
+      detailBytes: this.#detailBytes(),
+      detailCanvasCount: this.#detailOutputs.size,
       activeTemporaryBytes:
         scheduler.activeOffscreenPixels * 4 +
         activeAnnotationCanvasBytes +
@@ -764,6 +839,14 @@ export class DocumentRenderer {
       this.#cachedGeometryRotation = view.rotation;
     }
     return Object.freeze({
+      visiblePageRegions: view.visiblePageRegions
+        ? new Map(
+            [...view.visiblePageRegions].map(([page, region]) => [
+              page,
+              Object.freeze({ ...region }),
+            ]),
+          )
+        : undefined,
       topologyRevision: view.topologyRevision,
       pageGeometryRevision: view.pageGeometryRevision,
       rows: this.#cachedRows,
@@ -781,6 +864,39 @@ export class DocumentRenderer {
       pageBaseSizes: this.#cachedPageBaseSizes,
       fallbackPageSize: this.#cachedFallbackPageSize,
     });
+  }
+
+  /** Equivalent ingress must not revoke an in-progress reconciliation's identity. */
+  #sameView(a: RenderViewSnapshot, b: RenderViewSnapshot): boolean {
+    if (
+      a.rows !== b.rows ||
+      a.rowBounds !== b.rowBounds ||
+      a.pageBaseSizes !== b.pageBaseSizes ||
+      a.fallbackPageSize !== b.fallbackPageSize ||
+      a.viewport.top !== b.viewport.top ||
+      a.viewport.height !== b.viewport.height ||
+      a.visibleRange.first !== b.visibleRange.first ||
+      a.visibleRange.last !== b.visibleRange.last ||
+      a.visibleRange.center !== b.visibleRange.center ||
+      a.motion !== b.motion ||
+      a.scale !== b.scale ||
+      a.rotation !== b.rotation ||
+      a.devicePixelRatio !== b.devicePixelRatio ||
+      a.visiblePageRegions?.size !== b.visiblePageRegions?.size
+    )
+      return false;
+    for (const [pageNo, region] of a.visiblePageRegions ?? []) {
+      const other = b.visiblePageRegions?.get(pageNo);
+      if (
+        !other ||
+        region.x !== other.x ||
+        region.y !== other.y ||
+        region.width !== other.width ||
+        region.height !== other.height
+      )
+        return false;
+    }
+    return true;
   }
 
   #currentBufferViewportHeights(): number | "unlimited" {
@@ -810,15 +926,34 @@ export class DocumentRenderer {
 
   #reconcileCurrent(force: boolean): void {
     const pdf = this.#pdf;
+    const documentId = this.#documentId;
     const view = this.#view;
-    if (!pdf || !view || this.#reflowing || this.#reconciling || !view.rows.length) return;
+    if (!pdf || !view || this.#reflowing || !view.rows.length) return;
     const signature = this.#viewSignature(view);
     if (!force && signature === this.#lastPlanSignature) return;
+    if (this.#reconciling) {
+      this.#reconcileAgain = true;
+      return;
+    }
+    const settings = this.#settings;
+    const rasterState = this.#rasterState;
+    const renderingActive = this.#renderingActive;
     this.#lastPlanSignature = signature;
     this.#reconciling = true;
     try {
       this.#evictUnneededPlaceholders(view);
       const plan = this.#createPlan(view);
+      if (
+        pdf !== this.#pdf ||
+        documentId !== this.#documentId ||
+        view !== this.#view ||
+        settings !== this.#settings ||
+        rasterState !== this.#rasterState ||
+        renderingActive !== this.#renderingActive ||
+        this.#reflowing ||
+        this.#admissionSuspensions.size
+      )
+        return;
       if (!this.#initialReadinessPages) {
         this.#initialReadinessPages = Object.freeze(new Set(plan.visiblePages));
       }
@@ -873,6 +1008,10 @@ export class DocumentRenderer {
       this.#pump();
     } finally {
       this.#reconciling = false;
+      if (this.#reconcileAgain) {
+        this.#reconcileAgain = false;
+        this.#reconcileCurrent(true);
+      }
     }
   }
 
@@ -950,7 +1089,7 @@ export class DocumentRenderer {
         bytes,
       });
     }
-    return createRenderPlan({
+    const input = {
       rows: view.rows,
       rowBounds: view.rowBounds,
       viewport: view.viewport,
@@ -966,16 +1105,49 @@ export class DocumentRenderer {
       retainCommittedPages: this.#renderingActive,
       retainedCandidates,
       committedPageRenderDprs,
+      pageRenderDprLimits: new Map(
+        [...this.#pageRenderDprLimits]
+          .filter(([, limit]) => limit.scale === view.scale)
+          .map(([page, limit]) => [page, limit.dpr]),
+      ),
       committedPageBytes,
       pageAdditionalBytes,
       fixedReplacementPageBytes,
       requiredPages: this.#initialReady ? undefined : (this.#initialReadinessPages ?? undefined),
       fixedOccupiedBytes,
+    };
+    // Reserve visible detail before speculative rows. Mandatory base output keeps
+    // its existing quality policy; details only consume remaining hard headroom.
+    if (!this.#interactionActive && this.#needsDetailPlanning(view, false)) {
+      this.#planDetails(
+        view,
+        createRenderPlan({
+          ...input,
+          maxBufferViewportHeights: 0,
+          maxBufferPages: 0,
+          retainCommittedPages: false,
+        }).estimatedPeakBytes,
+      );
+    }
+    let detailReservedBytes = this.#detailBytes();
+    for (const target of this.#detailOperations.values())
+      detailReservedBytes += target.raster.bytes;
+    for (const target of this.#detailTargets.values()) {
+      if (![...this.#detailOperations.values()].includes(target))
+        detailReservedBytes += target.raster.bytes;
+    }
+    return createRenderPlan({
+      ...input,
+      fixedOccupiedBytes: fixedOccupiedBytes + detailReservedBytes,
     });
   }
 
   #pump(): void {
     while (true) {
+      if (this.#waitingForDetailMemory) {
+        if (this.#detailOperations.size > 0) return;
+        this.#waitingForDetailMemory = false;
+      }
       const view = this.#view;
       const pdf = this.#pdf;
       if (!view || !pdf || this.#reflowing || this.#admissionSuspensions.size) return;
@@ -987,8 +1159,16 @@ export class DocumentRenderer {
       if (settlingBytes > 0 && plan && plan.estimatedPeakBytes + settlingBytes > memoryLimitBytes) {
         return;
       }
+      if (this.#admitDetail()) continue;
       let capturedLease: Readonly<RenderSurfaceLease> | null = null;
       const operation = this.#scheduler.admitNext(({ pageNo, renderDpr, requiresDirectCanvas }) => {
+        if (
+          !this.#pageIsVisible(pageNo, view) &&
+          [...this.#detailTargets.values()].some(
+            target => ![...this.#detailOperations.values()].includes(target),
+          )
+        )
+          return null;
         if (this.#pageSatisfiesPlan(pageNo) || this.#pageHasTerminalFailure(pageNo)) return null;
         const lease = this.#surfaces.leaseFor(pageNo);
         if (!lease || !this.#surfaces.isCurrent(lease)) return null;
@@ -1006,7 +1186,10 @@ export class DocumentRenderer {
           rasterState: this.#rasterState,
         };
       });
-      if (!operation) return;
+      if (!operation) {
+        this.#publishPrimaryPressure();
+        return;
+      }
       if (!capturedLease) {
         this.#scheduler.settleOperation(operation);
         continue;
@@ -1023,6 +1206,472 @@ export class DocumentRenderer {
         this.#renderSettlements.delete(settlement);
       });
       this.#renderSettlements.add(settlement);
+    }
+  }
+
+  /** Debounces page-local movement independently of the coarser base-page plan. */
+  #scheduleDetails(): void {
+    const window = this.#timerWindow();
+    if (!window || !this.#view?.visiblePageRegions || this.#interactionActive) return;
+    if (this.#detailTimer != null) window.clearTimeout(this.#detailTimer);
+    this.#detailTimer = null;
+    if (!this.#needsDetailPlanning(this.#view, true)) return;
+    this.#scheduler.cancelIncompatible(
+      operation => operation.kind !== "detail" || this.#detailIsCurrent(operation),
+      task => safely(() => task.cancel()),
+    );
+    this.#detailTimer = window.setTimeout(() => {
+      this.#detailTimer = null;
+      if (this.#view && this.#pdf && this.#needsDetailPlanning(this.#view, true))
+        this.#reconcileCurrent(true);
+    }, 100);
+  }
+
+  /** Avoids detail-only work when visible bases already provide useful effective DPR. */
+  #needsDetailPlanning(view: RenderViewSnapshot, includeMissingBase: boolean): boolean {
+    if (this.#detailOutputs.size || this.#detailTargets.size || this.#detailOperations.size)
+      return true;
+    const requested = Math.min(view.devicePixelRatio, this.#settings.maxRenderDpr);
+    for (const pageNo of view.visiblePageRegions?.keys() ?? []) {
+      const base = this.#outputs.get(pageNo);
+      if (!base || base.state !== "committed" || !this.#outputIsCurrent(base)) {
+        if (includeMissingBase) return true;
+      } else if (base.budget.renderDpr * 1.1 < requested) return true;
+    }
+    return false;
+  }
+
+  /** Committed detail occupancy; temporary detail pixels live in the scheduler. */
+  #detailBytes(): number {
+    let bytes = 0;
+    for (const output of this.#detailOutputs.values()) bytes += output.raster.bytes;
+    return bytes;
+  }
+
+  #dropDetail(pageNo: number, reason: string): void {
+    const output = this.#detailOutputs.get(pageNo);
+    if (!output) return;
+    this.#detailOutputs.delete(pageNo);
+    output.canvas.remove();
+    output.canvas.width = output.canvas.height = 0;
+    this.#diagnostic("debug", "detail-render-cleanup", `Released detail for page ${pageNo}`, {
+      pageNo,
+      reason,
+      bytes: output.raster.bytes,
+    });
+  }
+
+  #clearDetails(): void {
+    if (this.#detailTimer != null) this.#timerWindow()?.clearTimeout(this.#detailTimer);
+    this.#detailTimer = null;
+    this.#detailTargets.clear();
+    this.#detailDiagnostics.clear();
+    this.#scheduler.cancelIncompatible(
+      operation => operation.kind !== "detail",
+      task => safely(() => task.cancel()),
+    );
+    for (const pageNo of [...this.#detailOutputs.keys()]) this.#dropDetail(pageNo, "invalidated");
+  }
+
+  /** Plans only useful crops without borrowing mandatory base-render headroom. */
+  #planDetails(view: RenderViewSnapshot, mandatoryPeakBytes: number): void {
+    const settings = this.#settings;
+    this.#detailTargets.clear();
+    if (this.#interactionActive) return;
+    const regions = view.visiblePageRegions;
+    const requestedDpr = Math.min(view.devicePixelRatio, this.#settings.maxRenderDpr);
+    for (const [pageNo, detail] of this.#detailOutputs) {
+      const base = this.#outputs.get(pageNo);
+      if (
+        !this.#renderingActive ||
+        !regions?.has(pageNo) ||
+        base !== detail.base ||
+        !this.#presentationOutputIsCurrent(base) ||
+        base.budget.renderDpr * 1.1 >= requestedDpr
+      )
+        this.#dropDetail(pageNo, "not-needed");
+    }
+    this.#scheduler.cancelIncompatible(
+      operation => operation.kind !== "detail" || this.#detailIsCurrent(operation),
+      task => safely(() => task.cancel()),
+    );
+    if (!regions || !this.#renderingActive || this.#admissionSuspensions.size) return;
+    let settlingDetailBytes = 0;
+    for (const target of this.#detailOperations.values())
+      settlingDetailBytes += target.raster.bytes;
+    for (const pageNo of [...this.#detailOutputs.keys()]) {
+      if (
+        mandatoryPeakBytes + this.#detailBytes() + settlingDetailBytes <=
+        this.#settings.memoryLimitMiB * BYTES_PER_MIB
+      )
+        break;
+      this.#dropDetail(pageNo, "mandatory-memory-pressure");
+    }
+    let available =
+      this.#settings.memoryLimitMiB * BYTES_PER_MIB - mandatoryPeakBytes - this.#detailBytes();
+    for (const target of this.#detailOperations.values()) available -= target.raster.bytes;
+    const candidates = [...regions].filter(([pageNo]) => {
+      const base = this.#outputs.get(pageNo);
+      return (
+        base &&
+        this.#presentationOutputIsCurrent(base) &&
+        base.budget.renderDpr * 1.1 < requestedDpr
+      );
+    });
+    const allocationShare = Math.max(0, available / Math.max(1, candidates.length));
+    for (const [pageNo, visible] of candidates) {
+      const base = this.#outputs.get(pageNo)!;
+      const failures = this.#detailFailures.get(base) ?? 0;
+      const targetDpr = requestedDpr * 0.5 ** failures;
+      const existing = this.#detailOutputs.get(pageNo);
+      const active = [...this.#detailOperations].find(
+        ([operation, target]) =>
+          target.base === base &&
+          this.#scheduler.ownsOperation(operation) &&
+          detailRegionContains(target.raster, visible),
+      );
+      if (active) {
+        this.#detailTargets.set(pageNo, active[1]);
+        continue;
+      }
+      let raster =
+        failures >= MAX_RASTER_ATTEMPTS
+          ? null
+          : planDetailRaster(
+              visible,
+              base.viewport.width,
+              base.viewport.height,
+              targetDpr,
+              base.budget.renderDpr,
+              Math.max(0, Math.min(available, allocationShare)),
+              this.#settings.maxCanvasPixels,
+              this.#settings.maxCanvasDimension,
+            );
+      // Recover meaningful quality when memory is freed, without repeatedly
+      // replacing crops whose resolution is already limited by canvas policy.
+      if (
+        existing &&
+        existing.requestedDpr >= targetDpr - DPR_EPSILON &&
+        detailRegionContains(existing.raster, visible) &&
+        (!raster || raster.dpr <= existing.raster.dpr * 1.25)
+      )
+        continue;
+      // Under pressure, release the old detail before replacing it. Never remove
+      // the base canvas and never pretend cancellation frees an active surface.
+      if (!raster && existing && failures < MAX_RASTER_ATTEMPTS) {
+        available += existing.raster.bytes;
+        this.#dropDetail(pageNo, "replacement-memory-pressure");
+        raster = planDetailRaster(
+          visible,
+          base.viewport.width,
+          base.viewport.height,
+          targetDpr,
+          base.budget.renderDpr,
+          Math.max(0, available / candidates.length),
+          this.#settings.maxCanvasPixels,
+          this.#settings.maxCanvasDimension,
+        );
+      }
+      // Do not admit a crop that will fail its first freshness check. Genuine
+      // out-of-page geometry falls back to the base instead of a settlement loop.
+      const regionOutsidePage = !!raster && !detailRegionContains(raster, visible);
+      if (regionOutsidePage) raster = null;
+      const signature = `${base.budget.scale}|${base.budget.renderDpr}|${raster?.dpr ?? 0}|${failures}`;
+      if (this.#detailDiagnostics.get(pageNo) !== signature) {
+        this.#detailDiagnostics.set(pageNo, signature);
+        this.#diagnostic(
+          "debug",
+          raster ? "detail-render-activated" : "detail-render-skipped",
+          raster
+            ? `Detail rendering improves page ${pageNo}`
+            : `Using base raster for page ${pageNo}`,
+          {
+            pageNo,
+            reason: raster
+              ? "base-resolution-constrained"
+              : regionOutsidePage
+                ? "visible-region-outside-page"
+                : failures >= MAX_RASTER_ATTEMPTS
+                  ? "bounded-failures"
+                  : "insufficient-quality-headroom",
+            baseDpr: base.budget.renderDpr,
+            requestedDpr,
+            achievedDpr: raster?.dpr ?? base.budget.renderDpr,
+            region: raster ?? visible,
+            visibleRegion: visible,
+            availableBytes: Math.max(0, available),
+            maxCanvasPixels: this.#settings.maxCanvasPixels,
+            maxCanvasDimension: this.#settings.maxCanvasDimension,
+          },
+        );
+      }
+      if (
+        this.#outputs.get(pageNo) !== base ||
+        view !== this.#view ||
+        settings !== this.#settings ||
+        this.#interactionActive
+      )
+        return;
+      if (raster) {
+        this.#detailTargets.set(pageNo, Object.freeze({ base, raster, requestedDpr: targetDpr }));
+        available -= raster.bytes;
+      }
+    }
+  }
+
+  #detailIsCurrent(operation: RenderOperation): boolean {
+    const target = this.#detailOperations.get(operation);
+    const visible = this.#view?.visiblePageRegions?.get(operation.pageNo);
+    return (
+      !!target &&
+      !!visible &&
+      this.#renderingActive &&
+      !this.#interactionActive &&
+      !this.#reflowing &&
+      !this.#admissionSuspensions.size &&
+      operation.pdf === this.#pdf &&
+      operation.documentGeneration === this.#documentId &&
+      this.#outputs.get(operation.pageNo) === target.base &&
+      this.#presentationOutputIsCurrent(target.base) &&
+      detailRegionContains(target.raster, visible) &&
+      this.#scheduler.ownsOperation(operation)
+    );
+  }
+
+  /** Detail shares page exclusion and physical concurrency with ordinary rasters. */
+  #admitDetail(): boolean {
+    if (
+      this.#detailTimer != null ||
+      !this.#renderingActive ||
+      this.#interactionActive ||
+      !this.#initialReady ||
+      !this.#view ||
+      !this.#pdf
+    )
+      return false;
+    for (let row = this.#view.visibleRange.first; row <= this.#view.visibleRange.last; row++) {
+      if (
+        (this.#view.rows[row] ?? []).some(
+          pageNo => !this.#pageSatisfiesPlan(pageNo) && !this.#pageHasTerminalFailure(pageNo),
+        )
+      )
+        return false;
+    }
+    for (const [pageNo, target] of this.#detailTargets) {
+      if ([...this.#detailOperations.values()].includes(target)) continue;
+      const visible = this.#view.visiblePageRegions?.get(pageNo);
+      if (
+        !visible ||
+        this.#outputs.get(pageNo) !== target.base ||
+        !this.#presentationOutputIsCurrent(target.base) ||
+        !detailRegionContains(target.raster, visible)
+      ) {
+        this.#detailTargets.delete(pageNo);
+        continue;
+      }
+      const snapshot = this.snapshot();
+      const occupied =
+        snapshot.committedBytes +
+        snapshot.placeholderBytes +
+        snapshot.directMutatingBytes +
+        snapshot.detailBytes;
+      // Reservations include eventual attached copies for base renders. Taking
+      // the larger value also includes cancelled, still-settling PDF.js writers.
+      const transient = Math.max(snapshot.reservationBytes, snapshot.activeTemporaryBytes);
+      if (
+        occupied + transient + target.raster.bytes >
+        this.#settings.memoryLimitMiB * BYTES_PER_MIB
+      )
+        continue;
+      const operation = this.#scheduler.admitDetail(
+        pageNo,
+        target.base.budget.scale,
+        target.raster.dpr,
+        {
+          pdf: this.#pdf,
+          documentGeneration: this.#documentId,
+          requestedDpr: Math.min(this.#view.devicePixelRatio, this.#settings.maxRenderDpr),
+          useDirectCanvas: false,
+          maxCanvasPixels: this.#settings.maxCanvasPixels,
+          maxCanvasDimension: this.#settings.maxCanvasDimension,
+          reservedBytes: target.raster.bytes,
+          surfaceIdentity: target.base.lease.canvas,
+          rasterState: target.base.rasterState,
+        },
+      );
+      if (!operation) continue;
+      this.#detailOperations.set(operation, target);
+      const settlement = this.#renderDetail(operation, target).finally(() =>
+        this.#renderSettlements.delete(settlement),
+      );
+      this.#renderSettlements.add(settlement);
+      return true;
+    }
+    return false;
+  }
+
+  async #renderDetail(operation: RenderOperation, target: DetailTarget): Promise<void> {
+    let use: DocumentPageUse | null = null;
+    let canvas: HTMLCanvasElement | null = null;
+    let committed = false;
+    let failure: unknown = null;
+    const started = Date.now();
+    try {
+      use = (await this.#pages?.acquire(operation.pageNo)) ?? null;
+      if (!use || !this.#detailIsCurrent(operation)) return;
+      const { raster, base } = target;
+      let detailTask: PDFJS.RenderTask | null = null;
+      let operationsFilter: Parameters<PDFJS.PDFPageProxy["render"]>[0]["operationsFilter"];
+      if (base.annotationCanvasIds.size > 0) {
+        const operators = this.#callbacks.annotationOperatorIds?.();
+        if (!operators) throw new Error("Annotation operator identifiers are unavailable");
+        let list: ReturnType<typeof ownedPdfPageRenderOperatorList> = null;
+        let separatelyPresented = false;
+        // Match base rendering: dedicated annotation appearances belong to the
+        // annotation layer, not to either page bitmap. Keep other markup in the crop.
+        operationsFilter = (index, suppliedList) => {
+          list ??= suppliedList ?? ownedPdfPageRenderOperatorList(detailTask);
+          if (!list) throw new Error("Annotation render operations are unavailable");
+          if (list.fnArray[index] === operators.beginAnnotation) {
+            separatelyPresented = base.annotationCanvasIds.has(list.argsArray[index]?.[0]);
+          }
+          if (!separatelyPresented) return true;
+          if (list.fnArray[index] === operators.endAnnotation) separatelyPresented = false;
+          return false;
+        };
+      }
+      canvas = base.lease.canvas.ownerDocument.createElement("canvas");
+      canvas.width = raster.bufferWidth;
+      canvas.height = raster.bufferHeight;
+      if (!this.#scheduler.recordOffscreenAllocation(operation, raster.bytes / 4)) return;
+      const drawing = canvas.getContext("2d", { willReadFrequently: false });
+      if (!drawing || drawing.isContextLost?.())
+        throw new Error("Detail canvas context is unavailable");
+      // Probe the backing store: some browsers return a context for an unusable
+      // allocation. Security errors are also safe failures for this optional raster.
+      drawing.getImageData(0, 0, 1, 1);
+      const render = startPdfPageRenderTask(use.page, {
+        canvas,
+        canvasContext: drawing,
+        viewport: base.viewport,
+        transform: [raster.dpr, 0, 0, raster.dpr, -raster.x * raster.dpr, -raster.y * raster.dpr],
+        intent: "display",
+        annotationMode: base.rasterState.annotationMode,
+        ...(operationsFilter ? { operationsFilter } : {}),
+        ...(base.rasterState.optionalContentConfigPromise
+          ? { optionalContentConfigPromise: base.rasterState.optionalContentConfigPromise }
+          : {}),
+      });
+      detailTask = render.task;
+      if (!this.#scheduler.attachTask(operation, render.task)) {
+        safely(() => render.task.cancel());
+        await render.promise;
+        return;
+      }
+      this.#diagnostic(
+        "debug",
+        "detail-render-started",
+        `Rendering detail for page ${operation.pageNo}`,
+        {
+          operationId: operation.id,
+          pageNo: operation.pageNo,
+          region: raster,
+          baseDpr: base.budget.renderDpr,
+          requestedDpr: operation.requirement.requestedDpr,
+        },
+      );
+      await render.promise;
+      if (!this.#detailIsCurrent(operation)) return;
+      if (drawing.isContextLost?.()) throw new Error("Detail canvas context was lost");
+      const style = canvas.style;
+      canvas.className = "pdf-detail-canvas";
+      canvas.setAttribute("aria-hidden", "true");
+      style.left = `${(raster.x / base.viewport.width) * 100}%`;
+      style.top = `${(raster.y / base.viewport.height) * 100}%`;
+      style.width = `${(raster.bufferWidth / raster.dpr / base.viewport.width) * 100}%`;
+      style.height = `${(raster.bufferHeight / raster.dpr / base.viewport.height) * 100}%`;
+      canvas.addEventListener(
+        "contextlost",
+        event => {
+          event.preventDefault();
+          if (this.#detailOutputs.get(operation.pageNo)?.canvas !== canvas) return;
+          this.#detailFailures.set(base, MAX_RASTER_ATTEMPTS);
+          this.#dropDetail(operation.pageNo, "context-lost");
+        },
+        { once: true },
+      );
+      base.lease.wrapper.append(canvas);
+      this.#dropDetail(operation.pageNo, "replaced");
+      if (!this.#detailIsCurrent(operation)) return;
+      this.#detailOutputs.set(operation.pageNo, { ...target, canvas });
+      committed = true;
+      // The same store changes ownership from temporary to attached; transfer
+      // before consumer diagnostics can observe or reconcile its occupancy.
+      this.#detailOperations.delete(operation);
+      if (this.#detailTargets.get(operation.pageNo) === target)
+        this.#detailTargets.delete(operation.pageNo);
+      this.#scheduler.settleOperation(operation);
+      this.#diagnostic(
+        "debug",
+        "detail-render-completed",
+        `Committed detail for page ${operation.pageNo}`,
+        {
+          operationId: operation.id,
+          pageNo: operation.pageNo,
+          region: raster,
+          elapsedMs: Date.now() - started,
+          baseDpr: base.budget.renderDpr,
+          achievedDpr: raster.dpr,
+        },
+      );
+    } catch (error) {
+      failure = error;
+      if (this.#detailIsCurrent(operation)) {
+        const attempts = (this.#detailFailures.get(target.base) ?? 0) + 1;
+        this.#detailFailures.set(target.base, attempts);
+        this.#diagnostic(
+          "debug",
+          "detail-render-fallback",
+          `Detail failed for page ${operation.pageNo}; keeping base raster`,
+          {
+            pageNo: operation.pageNo,
+            attempts,
+            maximumAttempts: MAX_RASTER_ATTEMPTS,
+            nextDpr: operation.requirement.requestedDpr * 0.5 ** attempts,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+    } finally {
+      if (!committed && canvas) {
+        canvas.width = canvas.height = 0;
+        canvas.remove();
+      }
+      if (!committed)
+        this.#diagnostic(
+          "debug",
+          "detail-render-cancelled",
+          `Discarded detail for page ${operation.pageNo}`,
+          {
+            operationId: operation.id,
+            pageNo: operation.pageNo,
+            reason:
+              failure && this.#detailIsCurrent(operation)
+                ? "render-failed"
+                : use
+                  ? "superseded"
+                  : "page-unavailable",
+            ownsOperation: this.#scheduler.ownsOperation(operation),
+            region: target.raster,
+            visibleRegion: this.#view?.visiblePageRegions?.get(operation.pageNo) ?? null,
+          },
+        );
+      use?.release();
+      this.#detailOperations.delete(operation);
+      if (this.#detailTargets.get(operation.pageNo) === target)
+        this.#detailTargets.delete(operation.pageNo);
+      this.#scheduler.settleOperation(operation);
+      if (this.#pdf && this.#view) this.#reconcileCurrent(true);
     }
   }
 
@@ -1096,16 +1745,14 @@ export class DocumentRenderer {
           operation,
           rasterState: operation.requirement.rasterState,
           annotationCanvasMap,
+          annotationCanvasIds: new Set<string>(),
         });
         this.#retainAnnotationOwner(output, annotationCanvasMap);
         this.#outputs.set(operation.pageNo, output);
         this.#applyOutputPresentation(output);
         if (previous && previous !== output) this.#releaseAnnotationOwner(previous);
         const canvas = context.lease.canvas;
-        canvas.width = budget.bufferWidth;
-        canvas.height = budget.bufferHeight;
-        const drawing = canvas.getContext("2d");
-        if (!drawing) throw new Error("Attached canvas 2D context is unavailable");
+        const drawing = this.#allocateCanvas(canvas, budget.bufferWidth, budget.bufferHeight);
         drawing.setTransform(budget.renderDpr, 0, 0, budget.renderDpr, 0, 0);
         drawing.imageSmoothingEnabled = true;
         const render = startPdfPageRenderTask(page, {
@@ -1125,9 +1772,13 @@ export class DocumentRenderer {
         const task = render.task;
         if (!this.#scheduler.attachTask(operation, task)) {
           safely(() => task.cancel());
+          await render.promise;
           return;
         }
         await render.promise;
+        if (!this.#operationIsCurrent(operation, context, budget.renderDpr)) return;
+        if (drawing.isContextLost?.())
+          throw new CanvasAllocationError("Page canvas context was lost");
         if (!this.#admitRenderedAnnotationCanvases(operation, budget, annotationCanvasMap)) return;
         if (!this.#operationIsCurrent(operation, context, budget.renderDpr)) return;
         this.#commitOutput(
@@ -1142,11 +1793,8 @@ export class DocumentRenderer {
         directMutating = false;
       } else {
         temporary = context.lease.canvas.ownerDocument.createElement("canvas");
-        temporary.width = budget.bufferWidth;
-        temporary.height = budget.bufferHeight;
+        const drawing = this.#allocateCanvas(temporary, budget.bufferWidth, budget.bufferHeight);
         if (!this.#scheduler.recordOffscreenAllocation(operation, budget.pixelCount)) return;
-        const drawing = temporary.getContext("2d");
-        if (!drawing) throw new Error("Temporary canvas 2D context is unavailable");
         drawing.setTransform(budget.renderDpr, 0, 0, budget.renderDpr, 0, 0);
         drawing.imageSmoothingEnabled = true;
         const render = startPdfPageRenderTask(page, {
@@ -1166,21 +1814,24 @@ export class DocumentRenderer {
         const task = render.task;
         if (!this.#scheduler.attachTask(operation, task)) {
           safely(() => task.cancel());
+          await render.promise;
           return;
         }
         await render.promise;
+        if (!this.#operationIsCurrent(operation, context, budget.renderDpr)) return;
+        if (drawing.isContextLost?.())
+          throw new CanvasAllocationError("Page canvas context was lost");
         if (!this.#admitRenderedAnnotationCanvases(operation, budget, annotationCanvasMap)) return;
         if (!this.#operationIsCurrent(operation, context, budget.renderDpr)) return;
         const canvas = context.lease.canvas;
-        const attached = canvas.getContext("2d");
-        if (!attached) throw new Error("Attached canvas 2D context is unavailable");
         this.#applyRasterPresentation(canvas, budget);
-        canvas.width = budget.bufferWidth;
-        canvas.height = budget.bufferHeight;
+        const attached = this.#allocateCanvas(canvas, budget.bufferWidth, budget.bufferHeight);
         attached.setTransform(1, 0, 0, 1, 0, 0);
         attached.imageSmoothingEnabled = false;
         attached.clearRect(0, 0, budget.bufferWidth, budget.bufferHeight);
         attached.drawImage(temporary, 0, 0);
+        if (attached.isContextLost?.())
+          throw new CanvasAllocationError("Page canvas context was lost during replacement copy");
         if (!this.#operationIsCurrent(operation, context, budget.renderDpr)) return;
         this.#commitOutput(
           operation,
@@ -1244,6 +1895,17 @@ export class DocumentRenderer {
             pageNo => this.#rowIndexFor(pageNo),
           );
         }
+        // Actual geometry can reject a budget without an exception. Refresh its
+        // requirement before readmission, rather than starving layout in microtasks.
+        if (
+          (!committed &&
+            failure == null &&
+            this.#view &&
+            this.#lastPlanSignature !== this.#viewSignature(this.#view)) ||
+          (committed && this.#view && this.#needsDetailPlanning(this.#view, false)) ||
+          failure instanceof CanvasAllocationError
+        )
+          this.#reconcileCurrent(true);
         this.#pump();
         if (this.#scheduler.snapshot().idle && this.#pdf && this.#view) {
           if (this.#lastPlanSignature !== this.#viewSignature(this.#view))
@@ -1303,6 +1965,28 @@ export class DocumentRenderer {
     });
   }
 
+  /** Validates a requested backing store instead of relying on a non-null context. */
+  #allocateCanvas(
+    canvas: HTMLCanvasElement,
+    width: number,
+    height: number,
+  ): CanvasRenderingContext2D {
+    try {
+      // Release the old store first: width-first resizing can allocate new-width
+      // by old-height, violating limits even when both final rasters fit.
+      if (canvas.height !== 0) canvas.height = 0;
+      canvas.width = width;
+      canvas.height = height;
+      const drawing = canvas.getContext("2d", { willReadFrequently: false });
+      if (!drawing || drawing.isContextLost?.())
+        throw new Error("Canvas 2D context is unavailable");
+      drawing.getImageData(0, 0, 1, 1);
+      return drawing;
+    } catch (cause) {
+      throw new CanvasAllocationError("Canvas backing-store allocation is unsupported", { cause });
+    }
+  }
+
   #commitOutput(
     operation: RenderOperation,
     context: OperationContext,
@@ -1323,6 +2007,7 @@ export class DocumentRenderer {
       operation,
       rasterState: operation.requirement.rasterState,
       annotationCanvasMap,
+      annotationCanvasIds: new Set(annotationCanvasMap.keys()),
     });
     this.#retainAnnotationOwner(output, annotationCanvasMap);
     this.#outputs.set(operation.pageNo, output);
@@ -1343,11 +2028,12 @@ export class DocumentRenderer {
       return false;
     if (annotationBytes === 0) return true;
     const snapshot = this.snapshot();
-    const observedBytes =
+    let observedBytes =
       snapshot.committedBytes +
       snapshot.placeholderBytes +
       snapshot.directMutatingBytes +
-      snapshot.activeTemporaryBytes;
+      snapshot.activeTemporaryBytes +
+      snapshot.detailBytes;
     const limitBytes = this.#settings.memoryLimitMiB * BYTES_PER_MIB;
     if (observedBytes <= limitBytes) return true;
     const view = this.#view;
@@ -1355,6 +2041,14 @@ export class DocumentRenderer {
       !!view &&
       (this.#pageIsVisible(operation.pageNo, view) ||
         (!this.#initialReady && (this.#initialReadinessPages?.has(operation.pageNo) ?? false)));
+    if (mandatory) {
+      // Optional detail cannot borrow the mandatory base/annotation exception.
+      for (const [pageNo, detail] of this.#detailOutputs) {
+        observedBytes -= detail.raster.bytes;
+        this.#dropDetail(pageNo, "mandatory-annotation-memory-pressure");
+        if (observedBytes <= limitBytes) return true;
+      }
+    }
     const details = {
       operationId: operation.id,
       pageNo: operation.pageNo,
@@ -1365,6 +2059,16 @@ export class DocumentRenderer {
       mandatoryVisibleOutput: mandatory,
     };
     if (mandatory) {
+      if (this.#detailOperations.size > 0) {
+        // Physical settlement, not cancellation, frees this optional headroom.
+        // Defer readmission too, including uncancellable work without a canvas yet.
+        this.#waitingForDetailMemory = true;
+        this.#scheduler.cancelIncompatible(
+          candidate => candidate.kind !== "detail",
+          task => safely(() => task.cancel()),
+        );
+        return false;
+      }
       this.#diagnostic(
         "debug",
         "annotation-canvas-mandatory-overage",
@@ -1402,6 +2106,7 @@ export class DocumentRenderer {
   }
 
   #operationSatisfiesCurrent(operation: RenderOperation, resultDpr?: number): boolean {
+    if (operation.kind === "detail") return this.#detailIsCurrent(operation);
     const requirement = this.#scheduler.currentRequirementFor(operation.pageNo);
     return requirement != null && renderOperationSatisfies(operation, requirement, resultDpr);
   }
@@ -1446,7 +2151,24 @@ export class DocumentRenderer {
 
   #recordRasterFailure(operation: RenderOperation, error: unknown): void {
     const key = this.#requirementKey(operation.pageNo);
-    const attempts = (this.#rasterFailureAttempts.get(key) ?? 0) + 1;
+    const allocationKey = `${operation.pageNo}|${operation.requirement.scale}|${this.#view?.rotation}|${operation.requirement.rasterState.optionalContentRevision}|${operation.requirement.rasterState.annotationMode}`;
+    const attempts =
+      error instanceof CanvasAllocationError
+        ? (this.#allocationFailureAttempts.get(allocationKey) ?? 0) + 1
+        : (this.#rasterFailureAttempts.get(key) ?? 0) + 1;
+    if (error instanceof CanvasAllocationError) {
+      this.#allocationFailureAttempts.set(allocationKey, attempts);
+      if (attempts < MAX_RASTER_ATTEMPTS) {
+        this.#pageRenderDprLimits.set(
+          operation.pageNo,
+          Object.freeze({
+            scale: operation.requirement.scale,
+            dpr: operation.requirement.renderDpr * 0.5,
+          }),
+        );
+        this.#lastPlanSignature = "";
+      }
+    }
     this.#rasterFailureAttempts.set(key, attempts);
     const details = {
       operationId: operation.id,
@@ -1457,6 +2179,10 @@ export class DocumentRenderer {
       renderDpr: operation.requirement.renderDpr,
       errorName: error instanceof Error ? error.name : "Error",
       errorMessage: error instanceof Error ? error.message : String(error),
+      allocationFallbackDpr:
+        error instanceof CanvasAllocationError && attempts < MAX_RASTER_ATTEMPTS
+          ? operation.requirement.renderDpr * 0.5
+          : null,
     };
     if (attempts >= MAX_RASTER_ATTEMPTS) {
       const failedDocumentId = operation.documentGeneration;
@@ -1552,9 +2278,11 @@ export class DocumentRenderer {
       const scheduler = this.#scheduler.snapshot();
       pressure = visibleMissing
         ? "urgent"
-        : scheduler.queuedPageCount || scheduler.admittedRenderCount
-          ? "speculative"
-          : "idle";
+        : this.#detailTargets.size || this.#detailOperations.size
+          ? "urgent"
+          : scheduler.queuedPageCount || scheduler.admittedRenderCount
+            ? "speculative"
+            : "idle";
     }
     if (pressure === this.#primaryPressure) return;
     this.#primaryPressure = pressure;
@@ -1864,7 +2592,11 @@ export class DocumentRenderer {
   }
 
   #replaceOutputRecord(pageNo: number, previous: RenderOutput, next: RenderOutput): void {
-    this.#retainAnnotationOwner(next, next.annotationCanvasMap);
+    this.#retainAnnotationOwner(
+      next,
+      next.annotationCanvasMap,
+      this.#annotationCanvasOwners.get(previous),
+    );
     this.#outputs.set(pageNo, next);
     this.#applyOutputPresentation(next);
     this.#releaseAnnotationOwner(previous);
@@ -1891,6 +2623,7 @@ export class DocumentRenderer {
   }
 
   #clearOutput(output: RenderOutput, publish: boolean): void {
+    this.#dropDetail(output.pageNo, "base-evicted");
     this.#releaseAnnotationOwner(output);
     if (!this.#surfaces.isCurrent(output.lease)) return;
     output.lease.canvas.width = 0;
@@ -1900,6 +2633,7 @@ export class DocumentRenderer {
   }
 
   #cancelOperations(): void {
+    this.#clearDetails();
     this.#scheduler.clearQueue();
     this.#scheduler.cancelActiveOperations(task => safely(() => task.cancel()));
   }
@@ -1956,7 +2690,8 @@ export class DocumentRenderer {
       snapshot.committedBytes +
       snapshot.placeholderBytes +
       snapshot.directMutatingBytes +
-      snapshot.activeTemporaryBytes;
+      snapshot.activeTemporaryBytes +
+      snapshot.detailBytes;
     const currentOutputs = [...this.#outputs.values()].filter(
       output => output.state === "committed",
     );
@@ -1967,7 +2702,11 @@ export class DocumentRenderer {
       output => output.budget.dprReducedByCanvasLimit,
     ).length;
     const attachedBackingStorePixels =
-      (snapshot.committedBytes + snapshot.placeholderBytes + snapshot.directMutatingBytes) / 4;
+      (snapshot.committedBytes +
+        snapshot.placeholderBytes +
+        snapshot.directMutatingBytes +
+        snapshot.detailBytes) /
+      4;
     const activeOffscreenPixels = snapshot.activeTemporaryBytes / 4;
     this.#lastDiagnosticAt = Date.now();
     this.#diagnostic(
@@ -1991,6 +2730,8 @@ export class DocumentRenderer {
         placeholderBytes: snapshot.placeholderBytes,
         directMutatingBytes: snapshot.directMutatingBytes,
         activeTemporaryBytes: snapshot.activeTemporaryBytes,
+        detailBytes: snapshot.detailBytes,
+        detailCanvasCount: snapshot.detailCanvasCount,
         reservedBytes: snapshot.reservationBytes,
         annotationCanvasBytes: snapshot.annotationCanvasBytes,
         committedAnnotationCanvasBytes: snapshot.committedAnnotationCanvasBytes,
@@ -2051,7 +2792,18 @@ export class DocumentRenderer {
   }
 
   #annotationCanvasBytes(map: ReadonlyMap<string, HTMLCanvasElement>): number {
-    return this.#annotationBytes(new Set(map.values()));
+    return this.#annotationBytes(this.#annotationCanvases(map));
+  }
+
+  /** PDF.js 6.4 may group several named appearance canvases under one annotation ID. */
+  #annotationCanvases(map: ReadonlyMap<string, HTMLCanvasElement>): Set<HTMLCanvasElement> {
+    const canvases = new Set<HTMLCanvasElement>();
+    for (const value of map.values()) {
+      if (Array.isArray(value)) {
+        for (const canvas of value) canvases.add(canvas);
+      } else canvases.add(value);
+    }
+    return canvases;
   }
 
   #annotationBytes(canvases: ReadonlySet<HTMLCanvasElement>): number {
@@ -2064,13 +2816,20 @@ export class DocumentRenderer {
     return pixels * 4;
   }
 
-  #retainAnnotationOwner(owner: object, map: ReadonlyMap<string, HTMLCanvasElement>): void {
+  #retainAnnotationOwner(
+    owner: object,
+    map: ReadonlyMap<string, HTMLCanvasElement>,
+    inherited?: ReadonlySet<HTMLCanvasElement>,
+  ): void {
     let owned = this.#annotationCanvasOwners.get(owner);
     if (!owned) {
       owned = new Set();
       this.#annotationCanvasOwners.set(owner, owned);
     }
-    for (const canvas of new Set(map.values())) {
+    const canvases = this.#annotationCanvases(map);
+    // Presentation consumes the map; ownership transfers must retain its stores.
+    if (inherited) for (const canvas of inherited) canvases.add(canvas);
+    for (const canvas of canvases) {
       if (owned.has(canvas)) continue;
       owned.add(canvas);
       this.#annotationCanvasRefCounts.set(
@@ -2097,7 +2856,7 @@ export class DocumentRenderer {
   }
 
   #releaseUnownedAnnotationCanvases(map: ReadonlyMap<string, HTMLCanvasElement>): void {
-    for (const canvas of new Set(map.values())) {
+    for (const canvas of this.#annotationCanvases(map)) {
       if (this.#annotationCanvasRefCounts.has(canvas)) continue;
       canvas.width = 0;
       canvas.height = 0;

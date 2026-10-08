@@ -30,8 +30,8 @@ the package's default theme.
   defaulting to presentation mode; browser or OS policy may prevent acquisition.
 - Search, filtered outlines, thumbnails, internal links, rotation, document metadata,
   attachments, optional-content layers, and cross-page text selection that survives view changes.
-- Visible-first, high-DPI rendering with configurable profiles that bound viewer-managed raster
-  memory.
+- Visible-first, high-DPI rendering with automatic high-zoom detail overlays and configurable
+  profiles that bound viewer-managed raster memory. See [rendering profiles](./USAGE.md#rendering-profiles).
 - Read-only annotations and popups, interactive AcroForms and pure XFA forms, and
   filled-PDF export for supported form values. PDF JavaScript is never executed.
 - Controlled printing with ranges, paper sizes, two-page sheets, and DPI settings where

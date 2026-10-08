@@ -258,6 +258,15 @@ try {
       },
     );
     const renderTask = page.render({ canvasContext, viewport: page.getViewport({ scale: 1 }) });
+    const operatorList = renderTask?._internalRenderTask?.operatorList;
+    if (
+      !Array.isArray(operatorList?.fnArray) ||
+      !Array.isArray(operatorList?.argsArray) ||
+      !Number.isSafeInteger(pdfjs.OPS?.beginAnnotation) ||
+      !Number.isSafeInteger(pdfjs.OPS?.endAnnotation)
+    ) {
+      throw new Error("PDF.js annotation operation filtering contract is incompatible");
+    }
     if (!renderTask?.promise || typeof renderTask.cancel !== "function")
       throw new Error("PDFPageProxy render task promise/cancel surface is incompatible");
     renderTask.cancel();

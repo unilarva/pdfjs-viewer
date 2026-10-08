@@ -69,6 +69,13 @@ clipping behavior. Text, search/selection highlights, annotations, forms, and XF
 fractional wrapper geometry rather than the quantized canvas box. Canvas or memory limits may
 intentionally lower render DPR without changing document layout.
 
+Automatic high-resolution detail canvases overlay the base bitmap below the interactive layers.
+They are renderer-owned, clipped to the page, and pointer-transparent. Custom CSS must preserve
+their positioning, clipping, and stacking rather than apply blanket page-canvas sizing rules.
+The base canvas remains the fallback when detail rendering is downsampled, skipped, or fails;
+custom and headless UIs need no additional controls to enable it. See
+[rendering profiles](./USAGE.md#rendering-profiles) for the shared safety and memory constraints.
+
 ### `default`
 
 This is the default when `ui` is omitted. It generates the complete package UI and

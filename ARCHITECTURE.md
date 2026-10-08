@@ -78,6 +78,7 @@ All other source modules are private implementation details for package maintain
 | Module                                 | Private responsibility                                                                                                                                                                  |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `document-renderer.ts`                 | Complete active-document raster lifecycle and output ownership.                                                                                                                         |
+| `detail-render-planner.ts`             | Pure padded CSS-space crop geometry and per-canvas, hard-memory raster fitting.                                                                                                         |
 | `generated-ui-options.ts`              | Immutable generated-UI labels, formatters, controls, validation helpers, and shared UI-text/render-option normalization.                                                                |
 | `document-thumbnails.ts`               | Complete demand-driven thumbnail DOM, raster, cache, and presentation ownership.                                                                                                        |
 | `thumbnail-render-planner.ts`          | Pure thumbnail candidate ordering, eviction ordering, viewport distance, and raster budgeting.                                                                                          |
@@ -181,7 +182,8 @@ The current owners are:
   Admission suspensions are viewer-scoped and survive document reset/replacement. Annotation backing
   stores use exact per-canvas owner references across active renders, committed/direct/placeholder
   output, replacement, and settling presentation; a backing store is zeroed only when its final exact
-  owner releases it.
+  owner releases it. Named canvas arrays are flattened to exact backing stores. Output rebinding
+  inherits the previous owner's references even after PDF.js presentation consumes the canvas map.
 - `DocumentPageUsage`: the document-scoped page-proxy usage owner. It admits use before
   `getPage()`, coordinates cached proxy identities shared by rendering, text extraction,
   navigation, annotations, and text presentation, and delays cleanup until every admitted
@@ -674,6 +676,59 @@ stationary, and may preempt only speculative work. `PdfjsViewerRenderingProfileS
 authoritative consumer-facing sequence for deciding which profile limits to configure; the lifecycle
 below records the implementing owners and revalidation boundaries.
 
+#### High-Resolution Details
+
+`DocumentRenderer` owns automatic visible-region detail output above the full-page base canvas
+and below the interactive presentation layers. It reuses existing scheduler operations, page-use
+leases, cancellation, raster arbitration, and lifecycle currentness rather than introducing a
+parallel scheduling subsystem. Initial visible-page output takes priority; visible details precede
+offscreen prefetching. The base canvas stays available throughout detail preparation and fallback.
+Detail output does not replace the base output's text/annotation presentation identity and must
+not intercept pointer events or alter fractional page layout geometry. Thumbnails and printing
+remain independent of details.
+Dedicated annotation appearances remain owned by the base output's exact annotation-canvas ledger.
+Detail rendering uses PDF.js's operation filter and runtime-supplied annotation operator IDs
+to exclude those appearances, avoiding duplicate compositing and extra annotation allocations.
+Committed output snapshots the dedicated annotation IDs before PDF.js presentation consumes
+the canvas map. PDF.js 6.4 supplies the exact optimized operator list to the filter. The qualified
+6.3 index-only callback uses one guarded, read-only bridge to the owned render task's
+`_internalRenderTask.operatorList`; the compatibility matrix verifies this narrow private
+contract for both releases and variants. The public `getOperatorList()` is not interchangeable:
+it disables operator optimization, so its indexes can differ from the display render.
+
+`DocumentView` snapshots actual visible page-local intersections, including horizontal panning
+and centered layouts. `detail-render-planner.ts` pads and quantizes these crops; the renderer
+debounces movement by 100 ms and reuses covering output. Overscan is optional: shrink padding
+and quantization down to the exact visible intersection
+before reducing DPR. Resolution-constrained crops retain the entire visible region rather than
+spending scarce pixels on padding. One canvas per visible page remains the initial policy; no
+tiling owner or parallel scheduling system is introduced.
+Crops use the exact committed rotated PDF.js viewport and an additional uniform DPR/translation
+transform. Canvas pixel quantization
+never changes canonical page geometry. The same canvas rendered off-DOM becomes the attached
+overlay at commit, without a second copy. Old detail remains until replacement commits unless
+hard headroom requires its release. Cancelled writers remain accounted until physical settlement.
+
+Each base, detail, and temporary rendering canvas obeys both selected profile safety limits:
+conservative 16,000,000 pixels/4096 px, balanced 32,000,000 pixels/8192 px, and aggressive
+48,000,000 pixels/16384 px. The existing 256/512/1024 MiB raster budgets are unchanged. Detail
+allocation and overlapping old/new replacement output must be charged to that same budget;
+details cannot use the mandatory-base-output memory exception. Pressure and unsupported allocations
+reduce detail resolution or skip it, with bounded failure handling and prompt resource release.
+When newly exposed mandatory annotation stores need that headroom, committed details are released
+and in-flight details are cancelled. Base readmission remains deferred until physical detail
+settlement; cancellation alone cannot free reservations or authorize repeated admission.
+Native-quality base output bypasses detail-only mandatory planning and debounce timers. Canonical
+post-commit replanning remains necessary while useful detail work exists, including after offscreen
+base commits, to keep speculative quality and memory distribution consistent.
+The existing optional logger reports meaningful decisions and lifecycle events using the
+`detail-render` event prefix, including target/achieved resolution, region, constraints, and fallback.
+
+Device classification and profile policy remain facade-owned and unchanged. Zoom is independently
+configured by `behavior.zoom` using device-category bounds, not per-profile caps: defaults are
+0.2–32 desktop and 0.2–16 likely-mobile. These permit closer inspection without proportional
+full-page canvas growth; the renderer stays device-agnostic and uses the selected profile.
+
 #### Rendering And Presentation Lifecycle
 
 1. `DocumentView` supplies dynamic view facts plus layout-owned topology and page-geometry
@@ -725,7 +780,8 @@ below records the implementing owners and revalidation boundaries.
    reporting false readiness. Motion orders
    visible queue work leading-edge-first;
    stationary work remains center-out. Equal-distance preemption victims come from the trailing
-   side first while moving, and no current visible operation is eligible. Existing output beyond
+   side first while moving, and no current visible base operation is eligible. Optional detail
+   operations may be preempted for waiting visible base output. Existing output beyond
    desired rows stays independently eligible for memory-based retention.
 3. After `getPage()`, actual geometry observation and every diagnostic callback, the
    renderer revalidates document, operation, raster-content revision, requirement, and lease identity.

@@ -50,11 +50,31 @@ test("merges profile overrides without mutating defaults", () => {
   assert.deepEqual(
     Object.values(profiles).map(profile => [profile.maxCanvasPixels, profile.maxCanvasDimension]),
     [
-      [24_000_000, 8192],
-      [24_000_000, 8192],
-      [24_000_000, 8192],
+      [16_000_000, 4096],
+      [32_000_000, 8192],
+      [48_000_000, 16384],
     ],
   );
+});
+
+test("canvas overrides remain independent of memory budgets and category selection", () => {
+  const profiles = mergeRenderingProfiles({
+    conservative: { maxCanvasPixels: 8_000_000 },
+    balanced: { maxCanvasDimension: 4096 },
+  });
+  assert.equal(profiles.conservative.maxCanvasDimension, 4096);
+  assert.equal(profiles.balanced.maxCanvasPixels, 32_000_000);
+  assert.deepEqual(
+    Object.values(profiles).map(profile => profile.memoryLimitMiB),
+    [256, 512, 1024],
+  );
+  assert.deepEqual(mergeRenderingProfilePolicy(undefined), {
+    likelyMobile: { availableProfiles: ["conservative"], defaultProfile: "conservative" },
+    other: {
+      availableProfiles: ["conservative", "balanced", "aggressive"],
+      defaultProfile: "balanced",
+    },
+  });
 });
 
 test("rejects invalid profile settings and unavailable selection", () => {

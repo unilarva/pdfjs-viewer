@@ -22,10 +22,10 @@ const pdfjsVersion = parseExactPdfjsVersionUnion(packageManifest.peerDependencie
 );
 const workspace = await mkdtemp(resolve(tmpdir(), "pdfjs-viewer-pack-"));
 const npmEnv = { ...process.env, npm_config_cache: resolve(tmpdir(), "kilo/npm-cache") };
-// The distribution with fullscreen/presentation, complete consumer guides, and maintainer
-// documentation measures about 895 KB packed / 3.94 MB unpacked; retain modest headroom.
-const MAX_PACKED_BYTES = 920_000;
-const MAX_UNPACKED_BYTES = 4_050_000;
+// With high-resolution details and updated documentation, the distribution measures
+// about 939 KB packed / 4.12 MB unpacked; retain roughly 6-7% growth headroom.
+const MAX_PACKED_BYTES = 1_000_000;
+const MAX_UNPACKED_BYTES = 4_400_000;
 const MAX_CORE_CSS_BYTES = 30_000;
 const MAX_DEFAULT_UI_CSS_BYTES = 80_000;
 
@@ -87,7 +87,7 @@ try {
   const unpackedBytes = await installedBytes(packedDir);
   if (packedBytes > MAX_PACKED_BYTES || unpackedBytes > MAX_UNPACKED_BYTES)
     throw new Error(
-      `Packed size budget exceeded: ${packedBytes} packed, ${unpackedBytes} unpacked`,
+      `Packed size budget exceeded: ${packedBytes}/${MAX_PACKED_BYTES} bytes packed, ${unpackedBytes}/${MAX_UNPACKED_BYTES} bytes unpacked`,
     );
   const pkg = JSON.parse(await readFile(resolve(packedDir, "package.json"), "utf8"));
   if (pkg.license !== "Apache-2.0" || pkg.publishConfig?.provenance !== true)

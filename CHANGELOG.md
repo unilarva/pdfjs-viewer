@@ -4,6 +4,23 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Added automatic high-resolution detail rendering for sharper PDF content at high zoom,
+  with graceful fallback on constrained devices. Cropped overlays share the rendering memory
+  budget, preserve interactive layers and annotation appearance, and prioritize visible-region
+  resolution over optional padding. Scheduling avoids unnecessary detail work at native quality,
+  rejects stale crops, and keeps cancelled resources owned until physical settlement.
+- Updated canvas safety limits to conservative 16M pixels/4096 px, balanced 32M pixels/8192 px,
+  and aggressive 48M pixels/16384 px. Total memory budgets and automatic profile selection
+  are unchanged.
+- Increased default maximum zoom to 32 on desktop and 16 on likely-mobile devices,
+  preserving consumer overrides.
+- Improved allocation and context-loss fallback without oversized intermediate replacement
+  canvases or publishing blank output as successful.
+- Corrected annotation backing-store accounting and ownership, including grouped named
+  appearances and surface rebinding after PDF.js presentation consumes the canvas map.
+- Prevented repeated rendering reconciliation when a consumer callback republishes an unchanged view.
+- Fixed cached-page readmission repeatedly retrying a stale canvas-constrained requirement
+  after discovering different PDF page geometry.
 - Added Ctrl/Command+P to open print setup or invoke the configured print route when keyboard
   shortcuts are enabled and the active viewer can print, preserving browser printing otherwise.
 - Fixed a delayed sidebar-opening reveal overriding a newer outline selection's smooth scroll.
@@ -15,7 +32,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 - Added a generated **Keep screen on** selector, overridable labels, and custom UI radio-group
   bindings. Feature and generated-control switches independently disable capability and UI;
   browser limitations remain silent in the UI and use optional structured logger diagnostics.
-- Added support for `pdfjs-dist 6.4.299` while retaining `6.3.289` with the same implementation.
+- Added support for `pdfjs-dist 6.4.299` while retaining `6.3.289`; detail annotation filtering
+  on 6.3 uses a narrowly qualified compatibility adapter.
 - Documented the latest-PDF.js-first support policy: retain older releases only without
   compatibility scaffolding, and allow coordinated viewer/PDF.js upgrades during pre-1.0.
 

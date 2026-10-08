@@ -456,6 +456,43 @@ The exact configurable sequence is documented on `PdfjsViewerRenderingProfileSet
 [Render planning and admission](./ARCHITECTURE.md#render-planning-and-admission) for its ownership,
 memory, and scheduling invariants.
 
+At high zoom, when canvas safety or memory limits prevent the full-page bitmap from reaching
+the requested resolution, the viewer automatically renders a high-resolution detail overlay for
+the visible page region. The base bitmap remains underneath while detail work is pending or
+unavailable. Detail canvases sit below text, search/selection highlights, annotations, forms,
+links, and XFA, and do not intercept pointer interactions. No new setting or UI control is needed;
+thumbnails and printing keep their independent rendering paths.
+Appearances presented in dedicated annotation canvases are not painted again into the detail
+bitmap, preserving their transparency and annotation-layer rotation behavior.
+
+Detail work follows initial visible-page rendering but takes priority over offscreen prefetching.
+All detail and temporary replacement canvases obey the same profile area and dimension limits.
+Visible content takes priority over overscan: optional crop padding and quantization are reduced
+before lowering detail DPR. When the visible crop fits at full effective DPR, padding cannot make
+it blurry. The initial implementation uses one detail canvas per visible page; if the visible crop
+itself cannot fit that canvas or its hard memory allowance, it remains fully covered at a lower DPR.
+Unsupported main-canvas allocations retry at smaller resolutions with a bounded attempt limit;
+the viewer remembers that page's observed ceiling for the current zoom until its document or
+profile changes. Detail allocation failures similarly lower optional quality or keep the base.
+Their backing stores, including overlapping old/new output during replacement, count against the
+existing raster memory budget. Detail rendering never earns an exception to that budget: it may
+downsample or be skipped under pressure or after unsupported allocations or rendering failures,
+leaving the base bitmap usable rather than blank.
+
+| Profile      | Maximum canvas area | Maximum dimension | Raster memory budget | Thumbnail budget |
+| ------------ | ------------------: | ----------------: | -------------------: | ---------------: |
+| Conservative |   16,000,000 pixels |           4096 px |              256 MiB |           12 MiB |
+| Balanced     |   32,000,000 pixels |           8192 px |              512 MiB |           24 MiB |
+| Aggressive   |   48,000,000 pixels |          16384 px |             1024 MiB |           64 MiB |
+
+Area and dimension limits apply independently to each rendering canvas, not as combined memory
+allowances. Conservative limits accommodate historical Mobile Safari canvas restrictions, but
+these policies are not guarantees of browser support. Larger limits increase flexibility without
+guaranteeing sharper output on every browser or device. Likely-mobile devices still default to
+conservative with no user-facing profile selector; other devices default to balanced and may
+select other profiles. Consumers can override both profile settings and `renderingProfilePolicy`
+through the existing options, taking responsibility for their target environments.
+
 #### Profile overrides
 
 The built-in rendering profiles are intended to be good defaults for most consumers.
@@ -471,7 +508,7 @@ const viewer = new PdfjsViewer({
     balanced: {
       memoryLimitMiB: 192,
       thumbnailMemoryLimitMiB: 16,
-      maxCanvasPixels: 24_000_000,
+      maxCanvasPixels: 32_000_000,
       maxCanvasDimension: 8192,
       maxBufferViewportHeights: 4,
       maxBufferPages: 40,
@@ -548,7 +585,12 @@ new PdfjsViewer({
 });
 ```
 
-Default zoom bounds are `0.2–10` on desktop and `0.2–4` on likely-mobile devices.
+Default zoom bounds are `0.2–32` on desktop and `0.2–16` on likely-mobile devices.
+These are device-category bounds in `behavior.zoom`, not per-rendering-profile caps; changing
+profiles does not change zoom bounds. The increased maxima permit closer inspection while
+detail rendering targets the visible region instead of requiring an enormous full-page canvas.
+Canvas safety and memory constraints still apply at extreme zoom, so achievable detail resolution
+may be lower than the ideal DPR. Existing `behavior.zoom` overrides remain supported.
 `destinationMatchTolerance` is measured in page heights. It limits same-page
 associations between explicit document spots, outline targets, and shareable named
 destinations; no candidate is selected outside the tolerance.
@@ -1669,6 +1711,12 @@ Diagnostics include lifecycle, worker, rendering, retry, feature, and estimated 
 events. Memory estimates cover viewer-managed canvas output and temporary raster work, not
 PDF.js caches, decoded resources, browser process memory, or GPU overhead. Treat event details
 as telemetry and use `pdf:error` plus `viewer.state` for user-facing behavior.
+
+Events with the `detail-render` prefix describe detail activation, completion, cancellation,
+cleanup, and allocation or rendering fallback. Decision details explain why a detail region was
+requested or skipped, its target versus achieved resolution and dimensions, and canvas or memory
+constraints, including replacement costs. These opt-in lifecycle diagnostics help distinguish
+intentional downsampling from failures without per-frame scrolling or zoom logging.
 
 The logger is for development and host telemetry. User-facing load handling should still
 use `pdf:error` and `viewer.state`; diagnostics do not replace the public event contract.

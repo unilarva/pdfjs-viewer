@@ -51,8 +51,8 @@ export const DEFAULT_RENDERING_PROFILE_SETTINGS: Readonly<
   conservative: Object.freeze({
     memoryLimitMiB: 256,
     thumbnailMemoryLimitMiB: 12,
-    maxCanvasPixels: 24_000_000,
-    maxCanvasDimension: 8192,
+    maxCanvasPixels: 16_000_000,
+    maxCanvasDimension: 4096,
     maxConcurrentRenders: 2,
     maxBufferViewportHeights: 8,
     maxBufferPages: 128,
@@ -67,7 +67,7 @@ export const DEFAULT_RENDERING_PROFILE_SETTINGS: Readonly<
   balanced: Object.freeze({
     memoryLimitMiB: 512,
     thumbnailMemoryLimitMiB: 24,
-    maxCanvasPixels: 24_000_000,
+    maxCanvasPixels: 32_000_000,
     maxCanvasDimension: 8192,
     maxConcurrentRenders: 3,
     maxBufferViewportHeights: 16,
@@ -83,8 +83,8 @@ export const DEFAULT_RENDERING_PROFILE_SETTINGS: Readonly<
   aggressive: Object.freeze({
     memoryLimitMiB: 1024,
     thumbnailMemoryLimitMiB: 64,
-    maxCanvasPixels: 24_000_000,
-    maxCanvasDimension: 8192,
+    maxCanvasPixels: 48_000_000,
+    maxCanvasDimension: 16384,
     maxConcurrentRenders: 4,
     maxBufferViewportHeights: "unlimited",
     maxBufferPages: "unlimited",

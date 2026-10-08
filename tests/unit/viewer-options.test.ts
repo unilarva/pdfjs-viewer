@@ -9,12 +9,45 @@ import {
   pdfjsDocumentLoadOptions,
   validateDocumentOptions,
   normalizeScreenWakeLockPolicy,
+  normalizeViewerOptions,
 } from "../../src/viewer-options.js";
+import { PdfjsViewerRuntime } from "../../src/pdfjs-viewer-runtime.js";
+import type { PdfjsViewerOptions } from "../../src/viewer-contracts.js";
 import {
   validatePdfjsDocumentCapabilities,
   validatePdfjsDisplayCapabilities,
 } from "../../src/pdfjs-compatibility.js";
 import { normalizeDeviceCompatibilityRules } from "../../src/device-compatibility.js";
+
+test("zoom defaults are device-category bounds independent of rendering profile", () => {
+  // Normalization needs element/runtime identity, not live DOM or worker resources.
+  class HTMLElement {
+    ownerDocument = { defaultView: { HTMLElement } };
+  }
+  const options = {
+    rootEl: new HTMLElement(),
+    runtime: Object.create(PdfjsViewerRuntime.prototype),
+  } as PdfjsViewerOptions;
+  for (const renderingProfile of ["conservative", "balanced", "aggressive"] as const) {
+    for (const hasTouch of [false, true]) {
+      assert.deepEqual(
+        normalizeViewerOptions({ ...options, renderingProfile }, hasTouch).behavior.zoom,
+        { minDesktop: 0.2, maxDesktop: 32, minMobile: 0.2, maxMobile: 16 },
+      );
+    }
+  }
+  assert.deepEqual(
+    normalizeViewerOptions(
+      { ...options, behavior: { zoom: { maxDesktop: 6, maxMobile: 3 } } },
+      false,
+    ).behavior.zoom,
+    { minDesktop: 0.2, maxDesktop: 6, minMobile: 0.2, maxMobile: 3 },
+  );
+  assert.throws(
+    () => normalizeViewerOptions({ ...options, behavior: { zoom: { minDesktop: 33 } } }, false),
+    /maximum zoom scales/,
+  );
+});
 
 test("screen wake lock policies accept exactly the supported selections", () => {
   for (const policy of [

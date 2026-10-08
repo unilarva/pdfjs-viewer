@@ -58,6 +58,8 @@ export interface RenderPlannerInput {
   retainCommittedPages: boolean;
   retainedCandidates: readonly Readonly<{ page: number; rowIndex: number; bytes: number }>[];
   committedPageRenderDprs: ReadonlyMap<number, number>;
+  /** Browser-observed allocation ceilings for current-scale page canvases. */
+  pageRenderDprLimits?: ReadonlyMap<number, number>;
   /** Attached same-scale raster bytes that remain allocated during replacement. */
   committedPageBytes?: ReadonlyMap<number, number>;
   /** Best-known non-page-canvas backing stores retained by each desired page. */
@@ -313,13 +315,15 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
   // fit decision on exactly the same rounded backing-store dimensions.
   const rasterFor = (page: number, requestedDpr: number): Readonly<RasterDimensions> => {
     const size = input.pageBaseSizes.get(page) ?? input.fallbackPageSize;
-    return resolveRasterDimensions(
+    const cappedDpr = Math.min(requestedDpr, input.pageRenderDprLimits?.get(page) ?? requestedDpr);
+    const raster = resolveRasterDimensions(
       size.width * input.currentScale,
       size.height * input.currentScale,
-      requestedDpr,
+      cappedDpr,
       input.settings.maxCanvasPixels,
       input.settings.maxCanvasDimension,
     );
+    return cappedDpr < requestedDpr ? Object.freeze({ ...raster, canvasLimited: true }) : raster;
   };
   const rasterBytes = (page: number, raster: Readonly<RasterDimensions>): number => {
     const additional = input.pageAdditionalBytes?.get(page) ?? 0;

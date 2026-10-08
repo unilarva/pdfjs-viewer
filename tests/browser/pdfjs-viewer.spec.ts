@@ -1617,7 +1617,7 @@ test("zoom-limit hint appears immediately, stays held, and follows the CSS trans
     if (!viewport) throw new Error("Missing document viewport");
     const rect = viewport.getBoundingClientRect();
     const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    window.fixture.primary.zoomTo(10);
+    window.fixture.primary.zoomTo(100);
     viewport.dispatchEvent(
       new WheelEvent("wheel", {
         bubbles: true,
@@ -1770,7 +1770,7 @@ test("zoom-limit hint avoids motion when reduced motion is requested", async ({ 
     const viewport = document.querySelector<HTMLElement>("#primary .pdf-container");
     if (!viewport) throw new Error("Missing document viewport");
     const rect = viewport.getBoundingClientRect();
-    window.fixture.primary.zoomTo(10);
+    window.fixture.primary.zoomTo(100);
     viewport.dispatchEvent(
       new WheelEvent("wheel", {
         bubbles: true,
@@ -3593,7 +3593,7 @@ test("diagnostics estimate viewer-managed raster memory across zoom changes", as
     estimateScope: "viewer-managed-raster-backing-stores-and-reservations",
     bytesPerPixelAssumption: 4,
     devicePixelRatio,
-    maxCanvasPixels: 24_000_000,
+    maxCanvasPixels: 32_000_000,
     maxCanvasDimension: 8192,
     dprReducedByMemoryLimit: false,
     dprReducedByCanvasLimit: false,
@@ -6811,7 +6811,7 @@ test("worker is active and page canvases render", async ({ page }) => {
 
 test("maximum zoom keeps each canvas within backing-store safety limits", async ({ page }) => {
   await page.evaluate(() => window.fixture.primary.zoomTo(100));
-  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.scale)).toBe(10);
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.scale)).toBe(32);
   const canvases = page.locator("#primary .pdf-page canvas");
   await expect
     .poll(() =>
@@ -6833,7 +6833,7 @@ test("maximum zoom keeps each canvas within backing-store safety limits", async 
   expect(dimensions.some(({ width, height }) => width * height > 16_777_216)).toBe(true);
   expect(
     dimensions.every(
-      ({ width, height }) => width <= 8192 && height <= 8192 && width * height <= 24_000_000,
+      ({ width, height }) => width <= 8192 && height <= 8192 && width * height <= 32_000_000,
     ),
   ).toBe(true);
 });
@@ -6887,7 +6887,7 @@ test.describe("@mobile mobile embedded viewer behavior", () => {
     page,
   }) => {
     await page.evaluate(() => window.fixture.primary.zoomTo(100));
-    await expect.poll(() => page.evaluate(() => window.fixture.primary.state.scale)).toBe(4);
+    await expect.poll(() => page.evaluate(() => window.fixture.primary.state.scale)).toBe(16);
   });
 
   test("presents settled canvases at the exact mobile render DPR", async ({ page }) => {

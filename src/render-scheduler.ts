@@ -69,6 +69,7 @@ interface CurrentRenderRequirement {
 
 /** Immutable identity and document/result context for one admitted page render. */
 export interface RenderOperation {
+  readonly kind: "page" | "detail";
   readonly id: number;
   readonly pageNo: number;
   readonly pdf: PDFJS.PDFDocumentProxy;
@@ -345,6 +346,7 @@ export class RenderScheduler {
         continue;
       }
       const operation: RenderOperation = Object.freeze({
+        kind: "page",
         id: ++this.#nextOperationId,
         pageNo,
         pdf: admission.pdf,
@@ -379,6 +381,54 @@ export class RenderScheduler {
     }
     while (blocked.length) this.#queue.push(blocked.pop()!);
     return null;
+  }
+
+  /** Admits a visible crop under the same physical concurrency and page exclusion. */
+  admitDetail(
+    pageNo: number,
+    scale: number,
+    renderDpr: number,
+    admission: RenderAdmission,
+  ): RenderOperation | null {
+    const plan = this.#planContext?.plan;
+    if (
+      !plan ||
+      !plan.visiblePages.has(pageNo) ||
+      this.#operations.size >= plan.maxConcurrentRenders ||
+      this.#authoritativeByPage.has(pageNo) ||
+      this.#directSurfaceOwners.has(admission.surfaceIdentity)
+    )
+      return null;
+    if (!Number.isFinite(admission.reservedBytes) || admission.reservedBytes < 0) return null;
+    const operation: RenderOperation = Object.freeze({
+      kind: "detail",
+      id: ++this.#nextOperationId,
+      pageNo,
+      pdf: admission.pdf,
+      documentGeneration: admission.documentGeneration,
+      requirement: Object.freeze({
+        scale,
+        requestedDpr: admission.requestedDpr,
+        renderDpr,
+        useDirectCanvas: false,
+        dprReducedByMemoryLimit: renderDpr < admission.requestedDpr,
+        dprReducedByCanvasLimit: false,
+        maxCanvasPixels: admission.maxCanvasPixels,
+        maxCanvasDimension: admission.maxCanvasDimension,
+        rasterState: admission.rasterState ?? this.#planContext!.rasterState,
+      }),
+    });
+    this.#operations.set(operation, {
+      operation,
+      authoritative: true,
+      task: null,
+      reservationBytes: admission.reservedBytes,
+      offscreenPixels: 0,
+      surfaceIdentity: admission.surfaceIdentity,
+      directSurfaceLock: false,
+    });
+    this.#authoritativeByPage.set(pageNo, operation);
+    return operation;
   }
 
   /** Whether this operation still owns the active same-page scheduler slot. */
@@ -550,7 +600,7 @@ export class RenderScheduler {
     const waitingVisible = this.#queue.filter(pageNo => plan.visiblePages.has(pageNo)).length;
     if (!waitingVisible) return [];
     const victims = [...this.#authoritativeByPage.values()]
-      .filter(operation => !plan.visiblePages.has(operation.pageNo))
+      .filter(operation => operation.kind === "detail" || !plan.visiblePages.has(operation.pageNo))
       .sort((a, b) => {
         const aRow = rowIndexFor(a.pageNo) ?? Number.POSITIVE_INFINITY;
         const bRow = rowIndexFor(b.pageNo) ?? Number.POSITIVE_INFINITY;

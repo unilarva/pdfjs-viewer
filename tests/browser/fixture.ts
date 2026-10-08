@@ -36,6 +36,21 @@ declare global {
   interface Window {
     fixture: {
       primary: PdfjsViewer;
+      detailViewer: PdfjsViewer | null;
+      detailAllocationPeakBytes: number;
+      detailRenderCalls: Array<{
+        canvas: HTMLCanvasElement;
+        transform: readonly number[];
+        width: number;
+        height: number;
+        rotation: number;
+      }>;
+      createDetailViewer(memoryLimitMiB?: number): Promise<void>;
+      compareDetailPixels(): Promise<{
+        differentPixels: number;
+        darkPixels: number;
+        pixelCount: number;
+      }>;
       createScreenWakeLockViewer(
         options: Omit<ConstructorParameters<typeof PdfjsViewer>[0], "runtime">,
       ): PdfjsViewer;
@@ -538,8 +553,113 @@ document.addEventListener("securitypolicyviolation", event => {
 
 window.fixture = {
   primary,
+  detailViewer: null,
+  detailAllocationPeakBytes: 0,
+  detailRenderCalls: [],
+  async createDetailViewer(memoryLimitMiB = 16) {
+    await primary.close();
+    const task = PDFJS.getDocument({ url: "/fixture.pdf" });
+    const pdf = await task.promise;
+    const pdfPage = await pdf.getPage(1);
+    const prototype = Object.getPrototypeOf(pdfPage) as { render: typeof pdfPage.render };
+    const original = prototype.render;
+    // Record the PDF.js boundary, not the renderer's private crop planner.
+    prototype.render = function (parameters) {
+      const canvas = parameters.canvas ?? parameters.canvasContext?.canvas;
+      if (canvas instanceof HTMLCanvasElement) {
+        window.fixture.detailRenderCalls.push({
+          canvas,
+          transform: [...(parameters.transform ?? [1, 0, 0, 1, 0, 0])],
+          width: parameters.viewport.width,
+          height: parameters.viewport.height,
+          rotation: parameters.viewport.rotation,
+        });
+        const canvases = new Set([
+          ...window.fixture.detailRenderCalls.map(call => call.canvas),
+          ...document.querySelectorAll<HTMLCanvasElement>("#detail-viewer canvas"),
+        ]);
+        window.fixture.detailAllocationPeakBytes = Math.max(
+          window.fixture.detailAllocationPeakBytes,
+          [...canvases].reduce((bytes, canvas) => bytes + canvas.width * canvas.height * 4, 0),
+        );
+      }
+      return original.call(this, parameters);
+    };
+    await task.destroy();
+    const host = document.createElement("section");
+    host.id = "detail-viewer";
+    host.className = "viewer-host";
+    host.style.cssText = "position:fixed;inset:0;width:min(640px,100vw);height:480px";
+    document.body.append(host);
+    const viewer = new PdfjsViewer({
+      rootEl: host,
+      runtime,
+      ui: "default",
+      renderingProfile: "balanced",
+      renderingProfilePolicy: {
+        likelyMobile: { availableProfiles: ["balanced"], defaultProfile: "balanced" },
+      },
+      renderingProfiles: {
+        balanced: {
+          memoryLimitMiB,
+          maxCanvasPixels: 750_000,
+          maxCanvasDimension: 1024,
+          maxBufferPages: 0,
+          maxBufferViewportHeights: 0,
+        },
+      },
+      features: { search: false, outline: false, thumbnails: false },
+      logger: entry => logs.push(entry),
+    });
+    window.fixture.detailViewer = viewer;
+    const result = await viewer.load("/fixture.pdf");
+    if (!result.ok) throw new Error("Detail fixture did not load");
+  },
   createScreenWakeLockViewer(options) {
     return new PdfjsViewer({ ...options, runtime });
+  },
+  async compareDetailPixels() {
+    const actual = document.querySelector<HTMLCanvasElement>("#detail-viewer .pdf-detail-canvas")!;
+    const call = [...window.fixture.detailRenderCalls]
+      .reverse()
+      .find(call => call.canvas === actual)!;
+    const task = PDFJS.getDocument({ url: "/fixture.pdf" });
+    const reference = document.createElement("canvas");
+    reference.width = actual.width;
+    reference.height = actual.height;
+    try {
+      const page = await (await task.promise).getPage(1);
+      // Independent reference: keep PDF viewport at scale one, composing zoom
+      // into the output transform instead of reusing the viewer's viewport.
+      const viewport = page.getViewport({ scale: 1, rotation: call.rotation });
+      const factor = call.width / viewport.width;
+      const [dpr, , , , tx, ty] = call.transform;
+      await page.render({
+        canvas: reference,
+        viewport,
+        transform: [dpr * factor, 0, 0, dpr * factor, tx, ty],
+        annotationMode: PDFJS.AnnotationMode.ENABLE_FORMS,
+      }).promise;
+      const expected = reference
+        .getContext("2d")!
+        .getImageData(0, 0, reference.width, reference.height).data;
+      const observed = actual
+        .getContext("2d")!
+        .getImageData(0, 0, actual.width, actual.height).data;
+      let differentPixels = 0;
+      let darkPixels = 0;
+      for (let i = 0; i < expected.length; i += 4) {
+        if (expected[i] < 200 || expected[i + 1] < 200 || expected[i + 2] < 200) darkPixels++;
+        if (
+          [0, 1, 2, 3].some(channel => Math.abs(expected[i + channel] - observed[i + channel]) > 2)
+        )
+          differentPixels++;
+      }
+      return { differentPixels, darkPixels, pixelCount: expected.length / 4 };
+    } finally {
+      reference.width = reference.height = 0;
+      await task.destroy();
+    }
   },
   secondary,
   securityPolicyViolations,

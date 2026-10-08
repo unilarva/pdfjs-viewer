@@ -811,9 +811,9 @@ export function normalizeViewerOptions(
   );
   const zoom = {
     minDesktop: 0.2,
-    maxDesktop: 10,
+    maxDesktop: 32,
     minMobile: 0.2,
-    maxMobile: 4,
+    maxMobile: 16,
     ...sourceBehavior.zoom,
   };
   for (const [name, value] of Object.entries(zoom)) {

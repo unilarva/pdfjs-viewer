@@ -80,6 +80,34 @@ function admit(scheduler: RenderScheduler, generation = 1): RenderOperation {
   return scheduler.admitNext(candidate => admission(candidate, generation))!;
 }
 
+test("detail shares concurrency, page exclusion, cancellation and physical temporary accounting", () => {
+  const scheduler = new RenderScheduler(1);
+  const planInput = input({ settings: { ...input().settings, maxConcurrentRenders: 1 } });
+  prepare(scheduler, planInput);
+  const facts = admission({
+    pageNo: 2,
+    renderDpr: 2,
+    requiresDirectCanvas: false,
+    dprReducedByMemoryLimit: false,
+    dprReducedByCanvasLimit: false,
+  });
+  assert.equal(scheduler.admitDetail(1, 1, 2, facts), null, "offscreen detail is never admitted");
+  const operation = scheduler.admitDetail(2, 1, 2, facts)!;
+  assert.equal(operation.kind, "detail");
+  assert.equal(
+    scheduler.admitNext(candidate => admission(candidate)),
+    null,
+  );
+  assert.equal(scheduler.recordOffscreenAllocation(operation, 1000), true);
+  scheduler.attachTask(operation, fakeTask());
+  scheduler.cancelActiveOperations(task => task.cancel());
+  assert.equal(scheduler.snapshot().settlingOffscreenPixels, 1000);
+  assert.equal(scheduler.admitDetail(2, 1, 2, facts), null);
+  scheduler.settleOperation(operation);
+  assert.equal(scheduler.snapshot().activeOffscreenPixels, 0);
+  assert.ok(scheduler.admitDetail(2, 1, 2, facts));
+});
+
 test("plans and admits visible-first work with detached snapshots", () => {
   const scheduler = new RenderScheduler(3);
   prepare(scheduler);
@@ -145,6 +173,72 @@ test("preemption protects visible work and breaks equal-distance victim ties beh
   assert.equal(
     victims.some(operation => operation.pageNo === 3),
     false,
+  );
+});
+
+test("visible base work preempts detail without releasing its physical resources early", () => {
+  const scheduler = new RenderScheduler(1);
+  prepare(
+    scheduler,
+    input({
+      rows: [[1], [2]],
+      visibleRange: { first: 0, last: 1 },
+      settings: { ...input().settings, maxConcurrentRenders: 1 },
+    }),
+  );
+  const operation = scheduler.admitDetail(
+    1,
+    1,
+    2,
+    admission({
+      pageNo: 1,
+      renderDpr: 2,
+      requiresDirectCanvas: false,
+      dprReducedByMemoryLimit: false,
+      dprReducedByCanvasLimit: false,
+    }),
+  )!;
+  let cancellations = 0;
+  scheduler.attachTask(
+    operation,
+    fakeTask(() => cancellations++),
+  );
+  scheduler.recordOffscreenAllocation(operation, 1000);
+  scheduler.rebuildQueue(
+    0.5,
+    "stationary",
+    page => page === 1,
+    page => page - 1,
+  );
+  assert.deepEqual(
+    scheduler.preemptForVisible(
+      page => page - 1,
+      0.5,
+      "stationary",
+      task => task.cancel(),
+    ),
+    [operation],
+  );
+  assert.equal(cancellations, 1);
+  assert.equal(scheduler.ownsOperation(operation), false);
+  assert.equal(scheduler.snapshot().settlingOffscreenPixels, 1000);
+  assert.equal(scheduler.snapshot().reservedBytes, 100);
+  assert.equal(
+    scheduler.admitNext(candidate => admission(candidate)),
+    null,
+  );
+  scheduler.settleOperation(operation);
+  const visible = scheduler.admitNext(candidate => admission(candidate))!;
+  assert.equal(visible.kind, "page");
+  assert.equal(visible.pageNo, 2);
+  assert.deepEqual(
+    scheduler.preemptForVisible(
+      page => page - 1,
+      0.5,
+      "stationary",
+      task => task.cancel(),
+    ),
+    [],
   );
 });
 

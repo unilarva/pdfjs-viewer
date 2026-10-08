@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DocumentView } from "../../src/document-view.js";
+import type { DetailRegion } from "../../src/detail-render-planner.js";
 import { installTestPlatform } from "./test-platform.js";
 
 class FakeStyle {
@@ -42,6 +43,8 @@ class FakeElement {
   scrollWidth = 1200;
   clientWidth = 800;
   clientHeight = 600;
+  clientLeft = 0;
+  clientTop = 0;
   borderBoxWidth: number | null = null;
   borderBoxHeight: number | null = null;
   width = 0;
@@ -126,9 +129,11 @@ function setup(options: { pageLayout?: "auto" | "single" | "double" | "book" } =
     rowBounds?: readonly Readonly<{ top: number; bottom: number }>[];
     pageBaseSizes?: ReadonlyMap<number, Readonly<{ width: number; height: number }>>;
     fallbackPageSize?: Readonly<{ width: number; height: number }>;
+    visiblePageRegions?: ReadonlyMap<number, Readonly<DetailRegion>>;
   }> = [];
   const renderer = {
     beginSurfaceReflow: () => calls.push("renderer-begin"),
+    setInteractionActive: () => {},
     endSurfaceReflow: (view: { scale: number; rows: readonly (readonly number[])[] }) => {
       calls.push("renderer-end");
       views.push(view);
@@ -191,6 +196,98 @@ test("owns initial topology, surfaces, canonical sizing, and render snapshot", (
     assert.deepEqual(calls.slice(0, 3), ["text-reflow", "renderer-begin", "renderer-end"]);
     assert.equal(views[0]?.scale, view.scale);
     assert.equal(view.contentElement?.style.getPropertyValue("--pdf-page-vgap-scaled"), "8px");
+  });
+});
+
+test("detail demand maps fractional panning and scrollport borders into rotated canonical page space", () => {
+  withFakeDocument(() => {
+    const { view, container, views } = setup();
+    view.beginDocument({
+      pageCount: 1,
+      basePageSize: { width: 400.25, height: 800.5 },
+      preferredLayout: null,
+    });
+    view.setExplicitScale(2.375);
+    container.clientLeft = 3;
+    container.clientTop = 5;
+    const containerRect = container.getBoundingClientRect();
+    container.getBoundingClientRect = () => ({
+      ...containerRect,
+      left: 100.25,
+      top: 200.5,
+      right: 906.25,
+      bottom: 810.5,
+    });
+    for (const rotation of [0, 90, 180, 270] as const) {
+      view.commitView({ rotation, refit: false });
+      const wrapper = view.pageWrapFor(1)!;
+      const width = (rotation % 180 ? 800.5 : 400.25) * view.scale;
+      const height = (rotation % 180 ? 400.25 : 800.5) * view.scale;
+      // Mimic fractional CSSOM wrapper rounding independently of PDF viewport geometry.
+      const rectWidth = Math.round(width * 64) / 64;
+      const rectHeight = Math.round(height * 64) / 64;
+      wrapper.getBoundingClientRect = () => ({
+        ...containerRect,
+        left: -120.125,
+        top: -330.25,
+        width: rectWidth,
+        height: rectHeight,
+        right: -120.125 + rectWidth,
+        bottom: -330.25 + rectHeight,
+      });
+      view.reconcile();
+      const crop = views.at(-1)!.visiblePageRegions!.get(1)!;
+      assert.equal(crop.x, (103.25 + 120.125) * (width / rectWidth));
+      assert.equal(crop.y, (205.5 + 330.25) * (height / rectHeight));
+      assert.equal(crop.width, Math.min(800, rectWidth - 223.375) * (width / rectWidth));
+      assert.equal(crop.height, Math.min(600, rectHeight - 535.75) * (height / rectHeight));
+      assert.ok(crop.x + crop.width <= width + 1e-10);
+      assert.ok(crop.y + crop.height <= height + 1e-10);
+      assert.ok(Object.isFrozen(crop));
+    }
+  });
+});
+
+test("detail demand includes only intersecting spread pages and suppresses transient pinch geometry", () => {
+  withFakeDocument(() => {
+    const { view, container, views } = setup({ pageLayout: "double" });
+    view.beginDocument({
+      pageCount: 2,
+      basePageSize: { width: 400, height: 800 },
+      preferredLayout: null,
+    });
+    view.setExplicitScale(2);
+    const rect = container.getBoundingClientRect();
+    const setBounds = (pageNo: number, left: number) => {
+      view.pageWrapFor(pageNo)!.getBoundingClientRect = () => ({
+        ...rect,
+        left,
+        top: 10.25,
+        width: 800,
+        height: 1600,
+        right: left + 800,
+        bottom: 1610.25,
+      });
+    };
+    setBounds(1, -500.5);
+    setBounds(2, 315.5);
+    view.reconcile();
+    assert.deepEqual(
+      [...views.at(-1)!.visiblePageRegions!],
+      [
+        [1, { x: 500.5, y: 0, width: 299.5, height: 589.75 }],
+        [2, { x: 0, y: 0, width: 484.5, height: 589.75 }],
+      ],
+    );
+    setBounds(2, 800);
+    view.reconcile();
+    assert.deepEqual([...views.at(-1)!.visiblePageRegions!.keys()], [1]);
+    container.className = "pdf-pinch-active";
+    view.reconcile();
+    assert.equal(views.at(-1)!.visiblePageRegions!.size, 0);
+    container.className = "";
+    view.reconcile();
+    assert.deepEqual([...views.at(-1)!.visiblePageRegions!.keys()], [1]);
   });
 });
 

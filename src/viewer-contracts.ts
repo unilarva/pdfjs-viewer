@@ -1194,7 +1194,7 @@ export interface PdfjsViewerBehaviorOptions {
   textSelectionPersistence?: PdfjsViewerTextSelectionPersistence;
   /** Reduce speculative rendering and offscreen raster retention while the owning browser document is hidden. Defaults to `true`. */
   reduceRenderingWhenDocumentHidden?: boolean;
-  /** Absolute zoom bounds. Mobile and desktop are detected per viewer. */
+  /** Absolute zoom bounds selected per viewer's device category, independently of rendering profile. */
   zoom?: Partial<PdfjsViewerZoomOptions>;
   /** Pointer long-press threshold in milliseconds. */
   longPressMs?: number;
@@ -1218,11 +1218,11 @@ export interface PdfjsViewerBehaviorOptions {
 export interface PdfjsViewerZoomOptions {
   /** Minimum desktop zoom scale. Must be finite and greater than zero. */
   minDesktop: number;
-  /** Maximum desktop zoom scale. Defaults to 10; must be finite and no smaller than `minDesktop`. */
+  /** Maximum desktop zoom scale. Defaults to 32; must be finite and no smaller than `minDesktop`. */
   maxDesktop: number;
   /** Minimum likely-mobile zoom scale. Must be finite and greater than zero. */
   minMobile: number;
-  /** Maximum likely-mobile zoom scale. Defaults to 4; must be finite and no smaller than `minMobile`. */
+  /** Maximum likely-mobile zoom scale. Defaults to 16; must be finite and no smaller than `minMobile`. */
   maxMobile: number;
 }
 
@@ -2305,7 +2305,9 @@ export interface PdfjsViewerRenderingProfilePolicy {
 /**
  * Tunable resource, quality, and retention limits for one rendering profile.
  *
- * The document renderer builds each render plan deterministically in this order:
+ * The document renderer preserves a full-page base raster and automatically adds
+ * optional high-resolution detail over visible portions when that base cannot
+ * achieve the effective target DPR. Planning follows this order:
  *
  * 1. Collect every page in the visible row range plus pages still required for
  *    initial readiness. These pages are mandatory.
@@ -2315,7 +2317,9 @@ export interface PdfjsViewerRenderingProfilePolicy {
  *    `maxCanvasPixels` or `maxCanvasDimension` lower one uniform render DPR and
  *    round downward. That scalar DPR is the render and reuse identity; integer
  *    coverage ratios do not become quality targets. Canvas safety may override
- *    `minRenderDpr`.
+ *    `minRenderDpr`. Unsupported browser allocations also lower the observed
+ *    per-page resolution ceiling through bounded retries, without changing CSS
+ *    page geometry or repeatedly requesting the same unusable allocation.
  * 3. Estimate mandatory settled canvas backing stores at four bytes per raster pixel.
  *    If that exceeds `memoryLimitMiB` and `allowDprReduction` is enabled, assign
  *    one common proportionally fitted DPR to all mandatory pages, clamped to
@@ -2329,7 +2333,15 @@ export interface PdfjsViewerRenderingProfilePolicy {
  *    enabled, select visible pages largest-first for direct-to-visible rendering
  *    until the peak fits or every visible page is direct. Direct rendering is
  *    therefore considered only after concurrency has reached one.
- * 6. Select complete optional rows intersecting one total
+ * 6. For visible pages with current committed base output below the effective target
+ *    DPR, fit one optional detail crop per page into the hard headroom remaining
+ *    after the mandatory base peak. Apply both canvas safety limits to the crop.
+ *    First shrink padding and quantization to the exact visible intersection;
+ *    lower detail DPR only if that intersection still cannot fit. Skip detail
+ *    when it cannot improve base quality. Include committed detail, pending crop
+ *    reservations, and active or still-settling detail allocations as fixed occupancy before
+ *    planning optional base-page buffering and retention.
+ * 7. Select complete optional rows intersecting one total
  *    `maxBufferViewportHeights` distance budget. Stationary views split it evenly;
  *    active motion assigns about two thirds to the leading side. Distance unavailable
  *    at a document edge moves to the other side. Admit a complete row only when all
@@ -2340,42 +2352,63 @@ export interface PdfjsViewerRenderingProfilePolicy {
  *    writes directly to its already attached offscreen canvas and needs no temporary
  *    buffer; replacing existing output keeps the old backing store until commit and
  *    therefore reserves the complete temporary raster alongside it.
- * 7. Only the first optional row that does not fit at the requested DPR may use
+ * 8. Only the first optional row that does not fit at the requested DPR may use
  *    proportional DPR reduction, when allowed, no lower than `minRenderDpr`.
  *    Reject an optional row that still does not fit; do not direct-render it.
- * 8. Retain already-rendered pages outside the admitted row window nearest-first
+ * 9. Retain already-rendered pages outside the admitted row window nearest-first
  *    while the same peak constraint permits them. Retention never schedules new
  *    rendering. Non-retained attached canvases are evicted before the new queue
  *    can allocate output, so disposable old pages never force lower new-render quality.
- * 9. When an optionally rendered page becomes visible, rerender it whenever its
+ * 10. When an optionally rendered page becomes visible, rerender it whenever its
  *    committed DPR is lower than the exact DPR required by the visible plan.
  *    Visible quality upgrades are queued before optional work.
- * 10. Build the render queue visible-first. While scrolling, visible pages and
- *     optional work are ordered toward the leading edge of motion; while stationary,
- *     they are ordered center-out. A newly visible page may preempt speculative work,
- *     but active visible rendering is never preempted.
+ * 11. Schedule mandatory visible base output first, then useful visible detail,
+ *     then offscreen prefetch. Base and detail share physical concurrency and
+ *     same-page exclusion. While scrolling, base pages and prefetch are ordered
+ *     toward the leading edge of motion; while stationary, they are center-out.
+ *     A newly visible base page may preempt speculative or detail work, but active
+ *     visible base rendering is never preempted. Pending detail keeps its next
+ *     admission slot ahead of prefetch, including during its movement debounce.
+ *
+ * Detail crops reuse the exact committed rotated PDF.js viewport with a clipped
+ * uniform DPR/translation transform. Viewport changes are debounced, covering
+ * crops are reused, and transient zoom transforms existing imagery without
+ * admitting new detail work. Coverage checks allow floating-point roundoff but
+ * reject genuinely uncovered visible regions before scheduling. Document, base
+ * output, surface, and scheduler ownership are revalidated before publication;
+ * obsolete work never replaces current imagery. A completed detail canvas moves
+ * from temporary to attached ownership without a second copy. The old overlay
+ * remains until replacement commits unless hard headroom requires its release.
+ * Allocation or rendering failure lowers optional quality through bounded retries
+ * or retains the usable base. Text, search, annotations, forms, and pointer
+ * interactions remain above detail, independent of its raster lifecycle.
  *
  * The memory limit covers attached canvas backing stores, active temporary
- * offscreen canvases, and admitted render reservations. Per-canvas limits are
+ * offscreen canvases, and admitted render reservations, including base/detail
+ * replacement overlap. Cancelled writers retain memory and concurrency until
+ * physical settlement, not merely until cancellation is requested. Per-canvas limits are
  * independent browser-safety constraints. PDF.js caches, decoded document
  * resources, and browser/GPU overhead are outside the observable limit.
  * Optional buffering must satisfy every distance, page-count, canvas, and
  * viewer-managed memory constraint; increasing one limit never bypasses another.
- * Mandatory visible and initial-readiness pages are the sole memory-limit
+ * Mandatory visible and initial-readiness base pages are the sole memory-limit
  * exception: when they cannot fit even after permitted DPR and concurrency
  * reductions, the viewer preserves required output rather than deliberately
- * leaving the viewport blank or reporting false initial readiness.
+ * leaving the viewport blank or reporting false initial readiness. Optional detail
+ * never uses that exception or a `minRenderDpr` quality floor to exceed the hard
+ * memory budget, and detail completion is not required for initial readiness.
+ * Thumbnail and controlled-print rendering retain their independent lifecycles.
  */
 export interface PdfjsViewerRenderingProfileSettings {
   /** Viewer-managed raster-memory limit in MiB; finite values are clamped to 5–8192. */
   memoryLimitMiB: number;
   /** Separate demand-driven thumbnail bitmap cap in MiB; finite values are clamped to 1–1024. */
   thumbnailMemoryLimitMiB: number;
-  /** Maximum pixel area of one canvas backing store. Safety limit may override `minRenderDpr`. */
+  /** Maximum pixel area of each rendering canvas, including detail and temporary output. Defaults: 16M conservative, 32M balanced, 48M aggressive. Safety limit may override `minRenderDpr`. */
   maxCanvasPixels: number;
-  /** Maximum width or height of one canvas backing store. Safety limit may override `minRenderDpr`. */
+  /** Maximum width or height of each rendering canvas. Defaults: 4096 conservative, 8192 balanced, 16384 aggressive. Safety limit may override `minRenderDpr`. */
   maxCanvasDimension: number;
-  /** Maximum simultaneous page renders when the memory plan permits them. */
+  /** Maximum simultaneous base and detail page renders when the memory plan permits them. */
   maxConcurrentRenders: number;
   /** Target total viewport-height distance outside the visible range; whole boundary rows may extend it. */
   maxBufferViewportHeights: PdfjsViewerRenderBufferViewportHeights;
@@ -2387,7 +2420,7 @@ export interface PdfjsViewerRenderingProfileSettings {
   maxRenderDpr: number;
   /** Lowest DPR used under pressure before mandatory visible pages may exceed the limit. */
   minRenderDpr: number;
-  /** Permit the planner to lower render DPR as far as `minRenderDpr`. */
+  /** Permit base-page memory planning to lower render DPR as far as `minRenderDpr`; optional detail always fits hard limits. */
   allowDprReduction: boolean;
   /** Permit the planner to render visible pages directly when peak headroom is insufficient. */
   allowVisibleDirectRendering: boolean;

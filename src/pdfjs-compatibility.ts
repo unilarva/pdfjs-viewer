@@ -332,6 +332,16 @@ export interface PdfPageRenderTask {
   readonly task: PDFJS.RenderTask;
   readonly promise: Promise<void>;
 }
+/** Reads an owned task's exact optimized list for PDF.js 6.3's index-only operation filter. */
+export function ownedPdfPageRenderOperatorList(
+  task: unknown,
+): Awaited<ReturnType<PDFJS.PDFPageProxy["getOperatorList"]>> | null {
+  const internal = (task as RecordLike | null)?._internalRenderTask as RecordLike | undefined;
+  const list = internal?.operatorList as RecordLike | undefined;
+  return list && Array.isArray(list.fnArray) && Array.isArray(list.argsArray)
+    ? (list as unknown as Awaited<ReturnType<PDFJS.PDFPageProxy["getOperatorList"]>>)
+    : null;
+}
 function abortError(reason: unknown): Error {
   if (reason instanceof Error && reason.name === "AbortError") return reason;
   if (typeof DOMException !== "undefined")

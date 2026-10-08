@@ -10,6 +10,7 @@ export const sourceEntries = Object.freeze([
   "src/default-ui.ts",
   "src/generated-ui-options.ts",
   "src/render-planner.ts",
+  "src/detail-render-planner.ts",
   "src/document-renderer.ts",
   "src/document-thumbnails.ts",
   "src/thumbnail-render-planner.ts",

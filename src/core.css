@@ -64,6 +64,14 @@
     padding-block-start: var(--pdf-page-vgap-scaled, 0px);
     transition: none;
   }
+  .pdf-detail-canvas {
+    position: absolute;
+    z-index: 1;
+    pointer-events: none;
+    user-select: none;
+    max-width: none;
+    max-height: none;
+  }
   :scope.pdf-container.pdf-pinch-active,
   .pdf-container.pdf-pinch-active,
   .pdf-container.pdf-pinch-active :is(.pdf-text-layer, .pdf-text-layer span, .pdf-text-layer br) {
