@@ -53,7 +53,7 @@ import {
   type RenderOperation,
 } from "./render-scheduler.js";
 import type { PdfjsViewerRenderingProfileSettings } from "./viewer-contracts.js";
-import { ownedPdfPageRenderOperatorList, startPdfPageRenderTask } from "./pdfjs-compatibility.js";
+import { startPdfPageRenderTask } from "./pdfjs-compatibility.js";
 import type { PrimaryRasterPressure } from "./raster-work-coordinator.js";
 import {
   detailRegionContains,
@@ -1520,18 +1520,14 @@ export class DocumentRenderer {
       use = (await this.#pages?.acquire(operation.pageNo)) ?? null;
       if (!use || !this.#detailIsCurrent(operation)) return;
       const { raster, base } = target;
-      let detailTask: PDFJS.RenderTask | null = null;
       let operationsFilter: Parameters<PDFJS.PDFPageProxy["render"]>[0]["operationsFilter"];
       if (base.annotationCanvasIds.size > 0) {
         const operators = this.#callbacks.annotationOperatorIds?.();
         if (!operators) throw new Error("Annotation operator identifiers are unavailable");
-        let list: ReturnType<typeof ownedPdfPageRenderOperatorList> = null;
         let separatelyPresented = false;
         // Match base rendering: dedicated annotation appearances belong to the
         // annotation layer, not to either page bitmap. Keep other markup in the crop.
-        operationsFilter = (index, suppliedList) => {
-          list ??= suppliedList ?? ownedPdfPageRenderOperatorList(detailTask);
-          if (!list) throw new Error("Annotation render operations are unavailable");
+        operationsFilter = (index, list) => {
           if (list.fnArray[index] === operators.beginAnnotation) {
             separatelyPresented = base.annotationCanvasIds.has(list.argsArray[index]?.[0]);
           }
@@ -1562,7 +1558,6 @@ export class DocumentRenderer {
           ? { optionalContentConfigPromise: base.rasterState.optionalContentConfigPromise }
           : {}),
       });
-      detailTask = render.task;
       if (!this.#scheduler.attachTask(operation, render.task)) {
         safely(() => render.task.cancel());
         await render.promise;

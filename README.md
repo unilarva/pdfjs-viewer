@@ -74,7 +74,7 @@ and the new viewer release's `peerDependencies`.
   viewport; they are interaction regressions, not physical Android/iOS qualification.
   Native selection handles and system print UI remain browser-owned.
 - The consuming application must install an exact `pdfjs-dist` version declared in this
-  release's `peerDependencies` (currently `6.3.289` or `6.4.299`). The package does not bundle PDF.js,
+  release's `peerDependencies` (currently `6.4.299`). The package does not bundle PDF.js,
   its worker, fonts, CMaps, ICC data, or WASM assets.
 - An ESM-capable bundler or browser setup. There is no CommonJS build.
 - A browser document when constructing a viewer. SSR tooling can import the package,

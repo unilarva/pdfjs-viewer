@@ -113,7 +113,7 @@
     "format:check": "prettier --check ."
   },
   "peerDependencies": {
-    "pdfjs-dist": "6.3.289 || 6.4.299"
+    "pdfjs-dist": "6.4.299"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

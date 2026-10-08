@@ -4,6 +4,9 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- **Breaking: requires `pdfjs-dist 6.4.299`; PDF.js 6.3 is no longer supported.**
+  Upgrade the display module, matching worker, and supporting PDF.js assets together.
+  Both standard and legacy builds of the required release remain supported.
 - Added automatic high-resolution detail rendering for sharper PDF content at high zoom,
   with graceful fallback on constrained devices. Cropped overlays share the rendering memory
   budget, preserve interactive layers and annotation appearance, and prioritize visible-region
@@ -32,10 +35,6 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 - Added a generated **Keep screen on** selector, overridable labels, and custom UI radio-group
   bindings. Feature and generated-control switches independently disable capability and UI;
   browser limitations remain silent in the UI and use optional structured logger diagnostics.
-- Added support for `pdfjs-dist 6.4.299` while retaining `6.3.289`; detail annotation filtering
-  on 6.3 uses a narrowly qualified compatibility adapter.
-- Documented the latest-PDF.js-first support policy: retain older releases only without
-  compatibility scaffolding, and allow coordinated viewer/PDF.js upgrades during pre-1.0.
 
 ## 0.7.2
 

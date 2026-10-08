@@ -11,8 +11,9 @@ test("qualified PDF.js peer unions accept only exact stable releases", async () 
   const { parseExactPdfjsVersionUnion } = await import(
     `${process.cwd()}/scripts/pdfjs-version-manifest.mjs`
   );
-  assert.deepEqual(parseExactPdfjsVersionUnion("6.3.289|| 6.4.100"), ["6.3.289", "6.4.100"]);
-  assert.throws(() => parseExactPdfjsVersionUnion("6.3.*"), /only exact stable versions/);
+  assert.deepEqual(parseExactPdfjsVersionUnion("6.4.299"), ["6.4.299"]);
+  assert.deepEqual(parseExactPdfjsVersionUnion("6.4.299|| 6.4.300"), ["6.4.299", "6.4.300"]);
+  assert.throws(() => parseExactPdfjsVersionUnion("6.4.*"), /only exact stable versions/);
 });
 
 test("CSS qualification reports category, selector, declaration, and version drift", async () => {

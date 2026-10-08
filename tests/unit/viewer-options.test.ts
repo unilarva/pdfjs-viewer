@@ -258,7 +258,7 @@ test("print options preserve every canonical sheet preset", () => {
   }
 });
 
-test("annotation capability validation requires PDF.js 6.3 display exports", () => {
+test("annotation capability validation requires qualified PDF.js display exports", () => {
   class AnnotationLayer {
     render() {}
     update() {}

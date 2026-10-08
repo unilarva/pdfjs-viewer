@@ -72,7 +72,7 @@ function storage() {
 test("reports capability-specific qualified incompatibilities", () => {
   assert.throws(
     () => validatePdfjsDisplayCapabilities({}, { text: true }),
-    /qualified contract \(6\.3\.289, 6\.4\.299\) display module is missing TextLayer/,
+    /qualified contract \(6\.4\.299\) display module is missing TextLayer/,
   );
   assert.throws(
     () =>
@@ -80,13 +80,13 @@ test("reports capability-specific qualified incompatibilities", () => {
         {},
         { attachments: false, forms: false, layers: false, print: false },
       ),
-    /qualified contract \(6\.3\.289, 6\.4\.299\) PDFDocumentProxy is missing cleanup\(\)/,
+    /qualified contract \(6\.4\.299\) PDFDocumentProxy is missing cleanup\(\)/,
   );
   const candidate = storage();
   delete (candidate as Partial<typeof candidate>).getEditor;
   assert.throws(
     () => assertAnnotationStorage(candidate as never),
-    /qualified contract \(6\.3\.289, 6\.4\.299\) AnnotationStorage is missing getEditor\(\)/,
+    /qualified contract \(6\.4\.299\) AnnotationStorage is missing getEditor\(\)/,
   );
   assert.equal(ANNOTATION_STORAGE_CAPABILITIES.includes("setValue"), true);
   const methods = [
@@ -166,7 +166,7 @@ test("rejects annotation callback slots that cannot be restored", () => {
   Object.defineProperty(source, "onSetModified", { get: () => null, configurable: true });
   assert.throws(
     () => installAnnotationStorageCallbacks(source as never, () => {}),
-    /qualified contract \(6\.3\.289, 6\.4\.299\) AnnotationStorage.*callback slots/,
+    /qualified contract \(6\.4\.299\) AnnotationStorage.*callback slots/,
   );
   const editorSource = storage();
   Object.defineProperty(editorSource, "onAnnotationEditor", {
@@ -193,7 +193,7 @@ test("clones optional-content configurations only through the static qualified s
   });
   assert.throws(
     () => clonePdfjsOptionalContentConfig({}, {}),
-    /qualified contract \(6\.3\.289, 6\.4\.299\) OptionalContentConfig is missing fromSerializable\(\)/,
+    /qualified contract \(6\.4\.299\) OptionalContentConfig is missing fromSerializable\(\)/,
   );
 });
 

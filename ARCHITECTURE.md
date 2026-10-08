@@ -201,7 +201,7 @@ The current owners are:
   raster owners with exact tokens, revokes background work, awaits all captured physical drains,
   and resumes only those tokens when the exclusive lease is released.
 - `pdfjs-compatibility`: the sole qualified PDF.js API-shape boundary. It owns capability
-  diagnostics, narrow casts including the 6.3.289 `getMarkInfo()` runtime-Map/generated-type
+  diagnostics, narrow casts including the qualified `getMarkInfo()` runtime-Map/generated-type
   mismatch, workerPort access, optional-content cloning, annotation/XFA
   invocation, and policy-free exact render-task cancellation mechanics shared by raster owners.
 - `RenderScheduler`: lower-level plan, queue, admission, operation, task, reservation,
@@ -262,7 +262,7 @@ The current owners are:
   browser activation, raster work, or print job.
 - `DocumentPresentation`: the complete annotation-derived page-presentation owner. It
   acquires annotations only through renderer-admitted exact presentation contexts and uses
-  the runtime-injected PDF.js 6.3 `AnnotationLayer` through a narrow package link-service adapter.
+  the runtime-injected PDF.js `AnnotationLayer` through a narrow package link-service adapter.
   Before PDF.js sees data, an explicit action matrix admits only safe external/internal links,
   navigation-only named actions, atomic optional-content actions, and page-local attachments;
   Print, SaveAs, submit/network, rich media, and scripting are removed. The owner
@@ -279,7 +279,7 @@ The current owners are:
   retains page DOM, focus pins, cross-page Tab continuation, and visible reset synchronization. Every
   AnnotationLayer-facing widget ID, field name, and field-object ID receives a package-owned
   per-viewer namespace; the adapter removes it before accessing original storage keys. This makes
-  PDF.js 6.3's document-global `querySelector`/`getElementsByName` implementation safe without
+  PDF.js's document-global `querySelector`/`getElementsByName` implementation safe without
   patching PDF.js or restricting the application to one form viewer.
 - `DocumentTextPresentation`: the complete document-lifetime text-presentation owner. It
   owns package adapters around the runtime-injected PDF.js `TextLayer`, exact lease/page mappings, search and
@@ -690,10 +690,10 @@ Dedicated annotation appearances remain owned by the base output's exact annotat
 Detail rendering uses PDF.js's operation filter and runtime-supplied annotation operator IDs
 to exclude those appearances, avoiding duplicate compositing and extra annotation allocations.
 Committed output snapshots the dedicated annotation IDs before PDF.js presentation consumes
-the canvas map. PDF.js 6.4 supplies the exact optimized operator list to the filter. The qualified
-6.3 index-only callback uses one guarded, read-only bridge to the owned render task's
-`_internalRenderTask.operatorList`; the compatibility matrix verifies this narrow private
-contract for both releases and variants. The public `getOperatorList()` is not interchangeable:
+the canvas map. The qualified PDF.js operation filter supplies the exact optimized operator
+list directly; no private render-task access or older-version fallback is used. The compatibility
+matrix verifies this public callback contract for standard and legacy builds.
+The public `getOperatorList()` is not interchangeable:
 it disables operator optimization, so its indexes can differ from the display render.
 
 `DocumentView` snapshots actual visible page-local intersections, including horizontal panning
@@ -1589,8 +1589,8 @@ annotation security and persistence, page-DOM virtualization, and multi-document
 
 ### Publication Boundary
 
-This package release qualifies `pdfjs-dist 6.3.289` and `6.4.299`. Both use the same implementation
-without version-specific compatibility scaffolding. The public frozen version set and ordered
+This package release qualifies only `pdfjs-dist 6.4.299`, without older-version compatibility
+scaffolding. The public frozen version set and ordered
 exact peer union are mechanically kept identical; compatibility installers and CI iterate the peer
 union, while the package development pin selects its newest entry. `pdfjs-compatibility.ts`
 is the complete owner for all PDF.js compatibility casts and capability checks. CI exercises every
@@ -1651,7 +1651,7 @@ contract without checkout self-resolution.
 ### Qualifying A New PDF.js Release
 
 PDF.js compatibility is an explicit qualified-version set, not a semver range. Do not
-use `6.3.*`, `^6.3.289`, or another open range: PDF.js patch releases can change the
+use `6.4.*`, `^6.4.299`, or another open range: PDF.js patch releases can change the
 underdocumented DOM, CSS, and private surfaces used by forms, annotations, XFA, optional
 content, and printing.
 
@@ -1673,8 +1673,8 @@ together. Every retained release must still pass qualification.
 2. Before editing package policy, run isolated candidate capability and CSS checks for both
    builds. The third argument is an
    intentional candidate and may be outside the peer set:
-   `node ./scripts/test-pdfjs-compatibility.mjs standard 6.3.289` and
-   `node ./scripts/test-pdfjs-compatibility.mjs legacy 6.3.289`. With no third argument,
+   `node ./scripts/test-pdfjs-compatibility.mjs standard 6.4.299` and
+   `node ./scripts/test-pdfjs-compatibility.mjs legacy 6.4.299`. With no third argument,
    the command subprocesses every exact version in the peer union. A passing command proves
    only the capabilities, return-shape assertions, manifest entries, and sentinels that the
    scripts currently encode; it does not establish that those checks remain complete for the

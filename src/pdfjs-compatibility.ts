@@ -231,7 +231,7 @@ export function asPdfjsAnnotationStorage(adapter: object): AnnotationStorage {
   return storage;
 }
 
-/** Contains PDF.js 6.3.289's runtime Map while its generated declaration still describes an object. */
+/** Contains the qualified PDF.js runtime Map while its generated declaration describes an object. */
 export function getPdfjsMarkInfo(pdf: PDFJS.PDFDocumentProxy): Promise<PdfjsMarkInfo | null> {
   return pdf.getMarkInfo() as unknown as Promise<PdfjsMarkInfo | null>;
 }
@@ -331,16 +331,6 @@ export function getPdfjsXfaPageViewport(
 export interface PdfPageRenderTask {
   readonly task: PDFJS.RenderTask;
   readonly promise: Promise<void>;
-}
-/** Reads an owned task's exact optimized list for PDF.js 6.3's index-only operation filter. */
-export function ownedPdfPageRenderOperatorList(
-  task: unknown,
-): Awaited<ReturnType<PDFJS.PDFPageProxy["getOperatorList"]>> | null {
-  const internal = (task as RecordLike | null)?._internalRenderTask as RecordLike | undefined;
-  const list = internal?.operatorList as RecordLike | undefined;
-  return list && Array.isArray(list.fnArray) && Array.isArray(list.argsArray)
-    ? (list as unknown as Awaited<ReturnType<PDFJS.PDFPageProxy["getOperatorList"]>>)
-    : null;
 }
 function abortError(reason: unknown): Error {
   if (reason instanceof Error && reason.name === "AbortError") return reason;

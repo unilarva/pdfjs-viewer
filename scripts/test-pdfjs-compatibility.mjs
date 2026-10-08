@@ -106,11 +106,12 @@ try {
   }
 
   function compatibilityPdf() {
+    const contents = "0.5 g";
     const objects = [
       "<</Type/Catalog/Pages 2 0 R/AcroForm 5 0 R/MarkInfo<</Marked true/UserProperties false/Suspects true>>>>",
       "<</Type/Pages/Kids[3 0 R]/Count 1>>",
-      "<</Type/Page/Parent 2 0 R/MediaBox[0 0 72 72]/Annots[7 0 R]>>",
-      "<</Length 0>>stream\n\nendstream",
+      "<</Type/Page/Parent 2 0 R/MediaBox[0 0 72 72]/Contents 4 0 R/Annots[7 0 R]>>",
+      `<</Length ${contents.length}>>stream\n${contents}\nendstream`,
       "<</Fields[7 0 R]>>",
       "<</Producer(PDF.js compatibility qualification)/PhaseThreeCustom(qualified)>>",
       "<</Type/Annot/Subtype/Widget/FT/Tx/T(phase-field)/V(qualified)/Rect[4 4 68 20]/P 3 0 R>>",
@@ -249,28 +250,50 @@ try {
       "PDFPageProxy",
     );
     if (!Number.isFinite(page.rotate)) throw new Error("PDFPageProxy has an invalid rotate value");
+    const canvas = { width: 72, height: 72, getContext: () => canvasContext };
     const canvasContext = new Proxy(
-      { canvas: { width: 1, height: 1 } },
+      { canvas, getTransform: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }) },
       {
         get(target, property) {
           return property in target ? target[property] : () => {};
         },
       },
     );
-    const renderTask = page.render({ canvasContext, viewport: page.getViewport({ scale: 1 }) });
-    const operatorList = renderTask?._internalRenderTask?.operatorList;
     if (
-      !Array.isArray(operatorList?.fnArray) ||
-      !Array.isArray(operatorList?.argsArray) ||
       !Number.isSafeInteger(pdfjs.OPS?.beginAnnotation) ||
       !Number.isSafeInteger(pdfjs.OPS?.endAnnotation)
     ) {
       throw new Error("PDF.js annotation operation filtering contract is incompatible");
     }
+    let filteredOperations = 0;
+    const renderTask = page.render({
+      canvas,
+      canvasContext,
+      viewport: page.getViewport({ scale: 1 }),
+      operationsFilter: (index, operatorList) => {
+        if (
+          !Number.isInteger(index) ||
+          !Array.isArray(operatorList?.fnArray) ||
+          !Array.isArray(operatorList?.argsArray) ||
+          index >= operatorList.fnArray.length
+        ) {
+          throw new Error("PDF.js operation filter must expose the display operator list");
+        }
+        filteredOperations++;
+        return false;
+      },
+    });
     if (!renderTask?.promise || typeof renderTask.cancel !== "function")
       throw new Error("PDFPageProxy render task promise/cancel surface is incompatible");
-    renderTask.cancel();
-    await renderTask.promise.catch(() => {});
+    await renderTask.promise;
+    if (filteredOperations === 0) throw new Error("PDF.js operation filtering was not exercised");
+    const cancelledRender = page.render({
+      canvas,
+      canvasContext,
+      viewport: page.getViewport({ scale: 1 }),
+    });
+    cancelledRender.cancel();
+    await cancelledRender.promise.catch(() => {});
   } finally {
     await task.destroy();
   }

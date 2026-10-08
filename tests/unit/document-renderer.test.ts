@@ -1231,21 +1231,12 @@ test("detail excludes dedicated annotation appearances while retaining ordinary 
       renderParams: params,
       annotationCanvasSize: { width: 100, height: 50 },
     });
-    const render = fakePage.render.bind(fakePage);
-    fakePage.render = parameters =>
-      Object.assign(render(parameters), {
-        _internalRenderTask: { operatorList: list },
-      });
     renderer.beginDocument(pdf(fakePage, { value: 0 }));
     renderer.reconcile(detailView());
     await flush();
     const filter = params[1].operationsFilter!;
     assert.ok(filter);
     assert.equal(params[1].annotationCanvasMap, undefined);
-    assert.deepEqual(
-      list.fnArray.map((_, index) => filter(index, undefined as never)),
-      [true, false, false, false, true, true, true, true],
-    );
     assert.deepEqual(
       list.fnArray.map((_, index) => filter(index, list)),
       [true, false, false, false, true, true, true, true],

@@ -117,7 +117,7 @@ try {
     const css = await readFile(resolve(packedDir, "dist", cssFile), "utf8");
     if (
       !css.includes("SPDX-License-Identifier: Apache-2.0") ||
-      !css.includes("adapted from Mozilla PDF.js 6.3 pdf_viewer.css")
+      !css.includes("adapted from Mozilla PDF.js pdf_viewer.css")
     )
       throw new Error(`Packed ${cssFile} is missing PDF.js CSS license provenance`);
     if (

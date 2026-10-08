@@ -58,8 +58,8 @@ and demo commands belong to the
   Automated mobile projects exercise desktop engine binaries with a touch-capable narrow viewport;
   they are synthetic interaction regressions, not physical Android/iOS browser qualification.
   Native OS selection handles and system print UI remain browser-owned.
-- `pdfjs-dist 6.3.289` or `6.4.299`, installed by the consuming application. These are the currently
-  qualified releases; each release's `peerDependencies` declaration is
+- Exact `pdfjs-dist 6.4.299`, installed by the consuming application. This is the currently
+  qualified release; each release's `peerDependencies` declaration is
   authoritative. This package does not bundle PDF.js, its worker, fonts, CMaps, ICC data,
   or WASM assets.
 - A bundler or browser setup that supports ESM. There is no CommonJS build.
@@ -102,7 +102,7 @@ describes the display API module required by `PdfjsViewerRuntimeOptions.pdfjs`.
 `PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS` is the frozen public list of exact PDF.js
 releases qualified by this package. Runtime construction defaults to
 `pdfjsVersionPolicy: "qualified-only"` and rejects every other version. The peer
-dependency is likewise an exact union, never `6.3.*` or an open range: PDF.js patch
+dependency likewise pins `6.4.299`, never `6.4.*` or an open range: PDF.js patch
 releases can change underdocumented DOM, CSS, and private surfaces used by forms,
 annotations, XFA, optional content, and printing.
 

@@ -78,7 +78,7 @@
     -webkit-user-select: none !important;
     user-select: none !important;
   }
-  /* Functional subset adapted from Mozilla PDF.js 6.3 pdf_viewer.css `.textLayer` (Apache-2.0). */
+  /* Functional subset adapted from Mozilla PDF.js pdf_viewer.css `.textLayer` (Apache-2.0). */
   .pdf-text-layer {
     position: absolute;
     z-index: 2;
@@ -172,7 +172,7 @@
   .pdf-text-selection-highlight {
     background: var(--pdf-ui-color-text-highlight, rgb(40 85 166 / 42%));
   }
-  /* Functional subset adapted from Mozilla PDF.js 6.3 pdf_viewer.css `.annotationLayer` (Apache-2.0). */
+  /* Functional subset adapted from Mozilla PDF.js pdf_viewer.css `.annotationLayer` (Apache-2.0). */
   .pdf-annotation-layer {
     position: absolute;
     z-index: 3;
@@ -475,7 +475,7 @@
     ) {
     pointer-events: none;
   }
-  /* Functional subset adapted from Mozilla PDF.js 6.3 pdf_viewer.css `.xfaLayer` (Apache-2.0). */
+  /* Functional subset adapted from Mozilla PDF.js pdf_viewer.css `.xfaLayer` (Apache-2.0). */
   .pdf-xfa-layer {
     position: absolute;
     z-index: 3;
@@ -773,7 +773,7 @@
   padding: 0;
   transform-origin: 0 0;
 }
-/* Functional print subset adapted from Mozilla PDF.js 6.3 XFA viewer CSS (Apache-2.0). */
+/* Functional print subset adapted from Mozilla PDF.js XFA viewer CSS (Apache-2.0). */
 .pdf-native-print-slot,
 .pdf-native-print-slot * {
   box-sizing: border-box;
