@@ -4,6 +4,9 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Updated build and consumer-test dependencies to address dependency security advisories;
+  viewer runtime behavior and the required PDF.js version are unchanged.
+
 ## 0.7.2
 
 - **Breaking: requires `pdfjs-dist 6.4.299`; PDF.js 6.3 is no longer supported.**

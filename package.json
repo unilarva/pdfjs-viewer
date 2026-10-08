@@ -118,15 +118,15 @@
   "devDependencies": {
     "@playwright/test": "1.61.1",
     "@types/node": "22.13.17",
-    "css-loader": "^7.1.2",
+    "css-loader": "^7.1.5",
     "esbuild": "^0.28.1",
-    "mini-css-extract-plugin": "^2.9.4",
+    "mini-css-extract-plugin": "^2.10.2",
     "pdfjs-dist": "6.4.299",
-    "postcss": "8.5.26",
-    "postcss-selector-parser": "7.1.5",
+    "postcss": "8.5.29",
+    "postcss-selector-parser": "7.1.6",
     "prettier": "^3.9.6",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2",
-    "webpack": "^5.101.3"
+    "vite": "^8.3.4",
+    "webpack": "^5.111.1"
   }
 }
