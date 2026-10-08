@@ -4,8 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
-- Removed demo-specific viewer styling so the demo showcases the unmodified generated default UI;
-  demo presentation styles are scoped to its header.
+## 0.7.2
+
 - **Breaking: requires `pdfjs-dist 6.4.299`; PDF.js 6.3 is no longer supported.**
   Upgrade the display module, matching worker, and supporting PDF.js assets together.
   Both standard and legacy builds of the required release remain supported.
@@ -37,6 +37,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 - Added a generated **Keep screen on** selector, overridable labels, and custom UI radio-group
   bindings. Feature and generated-control switches independently disable capability and UI;
   browser limitations remain silent in the UI and use optional structured logger diagnostics.
+- Removed demo-specific viewer styling so the demo showcases the unmodified generated default UI;
+  demo presentation styles are scoped to its header.
 
 ## 0.7.2
 
