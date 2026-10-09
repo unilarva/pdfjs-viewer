@@ -795,8 +795,13 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    surplus remains blank and is clipped by the exact fractional wrapper; float-normalized residue
    below CSS precision does not trigger a whole-bitmap resize. PDF content is never stretched,
    and constrained geometry lowers render DPR after its final integer fit so it cannot crop.
-   `DocumentView` never rewrites those committed dimensions. Empty output and old-scale placeholders use `100%`
-   dimensions because placeholder interpolation is intentionally transient.
+   `DocumentView` never rewrites those committed dimensions. Empty output uses `100%`
+   dimensions. Old-scale placeholders use the committed presentation-to-viewport ratios as
+   percentages, preserving uniform content scaling and clipped rounding surplus as wrappers resize.
+   Planner peak-memory reservations exclude temporary replacements for committed output
+   that already satisfies the target DPR, keeping buffered admission stable after commits.
+   Reused higher-DPR output retains its actual allocation cost, and speculative admission
+   includes the concurrent temporary buffers already reserved by desired pages.
    Both paths pass the same explicit display intent, injected `AnnotationMode.ENABLE_FORMS` when
    interactive AcroForms are enabled (otherwise `ENABLE`), optional-
    content configuration promise, and one per-output `annotationCanvasMap`. Commit transfers that

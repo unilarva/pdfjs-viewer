@@ -51,6 +51,15 @@ declare global {
         darkPixels: number;
         pixelCount: number;
       }>;
+      compareBasePixels(
+        pageNo?: number,
+      ): Promise<{ differentPixels: number; darkPixels: number; dpr: number }>;
+      compareDetailGlyphBounds(): {
+        base: number[];
+        detail: number[];
+        baseDpr: number;
+        detailDpr: number;
+      };
       createScreenWakeLockViewer(
         options: Omit<ConstructorParameters<typeof PdfjsViewer>[0], "runtime">,
       ): PdfjsViewer;
@@ -661,7 +670,95 @@ window.fixture = {
       await task.destroy();
     }
   },
+  compareDetailGlyphBounds() {
+    const wrapper = document.querySelector<HTMLElement>("#detail-viewer .pdf-page[data-page='1']")!;
+    const base = wrapper.querySelector<HTMLCanvasElement>("canvas:not(.pdf-detail-canvas)")!;
+    const detail = wrapper.querySelector<HTMLCanvasElement>(".pdf-detail-canvas")!;
+    const call = window.fixture.detailRenderCalls.find(call => call.canvas === detail)!;
+    const scale = window.fixture.detailViewer!.state.scale;
+    const baseDpr = base.width / Number.parseFloat(base.style.width);
+    const detailDpr = call.transform[0];
+    // Isolate the first F in the synthetic fixture's 24-point text at (72, 700).
+    // Return both rasters' ink bounds in the same fractional PDF viewport space.
+    const bounds = (canvas: HTMLCanvasElement, dpr: number, tx: number, ty: number) => {
+      const x = Math.floor(72 * scale * dpr + tx);
+      const y = Math.floor(66 * scale * dpr + ty);
+      const width = Math.ceil(14 * scale * dpr);
+      const height = Math.ceil(28 * scale * dpr);
+      const pixels = canvas.getContext("2d")!.getImageData(x, y, width, height).data;
+      let left = width,
+        top = height,
+        right = -1,
+        bottom = -1;
+      for (let row = 0; row < height; row++)
+        for (let column = 0; column < width; column++) {
+          const index = (row * width + column) * 4;
+          if (pixels[index] < 128 && pixels[index + 3] > 0) {
+            left = Math.min(left, column);
+            top = Math.min(top, row);
+            right = Math.max(right, column);
+            bottom = Math.max(bottom, row);
+          }
+        }
+      return [
+        (x + left - tx) / dpr,
+        (y + top - ty) / dpr,
+        (right - left + 1) / dpr,
+        (bottom - top + 1) / dpr,
+      ];
+    };
+    return {
+      base: bounds(base, baseDpr, 0, 0),
+      detail: bounds(detail, detailDpr, call.transform[4], call.transform[5]),
+      baseDpr,
+      detailDpr,
+    };
+  },
   secondary,
+  async compareBasePixels(pageNo = 1) {
+    const actual = document.querySelector<HTMLCanvasElement>(
+      `#primary .pdf-page[data-page="${pageNo}"] > canvas`,
+    )!;
+    const start = [...logs]
+      .reverse()
+      .find(
+        entry =>
+          entry.event === "page-render-started" &&
+          entry.viewerId === "primary" &&
+          entry.details?.pageNo === pageNo,
+      )!;
+    const task = PDFJS.getDocument({ url: "/fixture.pdf" });
+    try {
+      const page = await (await task.promise).getPage(pageNo);
+      const reference = document.createElement("canvas");
+      reference.width = actual.width;
+      reference.height = actual.height;
+      const dpr = Number(start.details?.renderDpr);
+      await page.render({
+        canvas: reference,
+        canvasContext: reference.getContext("2d")!,
+        viewport: page.getViewport({ scale: primary.state.scale }),
+        transform: [dpr, 0, 0, dpr, 0, 0],
+        annotationMode: PDFJS.AnnotationMode.ENABLE_FORMS,
+      }).promise;
+      const expected = reference
+        .getContext("2d")!
+        .getImageData(0, 0, reference.width, reference.height).data;
+      const observed = actual
+        .getContext("2d")!
+        .getImageData(0, 0, actual.width, actual.height).data;
+      let differentPixels = 0;
+      let darkPixels = 0;
+      for (let i = 0; i < expected.length; i += 4) {
+        if (expected[i] < 200) darkPixels++;
+        if ([0, 1, 2, 3].some(channel => expected[i + channel] !== observed[i + channel]))
+          differentPixels++;
+      }
+      return { differentPixels, darkPixels, dpr };
+    } finally {
+      await task.destroy();
+    }
+  },
   securityPolicyViolations,
   setPrintPermissions(mode) {
     printPermissions = mode;

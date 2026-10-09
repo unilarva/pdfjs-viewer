@@ -327,9 +327,19 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
   };
   const rasterBytes = (page: number, raster: Readonly<RasterDimensions>): number => {
     const additional = input.pageAdditionalBytes?.get(page) ?? 0;
-    return (
-      raster.width * raster.height * 4 + (Number.isFinite(additional) ? Math.max(0, additional) : 0)
-    );
+    const plannedBytes =
+      raster.width * raster.height * 4 +
+      (Number.isFinite(additional) ? Math.max(0, additional) : 0);
+    const committedDpr = input.committedPageRenderDprs.get(page);
+    const allocatedBytes = input.committedPageBytes?.get(page);
+    // Reusing higher-quality output keeps its actual allocation, even if the
+    // new target would permit a smaller canvas.
+    return committedDpr != null &&
+      committedDpr + DPR_EPSILON >= raster.renderDpr &&
+      allocatedBytes != null &&
+      Number.isFinite(allocatedBytes)
+      ? Math.max(plannedBytes, allocatedBytes)
+      : plannedBytes;
   };
   const fallbackRowHeight = (rowIndex: number): number =>
     Math.max(
@@ -419,7 +429,15 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
     input.committedPageBytes?.has(page) === true ||
     input.fixedReplacementPageBytes?.has(page) === true;
 
-  const temporaryOverhead = (page: number, targetBytes: number): number => {
+  const temporaryOverhead = (
+    page: number,
+    targetBytes: number,
+    targetDpr = pageRenderDprs.get(page)!,
+  ): number => {
+    // Sufficient committed output is reused, not replaced. Reserving a second
+    // canvas here can evict that same output and create a render/evict loop.
+    const committedDpr = input.committedPageRenderDprs.get(page);
+    if (committedDpr != null && committedDpr + DPR_EPSILON >= targetDpr) return 0;
     const oldCommittedBytes = committedBytes(page);
     if (oldCommittedBytes > 0) return Math.max(targetBytes, oldCommittedBytes);
     return targetBytes;
@@ -428,10 +446,13 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
   // Steady memory is attached output. Peak memory additionally includes the
   // largest temporary buffers that may coexist at the chosen concurrency.
   const steadyBytes = (): number => fixedOccupiedBytes + desiredSteadyBytes + retainedSteadyBytes;
-  const temporaryPeakBytes = (): number =>
-    desiredPages
-      .filter(page => !directRenderPages.has(page))
-      .map(page => temporaryOverhead(page, desiredPageBytes.get(page)!))
+  const temporaryPeakBytes = (additionalOverheads: readonly number[] = []): number =>
+    [
+      ...desiredPages
+        .filter(page => !directRenderPages.has(page))
+        .map(page => temporaryOverhead(page, desiredPageBytes.get(page)!)),
+      ...additionalOverheads,
+    ]
       .sort((a, b) => b - a)
       .slice(0, concurrency)
       .reduce((sum, bytes) => sum + bytes, 0);
@@ -538,30 +559,37 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
       return "rejected";
     }
     let rowDpr = input.requestedDpr;
-    const rowCosts = (dpr: number): { steady: number; temporary: number } => {
+    const rowCosts = (dpr: number): { steady: number; temporary: number[] } => {
       let steady = 0;
-      let temporary = 0;
+      const temporary: number[] = [];
       for (const page of pages) {
         const raster = rasterFor(page, dpr);
         const bytes = rasterBytes(page, raster);
         steady += bytes;
         const direct = !replacesCommittedPage(page);
-        if (!direct) temporary = Math.max(temporary, temporaryOverhead(page, bytes));
+        if (!direct) temporary.push(temporaryOverhead(page, bytes, raster.renderDpr));
       }
       return { steady, temporary };
     };
     let costs = rowCosts(rowDpr);
-    const fits = (): boolean => steadyBytes() + costs.steady + costs.temporary <= growthLimit;
+    const fits = (): boolean =>
+      steadyBytes() + costs.steady + temporaryPeakBytes(costs.temporary) <= growthLimit;
     if (!fits()) {
       if (!optionalDprFitUsed && input.settings.allowDprReduction) {
         let low = Math.min(input.settings.minRenderDpr, input.requestedDpr);
         let high = input.requestedDpr;
         let lowCosts = rowCosts(low);
-        if (steadyBytes() + lowCosts.steady + lowCosts.temporary <= growthLimit) {
+        if (
+          steadyBytes() + lowCosts.steady + temporaryPeakBytes(lowCosts.temporary) <=
+          growthLimit
+        ) {
           for (let i = 0; i < DPR_SEARCH_ITERATIONS; i++) {
             const mid = (low + high) / 2;
             const candidate = rowCosts(mid);
-            if (steadyBytes() + candidate.steady + candidate.temporary <= growthLimit) {
+            if (
+              steadyBytes() + candidate.steady + temporaryPeakBytes(candidate.temporary) <=
+              growthLimit
+            ) {
               low = mid;
               lowCosts = candidate;
             } else {

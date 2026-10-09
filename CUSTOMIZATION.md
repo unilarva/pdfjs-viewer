@@ -69,6 +69,9 @@ clipping behavior. Text, search/selection highlights, annotations, forms, and XF
 fractional wrapper geometry rather than the quantized canvas box. Canvas or memory limits may
 intentionally lower render DPR without changing document layout.
 
+During zoom, retained old-scale canvases preserve that rounding surplus while scaling with
+the page wrapper; their inline percentage dimensions can therefore exceed `100%`.
+
 Automatic high-resolution detail canvases overlay the base bitmap below the interactive layers.
 They are renderer-owned, clipped to the page, and pointer-transparent. Custom CSS must preserve
 their positioning, clipping, and stacking rather than apply blanket page-canvas sizing rules.

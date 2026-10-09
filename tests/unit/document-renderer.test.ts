@@ -745,7 +745,7 @@ test("memory-constrained detail recovers quality after another visible page leav
     const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
     const renderer = new DocumentRenderer(surfaces, "test", {
       ...settings,
-      memoryLimitMiB: 8,
+      memoryLimitMiB: 6,
       maxCanvasPixels: 500_000,
       maxCanvasDimension: 4096,
     });
@@ -786,7 +786,7 @@ test("memory-constrained detail recovers quality after another visible page leav
       renderer.snapshot().committedBytes +
         renderer.snapshot().detailBytes +
         renderer.snapshot().activeTemporaryBytes <=
-        8 * 1024 * 1024,
+        6 * 1024 * 1024,
     );
     await Promise.allSettled(renderer.resetDocument());
   });
@@ -862,6 +862,71 @@ test("pending visible detail reserves the next slot ahead of offscreen prefetch"
     await flush();
     assert.ok(params[1].transform, "detail is the next raster after initial visible output");
     assert.ok(!params[2].transform, "offscreen prefetch resumes after visible detail");
+    await Promise.allSettled(renderer.resetDocument());
+  });
+});
+
+test("constrained high-zoom detail and buffered output settle without render-evict cycling", async () => {
+  await withDetailDocument(async flush => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    surfaces.register(2);
+    let bufferedStarts = 0;
+    let evictions = 0;
+    const renderer = new DocumentRenderer(
+      surfaces,
+      "test",
+      {
+        ...settings,
+        memoryLimitMiB: 200,
+        maxConcurrentRenders: 1,
+        maxBufferPages: 1,
+        maxBufferViewportHeights: "unlimited",
+      },
+      {
+        evicted: () => {
+          evictions++;
+        },
+        diagnostic: entry => {
+          if (entry.event === "page-render-started" && entry.details?.pageNo === 2) {
+            // Bound the broken implementation so this regression cannot hang the runner.
+            if (++bufferedStarts >= 3) renderer.resetDocument();
+          }
+        },
+      },
+      window,
+    );
+    renderer.beginDocument(
+      pdf(
+        page({ value: 0 }, () => null, { width: 300, height: 420 }),
+        { value: 0 },
+      ),
+    );
+    renderer.reconcile({
+      ...view(1, 32),
+      rows: [[1], [2]],
+      rowBounds: [
+        { top: 0, bottom: 13_440 },
+        { top: 13_440, bottom: 26_880 },
+      ],
+      viewport: { top: 1000, height: 600 },
+      pageBaseSizes: new Map([
+        [1, { width: 300, height: 420 }],
+        [2, { width: 300, height: 420 }],
+      ]),
+      fallbackPageSize: { width: 300, height: 420 },
+      visiblePageRegions: new Map([[1, { x: 1000, y: 1000, width: 100, height: 120 }]]),
+    });
+    for (let i = 0; i < 8; i++) await flush();
+    assert.equal(bufferedStarts, 1);
+    assert.equal(evictions, 0);
+    assert.equal(renderer.snapshot().renderedPageCount, 2);
+    assert.equal(renderer.snapshot().detailCanvasCount, 1);
+    assert.equal(renderer.snapshot().admittedRenderCount, 0);
+    assert.equal(renderer.snapshot().activeTemporaryBytes, 0);
+    assert.ok(
+      renderer.snapshot().committedBytes + renderer.snapshot().detailBytes <= 200 * 1024 * 1024,
+    );
     await Promise.allSettled(renderer.resetDocument());
   });
 });
@@ -2029,6 +2094,46 @@ test("publishes exact PDF.js page scale, user-unit, and rotation geometry", asyn
     assert.equal(lease.canvas.style.height, "210px");
     assert.equal(lease.wrapper.style.width, "175.125px");
     assert.equal(lease.wrapper.style.height, "210.25px");
+  });
+});
+
+test("zoom placeholders preserve fractional viewport mapping instead of stretching rounding surplus", async () => {
+  await withFakeDocument(async () => {
+    for (const devicePixelRatio of [1, 1.25, 3]) {
+      const surfaces = new Surfaces();
+      const lease = surfaces.register(1);
+      const renderer = new DocumentRenderer(surfaces, "test", settings);
+      const width = 122.4;
+      const height = 158.4;
+      renderer.beginDocument(
+        pdf(
+          page({ value: 0 }, () => null, { width, height }),
+          { value: 0 },
+        ),
+      );
+      renderer.reconcile({
+        ...view(),
+        devicePixelRatio,
+        pageBaseSizes: new Map([[1, { width, height }]]),
+        fallbackPageSize: { width, height },
+      });
+      await settle();
+      const presentationWidth = Number.parseFloat(lease.canvas.style.width);
+      const presentationHeight = Number.parseFloat(lease.canvas.style.height);
+      renderer.invalidateView({ retainPlaceholders: true, graceMs: 10_000 });
+      assert.equal(lease.canvas.style.width, `${(presentationWidth / width) * 100}%`);
+      assert.equal(lease.canvas.style.height, `${(presentationHeight / height) * 100}%`);
+      // Browser percentages follow wrapper resizing without rerendering the old bitmap.
+      const zoom = 1.7;
+      const scaleX =
+        ((Number.parseFloat(lease.canvas.style.width) / 100) * width * zoom) / lease.canvas.width;
+      const scaleY =
+        ((Number.parseFloat(lease.canvas.style.height) / 100) * height * zoom) /
+        lease.canvas.height;
+      assert.ok(Math.abs(scaleX - zoom / devicePixelRatio) < 1e-12);
+      assert.ok(Math.abs(scaleY - scaleX) < 1e-12);
+      await Promise.allSettled(renderer.resetDocument());
+    }
   });
 });
 

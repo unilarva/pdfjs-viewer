@@ -40,6 +40,33 @@ test.beforeEach(async ({ page }, testInfo) => {
   await expect(page.locator("#primary")).toHaveAttribute("data-status", "ready");
 });
 
+test("small-scale base rasters match independent PDF.js output @mobile", async ({ page }) => {
+  for (const scale of [0.2, 0.333, 0.5, 0.731]) {
+    await page.evaluate(scale => window.fixture.primary.zoomTo(scale), scale);
+    await page.evaluate(() => window.fixture.primary.navigateToPage(2));
+    await expect
+      .poll(() =>
+        page.evaluate(
+          scale =>
+            [...window.fixture.logs]
+              .reverse()
+              .find(
+                entry =>
+                  entry.event === "page-render-completed" &&
+                  entry.viewerId === "primary" &&
+                  entry.details?.pageNo === 2,
+              )?.details?.scale,
+          scale,
+        ),
+      )
+      .toBe(scale);
+    await expect(page.locator("#primary .pdf-detail-canvas")).toHaveCount(0);
+    const comparison = await page.evaluate(() => window.fixture.compareBasePixels(2));
+    expect(comparison.darkPixels).toBeGreaterThan(0);
+    expect(comparison.differentPixels).toBe(0);
+  }
+});
+
 test("generated UI loads and exposes accessible controls and state", async ({ page }) => {
   await expect(page.getByRole("toolbar", { name: "PDF controls" })).toBeVisible();
   await expect(page.getByRole("region", { name: "primary PDF" })).toBeVisible();

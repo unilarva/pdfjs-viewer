@@ -2601,7 +2601,11 @@ export class DocumentRenderer {
   #applyOutputPresentation(output: RenderOutput): void {
     if (!this.#surfaces.isCurrent(output.lease)) return;
     if (output.state === "placeholder") {
-      this.#applyEmptyPresentation(output.lease.canvas);
+      // Scale the old viewport, not its integer backing-store coverage, to the
+      // new wrapper. Otherwise rounding surplus compresses and shifts content.
+      const { presentationWidth, presentationHeight, cssWidth, cssHeight } = output.budget;
+      output.lease.canvas.style.width = `${(presentationWidth / cssWidth) * 100}%`;
+      output.lease.canvas.style.height = `${(presentationHeight / cssHeight) * 100}%`;
       return;
     }
     this.#applyRasterPresentation(output.lease.canvas, output.budget);

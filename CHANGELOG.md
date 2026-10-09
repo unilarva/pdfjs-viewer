@@ -4,6 +4,12 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Fixed repeated rendering and eviction of buffered high-zoom pages by reserving
+  replacement canvases only when committed output actually requires replacement.
+  Memory admission also accounts for reused higher-quality allocations and concurrent
+  replacement canvases already reserved for visible pages.
+- Fixed temporary zoom placeholders stretching integer canvas rounding surplus into
+  the fractional page viewport, causing small content shifts when fresh rendering replaces them.
 - Updated build and consumer-test dependencies to address dependency security advisories;
   viewer runtime behavior and the required PDF.js version are unchanged.
 

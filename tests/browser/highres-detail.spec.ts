@@ -11,6 +11,31 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator("#primary")).toHaveAttribute("data-status", "ready");
 });
 
+test("@mobile base and detail glyph bounds agree within low-resolution pixel coverage", async ({
+  page,
+}) => {
+  await page.evaluate(() => window.fixture.createDetailViewer());
+  await zoom(page, 3);
+  await page.locator("#detail-viewer .pdf-container").evaluate(container => {
+    container.scrollLeft = 0;
+    container.scrollTop = 180;
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.fixture.compareDetailGlyphBounds().detail[2]))
+    .toBeGreaterThan(0);
+  const geometry = await page.evaluate(() => window.fixture.compareDetailGlyphBounds());
+  expect(geometry.baseDpr).toBeLessThan(0.5);
+  expect(geometry.detailDpr).toBeGreaterThan(geometry.baseDpr * 1.1);
+  expect(geometry.base[3]).toBeGreaterThan(45);
+  expect(geometry.detail[3]).toBeGreaterThan(45);
+  // Edge coverage/hinting can differ by raster pixels, but neither image may
+  // acquire a different page-space scale or translation when detail replaces it.
+  const tolerance = 2 / geometry.baseDpr + 1 / geometry.detailDpr;
+  for (let i = 0; i < geometry.base.length; i++) {
+    expect(Math.abs(geometry.base[i] - geometry.detail[i])).toBeLessThanOrEqual(tolerance);
+  }
+});
+
 async function zoom(page: Page, scale = 12.375): Promise<void> {
   await page.evaluate(scale => window.fixture.detailViewer!.zoomTo(scale), scale);
   await expect(page.locator(detail)).toHaveCount(1);
@@ -330,7 +355,8 @@ test("@mobile details are unnecessary at native resolution and obey a constraine
 test("@mobile a tight memory profile retains its base fallback without oversized allocations", async ({
   page,
 }) => {
-  await page.evaluate(() => window.fixture.createDetailViewer(4));
+  // Public rendering profiles clamp the main memory budget to at least 5 MiB.
+  await page.evaluate(() => window.fixture.createDetailViewer(5));
   await page.evaluate(() => window.fixture.detailViewer!.zoomTo(12.375));
   await expect
     .poll(() =>
@@ -340,7 +366,7 @@ test("@mobile a tight memory profile retains its base fallback without oversized
   await page.waitForTimeout(300);
   await expect(page.locator(`${wrapper} canvas:not(.pdf-detail-canvas)`)).toBeVisible();
   expect(await page.evaluate(() => window.fixture.detailAllocationPeakBytes)).toBeLessThanOrEqual(
-    4 * 1024 * 1024,
+    5 * 1024 * 1024,
   );
   const allocations = await page.evaluate(() =>
     [
@@ -352,7 +378,7 @@ test("@mobile a tight memory profile retains its base fallback without oversized
   );
   expect(
     allocations.reduce((bytes, [width, height]) => bytes + width * height * 4, 0),
-  ).toBeLessThanOrEqual(4 * 1024 * 1024);
+  ).toBeLessThanOrEqual(5 * 1024 * 1024);
   for (const [width, height] of allocations) {
     expect(width * height).toBeLessThanOrEqual(750_000);
     expect(Math.max(width, height)).toBeLessThanOrEqual(1024);

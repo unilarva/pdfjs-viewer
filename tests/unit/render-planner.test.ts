@@ -421,7 +421,7 @@ test("keeps buffered and visible replacements on temporary canvases", () => {
       ]),
       settings: {
         ...input().settings,
-        memoryLimitMiB: 20,
+        memoryLimitMiB: 30,
         maxConcurrentRenders: 4,
         allowDprReduction: false,
         allowVisibleDirectRendering: true,
@@ -432,6 +432,33 @@ test("keeps buffered and visible replacements on temporary canvases", () => {
   assert.deepEqual(plan.desiredPages, [2, 3]);
   assert.equal(plan.directRenderPages.has(2), false);
   assert.equal(plan.directRenderPages.has(3), false);
+  assert.ok(plan.estimatedPeakBytes <= 30 * BYTES_PER_MIB);
+});
+
+test("buffer admission includes temporary canvases already reserved for visible replacements", () => {
+  const plan = createRenderPlan(
+    input({
+      rows: [[1], [2]],
+      visibleRange: { first: 0, last: 0 },
+      fallbackPageSize: { width: 1200, height: 1200 },
+      committedPageRenderDprs: new Map([
+        [1, 0.5],
+        [2, 0.5],
+      ]),
+      committedPageBytes: new Map([
+        [1, BYTES_PER_MIB],
+        [2, BYTES_PER_MIB],
+      ]),
+      settings: {
+        ...input().settings,
+        memoryLimitMiB: 20,
+        maxConcurrentRenders: 4,
+        allowDprReduction: false,
+      },
+    }),
+  );
+  assert.deepEqual(plan.desiredPages, [1]);
+  assert.ok(plan.estimatedPeakBytes <= 20 * BYTES_PER_MIB);
 });
 
 test("includes old attached bytes in same-scale replacement peak", () => {
@@ -447,6 +474,82 @@ test("includes old attached bytes in same-scale replacement peak", () => {
 
   assert.equal(plan.estimatedSteadyBytes, 40_000);
   assert.equal(plan.estimatedPeakBytes, 100_000);
+});
+
+test("sufficient committed output does not reserve a nonexistent replacement canvas", () => {
+  for (const committedDpr of [1, 1.25]) {
+    const plan = createRenderPlan(
+      input({
+        rows: [[1]],
+        visibleRange: { first: 0, last: 0 },
+        maxBufferViewportHeights: 0,
+        committedPageRenderDprs: new Map([[1, committedDpr]]),
+        committedPageBytes: new Map([[1, 40_000 * committedDpr ** 2]]),
+      }),
+    );
+    assert.equal(plan.estimatedPeakBytes, plan.estimatedSteadyBytes);
+    assert.equal(plan.estimatedSteadyBytes, 40_000 * committedDpr ** 2);
+    assert.equal(plan.directRenderPages.has(1), false);
+  }
+});
+
+test("high-zoom buffer admission remains stable after constrained pages commit", () => {
+  const base = input({
+    rows: [[1], [2]],
+    rowBounds: rowBounds(2, 420 * 32),
+    viewport: { top: 0, height: 600 },
+    visibleRange: { first: 0, last: 0 },
+    currentScale: 32,
+    fallbackPageSize: { width: 300, height: 420 },
+    settings: { ...input().settings, memoryLimitMiB: 200, allowVisibleDirectRendering: true },
+  });
+  const cold = createRenderPlan(base);
+  assert.deepEqual(cold.desiredPages, [1]);
+  assert.ok(cold.estimatedPeakBytes <= 200 * BYTES_PER_MIB);
+  const visibleRaster = resolveRasterDimensions(
+    300 * 32,
+    420 * 32,
+    cold.pageRenderDprs.get(1)!,
+    24_000_000,
+    8192,
+  );
+  const initial = createRenderPlan({
+    ...base,
+    committedPageRenderDprs: new Map([[1, cold.pageRenderDprs.get(1)!]]),
+    committedPageBytes: new Map([[1, visibleRaster.width * visibleRaster.height * 4]]),
+  });
+  assert.deepEqual(initial.desiredPages, [1, 2]);
+  assert.ok(initial.pageRenderDprs.get(1)! < 0.5);
+  for (const committedPages of [[1], [1, 2]]) {
+    const committedPageRenderDprs = new Map(
+      committedPages.map(page => [page, initial.pageRenderDprs.get(page)!]),
+    );
+    const committedPageBytes = new Map(
+      committedPages.map(page => {
+        const raster = resolveRasterDimensions(
+          300 * 32,
+          420 * 32,
+          committedPageRenderDprs.get(page)!,
+          24_000_000,
+          8192,
+        );
+        return [page, raster.width * raster.height * 4];
+      }),
+    );
+    const plan = createRenderPlan({
+      ...base,
+      committedPageRenderDprs,
+      committedPageBytes,
+      retainedCandidates: committedPages.map(page => ({
+        page,
+        rowIndex: page - 1,
+        bytes: committedPageBytes.get(page)!,
+      })),
+    });
+    assert.deepEqual(plan.desiredPages, initial.desiredPages);
+    assert.equal(plan.evictedPageCount, 0);
+    assert.ok(plan.estimatedPeakBytes <= 200 * BYTES_PER_MIB);
+  }
 });
 
 test("includes annotation backing stores in steady and replacement planning", () => {
