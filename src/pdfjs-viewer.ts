@@ -589,6 +589,7 @@ export class PdfjsViewer {
     },
   );
   #scrollRaf: number | null = null;
+  #fontRendering: "native" | "geometric" = "native";
   #scrollRequestGeneration = 0;
   #scrollPendingDuringTouchZoom = false;
   #lastObservedScrollTop: number | null = null;
@@ -677,6 +678,8 @@ export class PdfjsViewer {
     this.#pointerScroll = new PointerScrollController(pointerPlatform);
     this.#sidebarPointerScroll = new PointerScrollController(pointerPlatform);
     const normalized = normalizeViewerOptions(opts, this.#hasTouch());
+    this.#fontRendering = normalized.fontRendering;
+    this.#documentRenderer.setFontRendering(normalized.fontRendering);
     if (opts.navigationState !== undefined) validateNavigationStateAdapter(opts.navigationState);
 
     this.#logger = opts.logger ?? null;
@@ -5163,9 +5166,11 @@ export class PdfjsViewer {
       const { passwordProvider, pdfjsOptions } = pdfjsDocumentLoadOptions(
         documentOptions,
         this.#features.forms.xfa,
+        this.#fontRendering === "geometric",
       );
       const task = this.#pdfjs.getDocument({
         ...pdfjsOptions,
+        ownerDocument: this.#ownerDocument,
         ...(source.type === "url" ? { url: source.url } : { data: source.data }),
       });
       taskForCleanup = task;

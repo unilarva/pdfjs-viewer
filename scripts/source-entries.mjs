@@ -12,6 +12,8 @@ export const sourceEntries = Object.freeze([
   "src/render-planner.ts",
   "src/detail-render-planner.ts",
   "src/document-renderer.ts",
+  "src/document-fonts.ts",
+  "src/truetype-grid-fitting.ts",
   "src/document-thumbnails.ts",
   "src/thumbnail-render-planner.ts",
   "src/pdfjs-compatibility.ts",

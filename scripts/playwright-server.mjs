@@ -7,13 +7,21 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { makeHintedFontPdf } from "./hinted-font-fixture.mjs";
 
 const packageDir = path.resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.resolve(
   packageDir,
   process.env.PLAYWRIGHT_DIST_DIR ?? ".playwright-dist/default",
 );
-const pdfWorkerPath = fileURLToPath(import.meta.resolve("pdfjs-dist/build/pdf.worker.min.mjs"));
+const legacyPdfjs = process.env.PDFJS_VIEWER_TEST_LEGACY === "1";
+const pdfWorkerPath = fileURLToPath(
+  import.meta.resolve(
+    legacyPdfjs
+      ? "pdfjs-dist/legacy/build/pdf.worker.min.mjs"
+      : "pdfjs-dist/build/pdf.worker.min.mjs",
+  ),
+);
 const port = Number.parseInt(process.env.PORT ?? "4179", 10);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error(`Invalid PORT: ${process.env.PORT}`);
@@ -28,6 +36,7 @@ await mkdir(outDir, { recursive: true });
 await build({
   entryPoints: [path.join(packageDir, "tests/browser/fixture.ts")],
   bundle: true,
+  alias: legacyPdfjs ? { "pdfjs-dist/build/pdf.mjs": "pdfjs-dist/legacy/build/pdf.mjs" } : {},
   format: "esm",
   platform: "browser",
   target: ["es2022"],
@@ -316,6 +325,14 @@ function makePrintLayoutPdf(sizes, pageLayout = null, rotations = []) {
 }
 
 const pdf = makePdf();
+const hintedFontPdfs = new Map(
+  await Promise.all(
+    ["regular", "bold", "italic", "transparent", "group"].map(async variant => [
+      variant,
+      await makeHintedFontPdf(variant),
+    ]),
+  ),
+);
 const ocgPdf = makeOcgPdf();
 const annotationPdf = makeAnnotationPdf();
 const acroFormPdf = makeAcroFormPdf();
@@ -388,6 +405,15 @@ createServer(async (req, res) => {
     }
     res.setHeader("Content-Length", pdf.length);
     res.end(pdf);
+    return;
+  }
+  if (url.pathname === "/hinted-font.pdf") {
+    const hintedFontPdf =
+      hintedFontPdfs.get(url.searchParams.get("variant") ?? "regular") ??
+      hintedFontPdfs.get("regular");
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", hintedFontPdf.length);
+    res.end(hintedFontPdf);
     return;
   }
   if (url.pathname === "/ocg-fixture.pdf") {

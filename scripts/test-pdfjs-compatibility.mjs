@@ -8,6 +8,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkPdfjsCssCompatibility } from "./pdfjs-css-compatibility.mjs";
 import { parseExactPdfjsVersionUnion } from "./pdfjs-version-manifest.mjs";
+import { makeHintedFontPdf } from "./hinted-font-fixture.mjs";
 
 const variant = process.argv[2];
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -77,6 +78,14 @@ try {
     modulePath,
     version,
   );
+  // Node 22/24 lack Math.sumPrecise used by actual TrueType conversion. Reuse
+  // the candidate legacy build's standards polyfill; still test the selected
+  // display module/worker below, rather than substituting a mock font path.
+  if (typeof Math.sumPrecise !== "function") {
+    await import(
+      pathToFileURL(resolve(workspace, "node_modules/pdfjs-dist/legacy/build/pdf.mjs")).href
+    );
+  }
   const pdfjs = await import(pathToFileURL(modulePath).href);
   const requireMethods = (value, methods, name) => {
     for (const method of methods)
@@ -298,8 +307,126 @@ try {
     await task.destroy();
   }
 
+  // Use the candidate's own font asset and worker, not the checkout dependency.
+  // A real populated font catches drift hidden by an empty collection or mock.
+  if (pdfjs.OPS?.setFont !== 37) throw new Error("PDF.js geometric font setFont opcode changed");
+  const fontPdf = await makeHintedFontPdf(
+    "transparent",
+    resolve(workspace, "node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf"),
+  );
+  const fontTask = pdfjs.getDocument({
+    data: new Uint8Array(fontPdf),
+    disableFontFace: false,
+    fontExtraProperties: true,
+    useSystemFonts: false,
+  });
+  try {
+    const document = await fontTask.promise;
+    const page = await document.getPage(1);
+    requireMethods(page, ["getOperatorList"], "Geometric-font PDFPageProxy");
+    requireMethods(page.commonObjs, ["get"], "Geometric-font shared object pool");
+    const operators = await page.getOperatorList({
+      intent: "display",
+      annotationMode: pdfjs.AnnotationMode.ENABLE_FORMS,
+    });
+    const ids = new Set(
+      operators.argsArray
+        .filter((_, index) => operators.fnArray[index] === pdfjs.OPS.setFont)
+        .map(args => args[0]),
+    );
+    if (ids.size === 0)
+      throw new Error("Embedded-font qualification did not expose font dependencies");
+    for (const id of ids) {
+      const font = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("PDF.js shared font callback did not settle")),
+          10_000,
+        );
+        try {
+          page.commonObjs.get(id, value => {
+            clearTimeout(timeout);
+            resolve(value);
+          });
+        } catch (error) {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      });
+      if (
+        typeof font?.loadedName !== "string" ||
+        !font.loadedName ||
+        font.disableFontFace ||
+        !ArrayBuffer.isView(font.data) ||
+        font.data.byteLength < 12
+      ) {
+        throw new Error("PDF.js retained native font family/data/callback contract changed");
+      }
+      const data = new DataView(font.data.buffer, font.data.byteOffset, font.data.byteLength);
+      if (data.getUint32(0) !== 0x00010000)
+        throw new Error("Embedded TrueType data was cleared or changed format");
+    }
+
+    const transport = page._transport;
+    const originalFactory = transport?.canvasFactory;
+    requireMethods(
+      originalFactory,
+      ["create", "reset", "destroy"],
+      "Geometric-font canvas factory",
+    );
+    let creates = 0;
+    const entry = (width, height) => {
+      const canvas = { width, height };
+      const context = new Proxy(
+        { canvas, getTransform: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }) },
+        {
+          get: (target, key) => (key in target ? target[key] : () => {}),
+        },
+      );
+      canvas.getContext = () => context;
+      return { canvas, context };
+    };
+    const capturedFactory = {
+      create(width, height) {
+        creates++;
+        return entry(width, height);
+      },
+      reset(target, width, height) {
+        target.canvas.width = width;
+        target.canvas.height = height;
+      },
+      destroy(target) {
+        target.canvas.width = target.canvas.height = 0;
+        target.canvas = target.context = null;
+      },
+    };
+    const root = entry(612, 792);
+    let render;
+    try {
+      transport.canvasFactory = capturedFactory;
+      if (transport.canvasFactory !== capturedFactory)
+        throw new Error("PDF.js canvas factory is not writable");
+      render = page.render({
+        canvas: null,
+        canvasContext: root.context,
+        viewport: page.getViewport({ scale: 1 }),
+        operationsFilter: () => false,
+      });
+    } finally {
+      transport.canvasFactory = originalFactory;
+    }
+    if (transport.canvasFactory !== originalFactory)
+      throw new Error("PDF.js canvas factory is not restorable");
+    await render.promise;
+    if (creates === 0)
+      throw new Error(
+        "PDF.js no longer captures the scoped factory before async transparent drawing",
+      );
+  } finally {
+    await fontTask.destroy();
+  }
+
   console.log(
-    `Installed pdfjs-dist ${version} ${variant} display, document, page, XFA, storage, and OCG capabilities are compatible.`,
+    `Installed pdfjs-dist ${version} ${variant} display, document, page, XFA, storage, OCG, retained-font, and scoped-canvas contracts are compatible.`,
   );
 } finally {
   await rm(workspace, { recursive: true, force: true });

@@ -452,6 +452,53 @@ separate rendering implementation:
 
 Existing sufficient bitmaps are reused, and replacements render offscreen before an atomic commit
 unless the selected profile explicitly permits direct visible rendering under unavoidable pressure.
+
+The default `fontRendering: "native"` preserves ordinary PDF.js font rendering.
+
+Choose `fontRendering: "geometric"` if larger letters in an embedded TrueType font visibly
+change height or shape while zooming, especially when a lower-resolution full-page bitmap is
+replaced by the high-resolution detail overlay. Native font hinting can make those two rasters
+show different letter proportions. Geometric rendering keeps larger text closer to the font's
+original outlines, reducing these distracting shape changes without disabling native text
+rendering for the whole document.
+
+This is a font-shape consistency option, not a general sharpening filter: it does not increase
+bitmap resolution, remove ordinary antialiasing differences, or make a low-resolution preview
+as crisp as the detail overlay. Keep the native default when text already looks satisfactory
+or when avoiding the additional font preparation and rendering overhead is more important.
+
+An optional constructor policy enables geometry-preserving native TrueType text:
+
+```ts
+const viewer = new PdfjsViewer({ rootEl, runtime, fontRendering: "geometric" });
+```
+
+With this opt-in, main page and detail canvases preserve embedded TrueType outline proportions for
+font sizes above 24 CSS pixels, rather than letting native grid fitting reshape larger
+letters at different zoom levels or render DPRs. Smaller text keeps ordinary native
+hinting for contrast and can still have normal pixel-grid-dependent shape changes.
+The policy uses visible font size, not render DPR, so base and detail choose the same
+font. Rendering still uses native canvas text; original fonts remain available to text
+selection and form controls.
+Unsupported font formats or unavailable native font APIs retain ordinary PDF.js rendering,
+and explicit `documentOptions.disableFontFace: true` continues to select PDF.js outlines.
+The policy is qualified with supported PDF.js display builds and native browser font APIs,
+but different browser/OS rasterizers can still produce different antialiasing. CFF/Type 1
+fonts are unchanged. Disable the opt-in if a document or platform does not benefit.
+Converted font data and native aliases are held for the document lifetime only when enabled, outside the
+canvas-only raster budget, and released when the document closes.
+
+Enabling geometric rendering adds initial font preparation and per-text-draw work; the cost
+depends on the PDF and browser and can matter on slower devices or text-heavy pages.
+Aliases are prepared lazily for encountered fonts and reused across page renders and zooms,
+but they remain cached until document close rather than being evicted with page bitmaps.
+Memory therefore grows with distinct embedded font objects encountered, not just font-family
+names: a long PDF assembled from separate files may contain hundreds of independent subsets
+of the same font. Native font faces and glyph caches add browser-managed memory beyond the
+retained font bytes, and the canvas raster budget does not cap that total. For font-heavy
+documents, compare a representative long browsing session with the native default before
+enabling this policy broadly; CFF/Type 1 fonts receive no geometric aliases.
+
 The exact configurable sequence is documented on `PdfjsViewerRenderingProfileSettings`; see
 [Render planning and admission](./ARCHITECTURE.md#render-planning-and-admission) for its ownership,
 memory, and scheduling invariants.

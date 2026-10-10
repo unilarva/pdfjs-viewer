@@ -396,9 +396,47 @@ test("PDF.js XFA loading is derived solely from form feature policy", () => {
   const disabled = pdfjsDocumentLoadOptions({ passwordProvider, verbosity: 1 }, false);
   const enabled = pdfjsDocumentLoadOptions({ passwordProvider, verbosity: 1 }, true);
   assert.equal(disabled.passwordProvider, passwordProvider);
-  assert.deepEqual(disabled.pdfjsOptions, { verbosity: 1, enableXfa: false });
-  assert.deepEqual(enabled.pdfjsOptions, { verbosity: 1, enableXfa: true });
+  assert.deepEqual(disabled.pdfjsOptions, {
+    verbosity: 1,
+    enableXfa: false,
+  });
+  assert.deepEqual(enabled.pdfjsOptions, {
+    verbosity: 1,
+    enableXfa: true,
+  });
   assert.throws(() => pdfjsDocumentLoadOptions({ enableXfa: true } as never, false), /enableXfa/);
+});
+
+test("opt-in font geometry retains converted font data without overriding explicit outline rendering", () => {
+  class HTMLElement {
+    ownerDocument = { defaultView: { HTMLElement } };
+  }
+  const options = {
+    rootEl: new HTMLElement(),
+    runtime: Object.create(PdfjsViewerRuntime.prototype),
+  } as PdfjsViewerOptions;
+  assert.equal(normalizeViewerOptions(options, false).fontRendering, "native");
+  assert.equal(
+    normalizeViewerOptions({ ...options, fontRendering: "geometric" }, false).fontRendering,
+    "geometric",
+  );
+  assert.throws(
+    () => normalizeViewerOptions({ fontRendering: "unknown" } as never, false),
+    /fontRendering/,
+  );
+  assert.equal(pdfjsDocumentLoadOptions({}, false).pdfjsOptions.fontExtraProperties, undefined);
+  assert.equal(pdfjsDocumentLoadOptions({}, false, true).pdfjsOptions.fontExtraProperties, true);
+  assert.equal(
+    pdfjsDocumentLoadOptions({ disableFontFace: false }, false, true).pdfjsOptions
+      .fontExtraProperties,
+    true,
+  );
+  assert.equal(
+    pdfjsDocumentLoadOptions({ disableFontFace: true }, false, true).pdfjsOptions
+      .fontExtraProperties,
+    undefined,
+  );
+  assert.throws(() => validateDocumentOptions({ fontExtraProperties: false } as never), /unknown/);
 });
 
 test("document options validate every supported runtime value", () => {

@@ -20,6 +20,48 @@ type RecordLike = Record<PropertyKey, unknown>;
 export type AnnotationStorage = PDFJS.PDFDocumentProxy["annotationStorage"];
 export type PdfjsMarkInfo = ReadonlyMap<"Marked" | "UserProperties" | "Suspects", boolean>;
 
+/** Detached retained font facts from the qualified PDF.js display object pool. */
+export interface PdfPageFont {
+  readonly family: string;
+  readonly data: Uint8Array;
+}
+
+/** Gets native embedded fonts after their display dependencies physically finish loading. */
+export async function readPdfPageFonts(
+  page: PDFJS.PDFPageProxy,
+  annotationMode: number,
+): Promise<readonly PdfPageFont[]> {
+  const operators = await page.getOperatorList({ intent: "display", annotationMode });
+  const fonts: PdfPageFont[] = [];
+  const seen = new Set<string>();
+  // OPS.setFont is 37 in the qualified 6.4 display contract. Avoid importing
+  // PDF.js at runtime: its worker/module identity belongs to the consumer.
+  for (let i = 0; i < operators.fnArray.length; i++) {
+    if (operators.fnArray[i] !== 37) continue;
+    const id: unknown = operators.argsArray[i]?.[0];
+    if (typeof id !== "string" || seen.has(id)) continue;
+    seen.add(id);
+    // Completion of the operator list does not itself guarantee that an async
+    // FontFace binding has resolved its shared dependency.
+    const font = await new Promise<RecordLike | null>(resolve => {
+      page.commonObjs.get(id, (value: RecordLike | null) => resolve(value));
+    });
+    if (
+      !font ||
+      font.disableFontFace ||
+      !ArrayBuffer.isView(font.data) ||
+      typeof font.loadedName !== "string"
+    )
+      continue;
+    const data = font.data as ArrayBufferView;
+    fonts.push({
+      family: font.loadedName,
+      data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+    });
+  }
+  return fonts;
+}
+
 function incompatible(surface: string, capability: string): TypeError {
   return new TypeError(
     `PdfjsViewer: incompatible pdfjs-dist qualified contract (${qualifiedContracts}) ${surface} is missing ${capability}`,
@@ -332,6 +374,8 @@ export interface PdfPageRenderTask {
   readonly task: PDFJS.RenderTask;
   readonly promise: Promise<void>;
 }
+
+const fontCanvasFactories = new WeakMap<object, object>();
 function abortError(reason: unknown): Error {
   if (reason instanceof Error && reason.name === "AbortError") return reason;
   if (typeof DOMException !== "undefined")
@@ -345,9 +389,61 @@ export function startPdfPageRenderTask(
   page: PDFJS.PDFPageProxy,
   parameters: Parameters<PDFJS.PDFPageProxy["render"]>[0],
   signal?: AbortSignal,
+  adaptContext?: (context: CanvasRenderingContext2D) => CanvasRenderingContext2D,
 ): PdfPageRenderTask {
   if (signal?.aborted) throw abortError(signal.reason);
-  const task = page.render(parameters);
+  let restoreFactory: (() => void) | null = null;
+  let installed = false;
+  if (adaptContext) {
+    // Qualified 6.4 captures canvasFactory synchronously in each InternalRenderTask.
+    // Scope only that capture, then restore the transport before asynchronous work.
+    // Scratch/transparency contexts consequently keep the same font policy/DPR.
+    try {
+      const transport = (page as unknown as RecordLike)._transport as RecordLike;
+      const previous = transport?.canvasFactory as RecordLike;
+      const base = (fontCanvasFactories.get(previous) ?? previous) as RecordLike;
+      if (base && typeof base.create === "function") {
+        const methods = new Map<PropertyKey, unknown>();
+        const factory = new Proxy(base, {
+          get(target, key) {
+            const value: unknown = Reflect.get(target, key, target);
+            if (typeof value !== "function") return value;
+            if (!methods.has(key))
+              methods.set(
+                key,
+                key === "create"
+                  ? (...args: unknown[]) => {
+                      const entry = value.apply(target, args) as {
+                        canvas: HTMLCanvasElement;
+                        context: CanvasRenderingContext2D;
+                      };
+                      return { ...entry, context: adaptContext(entry.context) };
+                    }
+                  : value.bind(target),
+              );
+            return methods.get(key);
+          },
+        });
+        fontCanvasFactories.set(factory, base);
+        installed = Reflect.set(transport, "canvasFactory", factory);
+        if (installed)
+          restoreFactory = () => {
+            Reflect.set(transport, "canvasFactory", previous);
+          };
+      }
+    } catch {
+      // Unknown/frozen display internals retain ordinary rendering in all contexts.
+    }
+    if (!installed && parameters.canvasContext) {
+      parameters = { ...parameters, canvas: parameters.canvasContext.canvas as HTMLCanvasElement };
+    }
+  }
+  let task: PDFJS.RenderTask;
+  try {
+    task = page.render(parameters);
+  } finally {
+    restoreFactory?.();
+  }
   let cancelledBySignal = false;
   const abort = () => {
     if (cancelledBySignal) return;

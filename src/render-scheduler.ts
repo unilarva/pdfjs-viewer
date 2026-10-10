@@ -69,6 +69,8 @@ interface CurrentRenderRequirement {
 
 /** Immutable identity and document/result context for one admitted page render. */
 export interface RenderOperation {
+  /** Revoked on cancellation, including preparation before task attachment. */
+  readonly signal: AbortSignal;
   readonly kind: "page" | "detail";
   readonly id: number;
   readonly pageNo: number;
@@ -140,6 +142,7 @@ interface RenderPlanSnapshot {
 }
 
 interface RenderOperationState {
+  readonly abort: AbortController;
   readonly operation: RenderOperation;
   authoritative: boolean;
   task: PDFJS.RenderTask | null;
@@ -345,7 +348,9 @@ export class RenderScheduler {
         blocked.push(pageNo);
         continue;
       }
+      const abort = new AbortController();
       const operation: RenderOperation = Object.freeze({
+        signal: abort.signal,
         kind: "page",
         id: ++this.#nextOperationId,
         pageNo,
@@ -364,6 +369,7 @@ export class RenderScheduler {
         }),
       });
       const state: RenderOperationState = {
+        abort,
         operation,
         authoritative: true,
         task: null,
@@ -400,7 +406,9 @@ export class RenderScheduler {
     )
       return null;
     if (!Number.isFinite(admission.reservedBytes) || admission.reservedBytes < 0) return null;
+    const abort = new AbortController();
     const operation: RenderOperation = Object.freeze({
+      signal: abort.signal,
       kind: "detail",
       id: ++this.#nextOperationId,
       pageNo,
@@ -419,6 +427,7 @@ export class RenderScheduler {
       }),
     });
     this.#operations.set(operation, {
+      abort,
       operation,
       authoritative: true,
       task: null,
@@ -624,6 +633,7 @@ export class RenderScheduler {
     if (this.#authoritativeByPage.get(state.operation.pageNo) === state.operation) {
       this.#authoritativeByPage.delete(state.operation.pageNo);
     }
+    state.abort.abort();
     if (state.task) {
       try {
         cancelTask(state.task);

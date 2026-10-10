@@ -44,8 +44,26 @@ declare global {
         width: number;
         height: number;
         rotation: number;
+        explicitContext?: boolean;
       }>;
-      createDetailViewer(memoryLimitMiB?: number): Promise<void>;
+      createDetailViewer(
+        memoryLimitMiB?: number,
+        sourceUrl?: string,
+        maxCanvasPixels?: number,
+        maxCanvasDimension?: number,
+        fontRendering?: "native" | "geometric",
+      ): Promise<void>;
+      compareFontGeometry(): Promise<{
+        base: number[];
+        detail: number[] | null;
+        reference: number[];
+        nativeReference: number[];
+        rectangle: number[];
+        baseDpr: number;
+        detailDpr: number | null;
+      }>;
+      fontPeer: PdfjsViewer | null;
+      fontSource: string;
       compareDetailPixels(): Promise<{
         differentPixels: number;
         darkPixels: number;
@@ -561,12 +579,21 @@ document.addEventListener("securitypolicyviolation", event => {
 });
 
 window.fixture = {
+  fontPeer: null,
+  fontSource: "/hinted-font.pdf",
   primary,
   detailViewer: null,
   detailAllocationPeakBytes: 0,
   detailRenderCalls: [],
-  async createDetailViewer(memoryLimitMiB = 16) {
+  async createDetailViewer(
+    memoryLimitMiB = 16,
+    sourceUrl = "/fixture.pdf",
+    maxCanvasPixels = 750_000,
+    maxCanvasDimension = 1024,
+    fontRendering: "native" | "geometric" = "native",
+  ) {
     await primary.close();
+    window.fixture.fontSource = sourceUrl;
     const task = PDFJS.getDocument({ url: "/fixture.pdf" });
     const pdf = await task.promise;
     const pdfPage = await pdf.getPage(1);
@@ -582,6 +609,7 @@ window.fixture = {
           width: parameters.viewport.width,
           height: parameters.viewport.height,
           rotation: parameters.viewport.rotation,
+          explicitContext: parameters.canvas == null,
         });
         const canvases = new Set([
           ...window.fixture.detailRenderCalls.map(call => call.canvas),
@@ -602,6 +630,7 @@ window.fixture = {
     document.body.append(host);
     const viewer = new PdfjsViewer({
       rootEl: host,
+      fontRendering,
       runtime,
       ui: "default",
       renderingProfile: "balanced",
@@ -611,8 +640,8 @@ window.fixture = {
       renderingProfiles: {
         balanced: {
           memoryLimitMiB,
-          maxCanvasPixels: 750_000,
-          maxCanvasDimension: 1024,
+          maxCanvasPixels,
+          maxCanvasDimension,
           maxBufferPages: 0,
           maxBufferViewportHeights: 0,
         },
@@ -621,8 +650,121 @@ window.fixture = {
       logger: entry => logs.push(entry),
     });
     window.fixture.detailViewer = viewer;
-    const result = await viewer.load("/fixture.pdf");
+    const result = await viewer.load(sourceUrl);
     if (!result.ok) throw new Error("Detail fixture did not load");
+  },
+  async compareFontGeometry() {
+    const wrapper = document.querySelector<HTMLElement>("#detail-viewer .pdf-page[data-page='1']")!;
+    const base = wrapper.querySelector<HTMLCanvasElement>("canvas:not(.pdf-detail-canvas)")!;
+    const detail = wrapper.querySelector<HTMLCanvasElement>(".pdf-detail-canvas");
+    const call = [...window.fixture.detailRenderCalls]
+      .reverse()
+      .find(call => call.canvas === detail);
+    const scale = window.fixture.detailViewer!.state.scale;
+    const baseDpr = base.width / Number.parseFloat(base.style.width);
+    if (!Number.isFinite(baseDpr) || baseDpr <= 0 || base.style.width.endsWith("%")) {
+      return {
+        base: [],
+        nativeReference: [],
+        detail: null,
+        reference: [],
+        rectangle: [],
+        baseDpr: 0,
+        detailDpr: null,
+      };
+    }
+    const bounds = (
+      canvas: HTMLCanvasElement,
+      dpr: number,
+      tx = 0,
+      ty = 0,
+      region = { x: 70, y: 70.4, width: 18, height: 24 },
+    ) => {
+      // Reference rendering yields; an old crop can be physically retired meanwhile.
+      if (!canvas.width || !canvas.height) return [];
+      const x = Math.floor(region.x * scale * dpr + tx),
+        y = Math.floor(region.y * scale * dpr + ty);
+      const width = Math.ceil(region.width * scale * dpr),
+        height = Math.ceil(region.height * scale * dpr);
+      let pixels: Uint8ClampedArray;
+      try {
+        pixels = canvas.getContext("2d")!.getImageData(x, y, width, height).data;
+      } catch (error) {
+        throw new Error(
+          `Font ink read failed ${canvas.width}x${canvas.height} at ${x},${y},${width},${height} DPR ${dpr}: ${String(error)}`,
+        );
+      }
+      let left = width,
+        top = height,
+        right = -1,
+        bottom = -1;
+      for (let row = 0; row < height; row++)
+        for (let column = 0; column < width; column++) {
+          const i = (row * width + column) * 4;
+          if (pixels[i] < 128 && pixels[i + 3] > 0) {
+            left = Math.min(left, column);
+            top = Math.min(top, row);
+            right = Math.max(right, column);
+            bottom = Math.max(bottom, row);
+          }
+        }
+      return right < 0
+        ? []
+        : [
+            (x + left - tx) / dpr,
+            (y + top - ty) / dpr,
+            (right - left + 1) / dpr,
+            (bottom - top + 1) / dpr,
+          ];
+    };
+    const task = PDFJS.getDocument({ url: window.fixture.fontSource, disableFontFace: true });
+    const nativeTask = PDFJS.getDocument({ url: window.fixture.fontSource });
+    const reference = document.createElement("canvas");
+    const nativeReference = document.createElement("canvas");
+    const refDpr = 3;
+    const tx = -Math.floor(70 * scale * refDpr),
+      ty = -Math.floor(70.4 * scale * refDpr);
+    reference.width = Math.ceil(18 * scale * refDpr) + 1;
+    reference.height = Math.ceil(24 * scale * refDpr) + 1;
+    const nativeTx = -Math.floor(70 * scale * baseDpr),
+      nativeTy = -Math.floor(70.4 * scale * baseDpr);
+    nativeReference.width = Math.ceil(18 * scale * baseDpr) + 1;
+    nativeReference.height = Math.ceil(24 * scale * baseDpr) + 1;
+    nativeReference.getContext("2d", { willReadFrequently: false });
+    try {
+      const page = await (await task.promise).getPage(1);
+      await page.render({
+        canvas: reference,
+        viewport: page.getViewport({ scale }),
+        transform: [refDpr, 0, 0, refDpr, tx, ty],
+      }).promise;
+      return {
+        base: bounds(base, baseDpr),
+        nativeReference: await (async () => {
+          const nativePage = await (await nativeTask.promise).getPage(1);
+          await nativePage.render({
+            canvas: nativeReference,
+            viewport: nativePage.getViewport({ scale }),
+            transform: [baseDpr, 0, 0, baseDpr, nativeTx, nativeTy],
+          }).promise;
+          return bounds(nativeReference, baseDpr, nativeTx, nativeTy);
+        })(),
+        detail:
+          detail && call
+            ? bounds(detail, call.transform[0], call.transform[4], call.transform[5])
+            : null,
+        reference: bounds(reference, refDpr, tx, ty),
+        rectangle: bounds(base, baseDpr, 0, 0, { x: 178, y: 72, width: 28, height: 22 }),
+        baseDpr,
+        detailDpr: call?.transform[0] ?? null,
+      };
+    } finally {
+      reference.width = 0;
+      reference.height = 0;
+      nativeReference.width = 0;
+      nativeReference.height = 0;
+      await Promise.all([task.destroy(), nativeTask.destroy()]);
+    }
   },
   createScreenWakeLockViewer(options) {
     return new PdfjsViewer({ ...options, runtime });

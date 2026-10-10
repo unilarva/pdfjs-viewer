@@ -4,6 +4,10 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Added opt-in `fontRendering: "geometric"` to preserve larger embedded TrueType
+  glyph proportions across zoom and base/detail DPR changes using owned native
+  aliases without grid fitting. Native PDF.js rendering remains the default;
+  small text, original DOM fonts, and explicit outline rendering are preserved.
 - Fixed repeated rendering and eviction of buffered high-zoom pages by reserving
   replacement canvases only when committed output actually requires replacement.
   Memory admission also accounts for reused higher-quality allocations and concurrent

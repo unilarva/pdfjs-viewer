@@ -78,6 +78,8 @@ All other source modules are private implementation details for package maintain
 | Module                                 | Private responsibility                                                                                                                                                                  |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `document-renderer.ts`                 | Complete active-document raster lifecycle and output ownership.                                                                                                                         |
+| `document-fonts.ts`                    | Document-scoped native font aliases, render-context adaptation, and delayed disposal after raster settlement.                                                                           |
+| `truetype-grid-fitting.ts`             | Validated SFNT cloning with TrueType grid fitting inhibited; unsupported fonts stay on PDF.js's native path.                                                                            |
 | `detail-render-planner.ts`             | Pure padded CSS-space crop geometry and per-canvas, hard-memory raster fitting.                                                                                                         |
 | `generated-ui-options.ts`              | Immutable generated-UI labels, formatters, controls, validation helpers, and shared UI-text/render-option normalization.                                                                |
 | `document-thumbnails.ts`               | Complete demand-driven thumbnail DOM, raster, cache, and presentation ownership.                                                                                                        |
@@ -802,6 +804,41 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    that already satisfies the target DPR, keeping buffered admission stable after commits.
    Reused higher-DPR output retains its actual allocation cost, and speculative admission
    includes the concurrent temporary buffers already reserved by desired pages.
+
+   Opt-in geometric base/detail contexts share a `DocumentFonts` owner; the default
+   native policy does not construct an owner or retain extra font data.
+   Geometric document loading retains
+   converted font data internally (`fontExtraProperties`), unless explicit outline
+   rendering is selected. Font dependencies are acquired through the qualified
+   compatibility adapter before raster mutation. Native TrueType aliases append
+   `CLEAR; PUSHB[2] 1,1; INSTCTRL` to `prep`, rebuilding SFNT offsets/checksums without
+   changing glyph outlines or stripping composite instructions. Only owned contexts
+   substitute these family names during `fillText`/`strokeText` above 24 CSS font
+   pixels, measured from the glyph-time transform divided by actual render DPR.
+   A small comparison epsilon keeps base/detail policy stable at the boundary.
+   Smaller text retains native hints for contrast; font state is restored even if
+   a draw throws. Browser globals, original PDF.js fonts, text
+   layers, and DOM form controls are untouched. Unsupported fonts and preparation
+   failures retain their original path. Reset aborts preparation immediately, then
+   deletes aliases after captured raster settlements. Late font loads cannot add
+   aliases to a closed owner. Font metadata/aliases are not canvas-budget bytes.
+   The compatibility adapter scopes a wrapped canvas factory only around synchronous
+   render-task creation, then restores the transport immediately. Each task captures
+   its own factory, covering transparent-page/group contexts with the same DPR/policy
+   without global patches. Nested scoped factories unwrap to the original factory;
+   unsupported/frozen internals fall back to ordinary rendering. Geometric base
+   rendering carries DPR in explicit parameters, not only the replaced root context.
+   Scheduler operation signals revoke preparation waits before task attachment,
+   while shared alias loads remain available to other callers.
+
+   **Font-policy risks:** geometric rendering is optional because it changes converted
+   TrueType programs and relies on qualified PDF.js font objects and synchronous
+   canvas-factory capture, not a stable public font-factory API. Browser/OS rasterizers
+   may honor hint controls differently; identical pixels across platforms are not
+   guaranteed. Alias preparation adds font-memory and drawing overhead outside the
+   canvas budget. Unsupported formats or internals use ordinary rendering. Requalify
+   these contracts on every PDF.js upgrade; production fallback is not evidence that
+   geometric rendering still works. Native rendering remains the default.
    Both paths pass the same explicit display intent, injected `AnnotationMode.ENABLE_FORMS` when
    interactive AcroForms are enabled (otherwise `ENABLE`), optional-
    content configuration promise, and one per-output `annotationCanvasMap`. Commit transfers that
@@ -809,6 +846,7 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    canvases in committed, direct-mutating, placeholder, replacement, active, and settling memory;
    immutable output-record replacement transfers ownership before release, and presentation retains
    its own reference so reset or a newer output cannot clear a backing store still in use.
+
 5. Bitmap commit publishes PDF.js scale, user-unit, total-scale, rounding, and normalized
    rotation variables on the exact wrapper. Text, search/selection highlights, annotations,
    forms, and XFA remain in that fractional wrapper/viewport coordinate system and never inherit
@@ -1685,6 +1723,11 @@ together. Every retained release must still pass qualification.
    scripts currently encode; it does not establish that those checks remain complete for the
    candidate. Keep populated fixtures for collection-valued APIs so an assertion cannot pass
    through an ambiguous `null` result.
+   The gate also uses a populated embedded TrueType fixture from the candidate's
+   own font asset. It checks `OPS.setFont`, shared-object callback resolution,
+   retained family/data with `fontExtraProperties`, and mutable/restorable factory
+   capture before asynchronous transparent drawing. These are drift alarms,
+   not font-quality or browser-rasterizer validation.
    The demo may also be run provisionally with
    `PDFJS_VIEWER_DEMO_PDFJS_VERSION_POLICY=allow-unqualified`; this is exploratory evidence only.
 3. Manually review the small `PDFJS_CSS_COMPATIBILITY_MANIFEST` even when phase 2 passes.
@@ -1707,6 +1750,10 @@ together. Every retained release must still pass qualification.
    `npm pack` gate against that branch. Run focused browser behavior
    tests for real text, annotations, forms, optional content, XFA, display rendering, and
    native printing.
+   Include `tests/browser/font-geometry.spec.ts` with geometric mode enabled and
+   disabled, especially transparent/grouped pages and cleanup. Repeat with the
+   matching legacy display/worker using `PDFJS_VIEWER_TEST_LEGACY=1`; successful
+   capability checks alone do not qualify the opt-in font behavior.
 6. Run Chromium, Firefox, strict CSP, and Docker WebKit qualification. Exercise the
    candidate through a tarball installed by a clean sample consumer application. If native printing is
    relevant to the release, complete physical native-print qualification on the supported

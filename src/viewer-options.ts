@@ -115,6 +115,7 @@ export interface NormalizedViewerUi {
 }
 
 export interface NormalizedViewerOptions {
+  fontRendering: "native" | "geometric";
   screenWakeLock: PdfjsViewerScreenWakeLockPolicy;
   behavior: NormalizedViewerBehavior;
   features: NormalizedViewerFeatures;
@@ -285,17 +286,27 @@ export function validateDocumentOptions(
 export function pdfjsDocumentLoadOptions(
   options: PdfjsViewerDocumentOptions,
   enableXfa: boolean,
+  geometricFonts = false,
 ): Readonly<{
   passwordProvider: PdfjsViewerDocumentOptions["passwordProvider"];
   pdfjsOptions: Readonly<
-    Omit<PdfjsViewerDocumentOptions, "passwordProvider"> & { enableXfa: boolean }
+    Omit<PdfjsViewerDocumentOptions, "passwordProvider"> & {
+      enableXfa: boolean;
+      fontExtraProperties?: true;
+    }
   >;
 }> {
   validateDocumentOptions(options);
   const { passwordProvider, ...pdfjsOptions } = options;
   return Object.freeze({
     passwordProvider,
-    pdfjsOptions: Object.freeze({ ...pdfjsOptions, enableXfa }),
+    pdfjsOptions: Object.freeze({
+      ...pdfjsOptions,
+      enableXfa,
+      ...(geometricFonts && options.disableFontFace !== true
+        ? { fontExtraProperties: true as const }
+        : {}),
+    }),
   });
 }
 
@@ -493,6 +504,7 @@ const VIEWER_OPTION_KEYS = {
   logger: true,
   pageLayout: true,
   renderingProfile: true,
+  fontRendering: true,
   screenWakeLock: true,
   renderingProfiles: true,
   renderingProfilePolicy: true,
@@ -697,6 +709,9 @@ export function normalizeViewerOptions(
   if (!opts || typeof opts !== "object")
     throw new TypeError("PdfjsViewer: options must be an object");
   rejectUnknownOptions(opts, Object.keys(VIEWER_OPTION_KEYS), "");
+  const fontRendering = opts.fontRendering === undefined ? "native" : opts.fontRendering;
+  if (fontRendering !== "native" && fontRendering !== "geometric")
+    throw new RangeError("PdfjsViewer: fontRendering must be native or geometric");
   const ownerDocument = opts.rootEl?.ownerDocument;
   const ownerWindow = ownerDocument?.defaultView;
   if (!ownerDocument || !ownerWindow || !(opts.rootEl instanceof ownerWindow.HTMLElement)) {
@@ -1063,6 +1078,7 @@ export function normalizeViewerOptions(
 
   return {
     uiBindings,
+    fontRendering,
     screenWakeLock,
     thumbnails: Object.freeze({ maxDpr: thumbnailMaxDpr }),
     ui: {

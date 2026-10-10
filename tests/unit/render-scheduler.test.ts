@@ -290,7 +290,9 @@ test("same-page stale settlement cannot remove a replacement operation", () => {
   const scheduler = new RenderScheduler(2);
   prepare(scheduler, input({ settings: { ...input().settings, maxConcurrentRenders: 2 } }));
   const stale = admit(scheduler, 1);
+  assert.equal(stale.signal.aborted, false);
   scheduler.cancelActiveOperations(() => {});
+  assert.equal(stale.signal.aborted, true);
   scheduler.rebuildQueue(
     1,
     "stationary",
@@ -298,6 +300,7 @@ test("same-page stale settlement cannot remove a replacement operation", () => {
     page => page - 1,
   );
   const replacement = admit(scheduler, 2);
+  assert.equal(replacement.signal.aborted, false);
   assert.equal(stale.pageNo, replacement.pageNo);
   assert.equal(scheduler.settleOperation(stale), true);
   assert.equal(scheduler.ownsOperation(replacement), true);

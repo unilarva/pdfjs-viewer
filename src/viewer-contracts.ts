@@ -2471,6 +2471,8 @@ export interface PdfjsViewerOptions {
   initialRotation?: PdfjsViewerRotation;
   /** Initial rendering profile; `"auto"` selects the configured device-policy default. */
   renderingProfile?: PdfjsViewerRenderingProfileSelection;
+  /** Ordinary PDF.js fonts by default; opt-in geometric TrueType rendering for larger text. */
+  fontRendering?: "native" | "geometric";
   /** Initial Screen Wake Lock policy. Defaults to `"presentation-only"`. */
   screenWakeLock?: PdfjsViewerScreenWakeLockPolicy;
   /** Optional partial overrides for the built-in rendering profiles. */

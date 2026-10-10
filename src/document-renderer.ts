@@ -39,6 +39,7 @@
 
 import type * as PDFJS from "pdfjs-dist";
 import { DocumentPageUsage, type DocumentPageUse } from "./document-page-usage.js";
+import { DocumentFonts } from "./document-fonts.js";
 import {
   createRenderPlan,
   resolveRasterDimensions,
@@ -293,6 +294,8 @@ export class DocumentRenderer {
   #pdf: PDFJS.PDFDocumentProxy | null = null;
   #pages: DocumentPageUsage | null = null;
   #ownsPages = false;
+  #fonts: DocumentFonts | null = null;
+  #geometricFonts = false;
   #documentId = 0;
   #renderingActive = true;
   #interactionActive = false;
@@ -373,12 +376,21 @@ export class DocumentRenderer {
     this.#ownerWindow = ownerWindow;
   }
 
+  /** Sets construction-time font policy before a document is admitted. */
+  setFontRendering(mode: "native" | "geometric"): void {
+    if (this.#pdf) throw new Error("Font rendering must be configured before document admission");
+    this.#geometricFonts = mode === "geometric";
+  }
+
   /** Starts a fresh renderer document lifetime, even when the proxy is reused. */
   beginDocument(pdf: PDFJS.PDFDocumentProxy, pages?: DocumentPageUsage): number {
     this.resetDocument();
     this.#pdf = pdf;
     this.#pages = pages ?? new DocumentPageUsage(pdf);
     this.#ownsPages = pages == null;
+    const ownerDocument = this.#ownerWindow?.document;
+    this.#fonts =
+      this.#geometricFonts && ownerDocument?.fonts ? new DocumentFonts(ownerDocument) : null;
     this.#documentId++;
     this.#initialReady = false;
     this.#initialReadinessPages = null;
@@ -507,6 +519,8 @@ export class DocumentRenderer {
     ];
     this.#documentId++;
     this.#pdf = null;
+    const fonts = this.#fonts;
+    this.#fonts = null;
     const pages = this.#pages;
     const ownsPages = this.#ownsPages;
     this.#pages = null;
@@ -557,6 +571,7 @@ export class DocumentRenderer {
     for (const output of this.#outputs.values()) this.#clearOutput(output, true);
     this.#outputs.clear();
     this.#publishPrimaryPressure();
+    if (fonts) settlements.push(fonts.close(settlements));
     return settlements;
   }
 
@@ -1519,6 +1534,10 @@ export class DocumentRenderer {
     try {
       use = (await this.#pages?.acquire(operation.pageNo)) ?? null;
       if (!use || !this.#detailIsCurrent(operation)) return;
+      const fonts = this.#fonts;
+      if (fonts)
+        await fonts.prepare(use.page, target.base.rasterState.annotationMode, operation.signal);
+      if (!this.#detailIsCurrent(operation)) return;
       const { raster, base } = target;
       let operationsFilter: Parameters<PDFJS.PDFPageProxy["render"]>[0]["operationsFilter"];
       if (base.annotationCanvasIds.size > 0) {
@@ -1546,18 +1565,28 @@ export class DocumentRenderer {
       // Probe the backing store: some browsers return a context for an unusable
       // allocation. Security errors are also safe failures for this optional raster.
       drawing.getImageData(0, 0, 1, 1);
-      const render = startPdfPageRenderTask(use.page, {
-        canvas,
-        canvasContext: drawing,
-        viewport: base.viewport,
-        transform: [raster.dpr, 0, 0, raster.dpr, -raster.x * raster.dpr, -raster.y * raster.dpr],
-        intent: "display",
-        annotationMode: base.rasterState.annotationMode,
-        ...(operationsFilter ? { operationsFilter } : {}),
-        ...(base.rasterState.optionalContentConfigPromise
-          ? { optionalContentConfigPromise: base.rasterState.optionalContentConfigPromise }
-          : {}),
-      });
+      const canvasContext = fonts?.context(drawing, raster.dpr) ?? drawing;
+      const render = startPdfPageRenderTask(
+        use.page,
+        {
+          // PDF.js 6.4 ignores canvasContext when a canvas is supplied. Explicit
+          // context rendering preserves our owned adapter and its original canvas.
+          canvas: canvasContext === drawing ? canvas : null,
+          canvasContext,
+          viewport: base.viewport,
+          transform: [raster.dpr, 0, 0, raster.dpr, -raster.x * raster.dpr, -raster.y * raster.dpr],
+          intent: "display",
+          annotationMode: base.rasterState.annotationMode,
+          ...(operationsFilter ? { operationsFilter } : {}),
+          ...(base.rasterState.optionalContentConfigPromise
+            ? { optionalContentConfigPromise: base.rasterState.optionalContentConfigPromise }
+            : {}),
+        },
+        undefined,
+        canvasContext !== drawing && fonts
+          ? context => fonts.context(context, raster.dpr)
+          : undefined,
+      );
       if (!this.#scheduler.attachTask(operation, render.task)) {
         safely(() => render.task.cancel());
         await render.promise;
@@ -1692,6 +1721,14 @@ export class DocumentRenderer {
       pageUse = await pages.acquire(operation.pageNo);
       const page = pageUse.page;
       if (!this.#operationIsCurrent(operation, context)) return;
+      const fonts = this.#fonts;
+      if (fonts)
+        await fonts.prepare(
+          page,
+          operation.requirement.rasterState.annotationMode,
+          operation.signal,
+        );
+      if (!this.#operationIsCurrent(operation, context)) return;
       const viewerRotation = this.#view?.rotation ?? 0;
       const viewport = page.getViewport({
         scale: operation.requirement.scale,
@@ -1748,22 +1785,38 @@ export class DocumentRenderer {
         if (previous && previous !== output) this.#releaseAnnotationOwner(previous);
         const canvas = context.lease.canvas;
         const drawing = this.#allocateCanvas(canvas, budget.bufferWidth, budget.bufferHeight);
-        drawing.setTransform(budget.renderDpr, 0, 0, budget.renderDpr, 0, 0);
+        drawing.setTransform(
+          this.#fonts ? 1 : budget.renderDpr,
+          0,
+          0,
+          this.#fonts ? 1 : budget.renderDpr,
+          0,
+          0,
+        );
         drawing.imageSmoothingEnabled = true;
-        const render = startPdfPageRenderTask(page, {
-          canvas,
-          canvasContext: drawing,
-          viewport,
-          intent: "display",
-          annotationMode: operation.requirement.rasterState.annotationMode,
-          annotationCanvasMap,
-          ...(operation.requirement.rasterState.optionalContentConfigPromise
-            ? {
-                optionalContentConfigPromise:
-                  operation.requirement.rasterState.optionalContentConfigPromise,
-              }
-            : {}),
-        });
+        const canvasContext = fonts?.context(drawing, budget.renderDpr) ?? drawing;
+        const render = startPdfPageRenderTask(
+          page,
+          {
+            canvas: canvasContext === drawing ? canvas : null,
+            canvasContext,
+            viewport,
+            ...(fonts ? { transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0] } : {}),
+            intent: "display",
+            annotationMode: operation.requirement.rasterState.annotationMode,
+            annotationCanvasMap,
+            ...(operation.requirement.rasterState.optionalContentConfigPromise
+              ? {
+                  optionalContentConfigPromise:
+                    operation.requirement.rasterState.optionalContentConfigPromise,
+                }
+              : {}),
+          },
+          undefined,
+          canvasContext !== drawing && fonts
+            ? context => fonts.context(context, budget.renderDpr)
+            : undefined,
+        );
         const task = render.task;
         if (!this.#scheduler.attachTask(operation, task)) {
           safely(() => task.cancel());
@@ -1790,22 +1843,38 @@ export class DocumentRenderer {
         temporary = context.lease.canvas.ownerDocument.createElement("canvas");
         const drawing = this.#allocateCanvas(temporary, budget.bufferWidth, budget.bufferHeight);
         if (!this.#scheduler.recordOffscreenAllocation(operation, budget.pixelCount)) return;
-        drawing.setTransform(budget.renderDpr, 0, 0, budget.renderDpr, 0, 0);
+        drawing.setTransform(
+          this.#fonts ? 1 : budget.renderDpr,
+          0,
+          0,
+          this.#fonts ? 1 : budget.renderDpr,
+          0,
+          0,
+        );
         drawing.imageSmoothingEnabled = true;
-        const render = startPdfPageRenderTask(page, {
-          canvas: temporary,
-          canvasContext: drawing,
-          viewport,
-          intent: "display",
-          annotationMode: operation.requirement.rasterState.annotationMode,
-          annotationCanvasMap,
-          ...(operation.requirement.rasterState.optionalContentConfigPromise
-            ? {
-                optionalContentConfigPromise:
-                  operation.requirement.rasterState.optionalContentConfigPromise,
-              }
-            : {}),
-        });
+        const canvasContext = fonts?.context(drawing, budget.renderDpr) ?? drawing;
+        const render = startPdfPageRenderTask(
+          page,
+          {
+            canvas: canvasContext === drawing ? temporary : null,
+            canvasContext,
+            viewport,
+            ...(fonts ? { transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0] } : {}),
+            intent: "display",
+            annotationMode: operation.requirement.rasterState.annotationMode,
+            annotationCanvasMap,
+            ...(operation.requirement.rasterState.optionalContentConfigPromise
+              ? {
+                  optionalContentConfigPromise:
+                    operation.requirement.rasterState.optionalContentConfigPromise,
+                }
+              : {}),
+          },
+          undefined,
+          canvasContext !== drawing && fonts
+            ? context => fonts.context(context, budget.renderDpr)
+            : undefined,
+        );
         const task = render.task;
         if (!this.#scheduler.attachTask(operation, task)) {
           safely(() => task.cancel());

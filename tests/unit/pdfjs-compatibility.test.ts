@@ -69,6 +69,67 @@ function storage() {
   };
 }
 
+test("render-scoped canvas factories adapt scratch contexts and restore shared transport immediately", async () => {
+  const original = {
+    create: () => ({ canvas: {}, context: { marker: "native" } }),
+    reset() {},
+    destroy() {},
+  };
+  const transport = { canvasFactory: original };
+  const captures: (typeof original)[] = [];
+  const page = {
+    _transport: transport,
+    render() {
+      captures.push(transport.canvasFactory);
+      return { promise: Promise.resolve(), cancel() {} };
+    },
+  } as unknown as import("pdfjs-dist").PDFPageProxy;
+  for (const marker of ["first", "second"]) {
+    await startPdfPageRenderTask(
+      page,
+      {} as never,
+      undefined,
+      context => ({ ...context, marker }) as unknown as CanvasRenderingContext2D,
+    ).promise;
+    assert.equal(transport.canvasFactory, original);
+  }
+  assert.equal(captures[0].create().context.marker, "first");
+  assert.equal(captures[1].create().context.marker, "second");
+  assert.equal(original.create().context.marker, "native");
+  const failure = {
+    _transport: transport,
+    render() {
+      throw new Error("render failed");
+    },
+  } as unknown as import("pdfjs-dist").PDFPageProxy;
+  assert.throws(
+    () => startPdfPageRenderTask(failure, {} as never, undefined, context => context),
+    /render failed/,
+  );
+  assert.equal(transport.canvasFactory, original);
+});
+
+test("unknown or frozen canvas factory internals use native context rendering rather than partial adaptation", async () => {
+  const canvas = {} as HTMLCanvasElement;
+  const context = { canvas } as CanvasRenderingContext2D;
+  const transport = Object.freeze({ canvasFactory: { create() {} } });
+  let seen: unknown;
+  const page = {
+    _transport: transport,
+    render(params: unknown) {
+      seen = params;
+      return { promise: Promise.resolve(), cancel() {} };
+    },
+  } as unknown as import("pdfjs-dist").PDFPageProxy;
+  await startPdfPageRenderTask(
+    page,
+    { canvas: null, canvasContext: context } as never,
+    undefined,
+    value => value,
+  ).promise;
+  assert.equal((seen as { canvas: unknown }).canvas, canvas);
+});
+
 test("reports capability-specific qualified incompatibilities", () => {
   assert.throws(
     () => validatePdfjsDisplayCapabilities({}, { text: true }),
