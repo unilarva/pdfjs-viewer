@@ -4,6 +4,7 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Fixed overflowing default menus so all controls remain reachable by scrolling.
 - Added reusable native disclosure styling to the default UI: More settings now uses a
   rotating triangle and smooth expansion/collapse, respecting reduced-motion preferences.
 - Kept Reset rotation visible but disabled, with matching ARIA state, whenever the

@@ -724,7 +724,8 @@
     grid-template-columns: 1fr 1fr;
     gap: var(--pdf-ui-space-lg);
     min-height: 0;
-    max-height: calc(100dvh - 4rem);
+    /* The percentage is the controls height; leave a gap above and below the menu. */
+    max-block-size: calc(100cqh - 100% - var(--pdf-ui-space-lg) - var(--pdf-ui-space-lg));
     overflow: auto;
     overscroll-behavior: contain;
     padding: var(--pdf-ui-space-lg);

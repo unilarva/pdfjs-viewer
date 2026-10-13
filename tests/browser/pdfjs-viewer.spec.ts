@@ -1944,6 +1944,68 @@ test("menu panel remains root-contained in a short embedded viewer", async ({ pa
   expect(contained).toBe(true);
 });
 
+for (const { width, height, extensionHeight } of [
+  { width: 600, height: 400, extensionHeight: 0 },
+  { width: 340, height: 520, extensionHeight: 0 },
+  { width: 600, height: 800, extensionHeight: 800 },
+]) {
+  test(`menu scrolls within a non-compact ${width}x${height} viewer with ${extensionHeight}px extension`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1200, height: 1000 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const root = page.locator("#primary");
+    await root.evaluate(
+      (root, { width, height, extensionHeight }) => {
+        root.setAttribute(
+          "style",
+          `width: ${width}px; height: ${height}px; flex: none; margin-block-start: 80px`,
+        );
+        if (extensionHeight) {
+          const extension = root.querySelector<HTMLElement>(".pdf-menu-extension")!;
+          extension.style.height = `${extensionHeight}px`;
+          extension.textContent = "Application menu controls";
+        }
+      },
+      { width, height, extensionHeight },
+    );
+    await root.locator(".pdf-menu-toggle-btn").click();
+    const panel = root.locator(".pdf-menu-panel");
+    const bounds = await panel.evaluate(panel => {
+      const shell = panel.closest<HTMLElement>(".pdf-default-ui")!;
+      const rootRect = shell.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const controlsRect = panel.closest(".pdf-controls")!.getBoundingClientRect();
+      return {
+        rootRect,
+        panelRect,
+        controlsRect,
+        rem: Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
+        clientHeight: panel.clientHeight,
+        scrollHeight: panel.scrollHeight,
+      };
+    });
+    expect(bounds.rootRect.height).toBeGreaterThan(24 * bounds.rem);
+    expect(bounds.rootRect.width).toBeGreaterThan(18 * bounds.rem);
+    expect(bounds.panelRect.top).toBeGreaterThanOrEqual(bounds.controlsRect.bottom);
+    expect(bounds.panelRect.bottom).toBeLessThanOrEqual(bounds.rootRect.bottom);
+    expect(bounds.scrollHeight).toBeGreaterThan(bounds.clientHeight);
+
+    await panel.hover();
+    await page.mouse.wheel(0, bounds.scrollHeight);
+    await expect.poll(() => panel.evaluate(panel => panel.scrollTop)).toBeGreaterThan(0);
+    await expect(panel.locator('[data-pdf-rendering-profile="aggressive"]')).toBeInViewport({
+      ratio: 1,
+    });
+    const close = panel.locator(".pdf-menu-close-btn");
+    await close.focus();
+    await expect(close).toBeInViewport({ ratio: 1 });
+    await close.click();
+    await expect(panel).toHaveAttribute("hidden", "");
+    await expect(root.locator(".pdf-menu-toggle-btn")).toBeFocused();
+  });
+}
+
 test("print conditional hidden state never reserves default dialog layout", async ({ page }) => {
   const range = page.locator("#primary .pdf-print-range-wrap");
   await expect(range).toHaveAttribute("hidden", "");

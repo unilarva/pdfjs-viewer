@@ -650,6 +650,9 @@ navigate search results while the panel remains available. Opening one toolbar p
 the other, and opening an overlay sidebar closes both. Closing restores focus to the opener
 by default.
 
+The default menu is height-constrained to the available space inside the viewer and
+scrolls internally whenever its contents do not fit, including outside compact layouts.
+
 This accessible baseline covers viewer controls, interaction, status, focus, and available
 text-layer selection. It does not currently project a tagged PDF's structure tree, semantic
 reading order, or structure-only relationships into the document DOM. Applications with a
