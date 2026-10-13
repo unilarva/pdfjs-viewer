@@ -22,12 +22,13 @@ const pdfjsVersion = parseExactPdfjsVersionUnion(packageManifest.peerDependencie
 );
 const workspace = await mkdtemp(resolve(tmpdir(), "pdfjs-viewer-pack-"));
 const npmEnv = { ...process.env, npm_config_cache: resolve(tmpdir(), "kilo/npm-cache") };
-// With high-resolution details and updated documentation, the distribution measures
-// about 939 KB packed / 4.12 MB unpacked; retain roughly 6-7% growth headroom.
-const MAX_PACKED_BYTES = 1_000_000;
-const MAX_UNPACKED_BYTES = 4_400_000;
+// With geometric fonts and recent default UI updates, the distribution measures
+// about 961 KB packed / 4.20 MB unpacked; retain roughly 14% growth headroom.
+const MAX_PACKED_BYTES = 1_100_000;
+const MAX_UNPACKED_BYTES = 4_800_000;
 const MAX_CORE_CSS_BYTES = 30_000;
-const MAX_DEFAULT_UI_CSS_BYTES = 80_000;
+// The generated default UI CSS measures about 81.5 KB; retain roughly 23% headroom.
+const MAX_DEFAULT_UI_CSS_BYTES = 100_000;
 
 async function installedBytes(directory) {
   let bytes = 0;
