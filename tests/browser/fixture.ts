@@ -126,6 +126,7 @@ declare global {
       probeStalledFormPreparation(): Promise<Record<string, boolean>>;
       probeInvalidZoom(): { scaleRejected: boolean; factorRejected: boolean };
       probeRotationIntent(): Promise<Record<string, number>>;
+      probeResetRotationControl(): Promise<Record<string, boolean | number | string>[]>;
       probeDestroyedFitMode(): Promise<Record<string, boolean | number | string>>;
       probeInvalidBehaviorOptions(): Record<string, boolean>;
       probeDocumentVisibilityOptOut(): Promise<Record<string, boolean | number>>;
@@ -2363,6 +2364,60 @@ window.fixture = {
       factorRejected = true;
     }
     return { scaleRejected, factorRejected };
+  },
+  async probeResetRotationControl() {
+    const host = document.createElement("section");
+    host.className = "viewer-host";
+    const container = document.createElement("div");
+    container.className = "pdf-container";
+    host.append(container);
+    const control = document.createElement("button");
+    control.textContent = "Reset rotation";
+    document.body.append(host, control);
+    const viewer = new PdfjsViewer({
+      rootEl: host,
+      runtime,
+      ui: "custom",
+      initialRotation: 90,
+      uiBindings: { container, menu: { resetRotation: control } },
+    });
+    const snapshots: Record<string, boolean | number | string>[] = [];
+    const capture = (phase: string) => {
+      snapshots.push({
+        phase,
+        disabled: control.disabled,
+        ariaDisabled: control.getAttribute("aria-disabled") ?? "",
+        hidden: control.hidden,
+        rotation: viewer.state.rotation,
+      });
+    };
+    try {
+      capture("idle");
+      const load = viewer.load("/fixture.pdf");
+      capture("loading");
+      if (!(await load).ok) throw new Error("Rotation control fixture did not load");
+      capture("ready");
+      await viewer.rotateBy(360);
+      capture("full-turn");
+      await viewer.rotateTo(0);
+      capture("rotated");
+      await viewer.resetRotation();
+      capture("reset");
+      await viewer.rotateBy(-90);
+      await viewer.close();
+      capture("closed");
+      if (!(await viewer.load("/fixture.pdf")).ok)
+        throw new Error("Rotation control fixture did not reload");
+      capture("reloaded");
+      await viewer.rotateBy(90);
+      viewer.destroy();
+      capture("destroyed");
+      return snapshots;
+    } finally {
+      viewer.destroy();
+      host.remove();
+      control.remove();
+    }
   },
   async probeRotationIntent() {
     await primary.resetRotation();

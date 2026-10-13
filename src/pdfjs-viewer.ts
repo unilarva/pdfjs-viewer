@@ -1027,6 +1027,7 @@ export class PdfjsViewer {
       this.#rotateCounterclockwiseBtnEl = ui.menu.rotateCounterclockwise;
       this.#resetRotationBtnEl = ui.menu.resetRotation;
       this.#rotateClockwiseBtnEl = ui.menu.rotateClockwise;
+      this.#syncResetRotationControl();
 
       // --- Viewer-lifetime wake-lock policy controls (optional) ---
       this.#screenWakeLockInputs = Array.from(
@@ -1533,6 +1534,7 @@ export class PdfjsViewer {
     this.#documentNavigation.reset();
     this.#documentNavigationHistory.reset();
     this.#syncNavigationHistoryControls();
+    this.#syncResetRotationControl();
     this.#searchPreparationState = "idle";
     this.#outlinePreparationState = "idle";
     this.#attachmentsPreparationState = "idle";
@@ -3419,6 +3421,7 @@ export class PdfjsViewer {
     this.#handleRotationChange(result);
     this.#syncPageLayoutControls();
     this.#syncFitModeControls();
+    this.#syncResetRotationControl();
     this.#updateFitUI();
     this.#emitStateChange();
   }
@@ -4676,7 +4679,6 @@ export class PdfjsViewer {
       this.#fitModeToggleWidthEl,
       this.#fitModeToggleHeightEl,
       this.#rotateCounterclockwiseBtnEl,
-      this.#resetRotationBtnEl,
       this.#rotateClockwiseBtnEl,
       this.#renderingProfileToggleConservativeEl,
       this.#renderingProfileToggleBalancedEl,
@@ -4693,7 +4695,19 @@ export class PdfjsViewer {
     if (enabled)
       this.#updatePageNavDisabled(this.#documentView.currentRowIndex(this.#lastEmittedPage));
     this.#syncNavigationHistoryControls();
+    this.#syncResetRotationControl();
     this.#syncModeControls();
+  }
+
+  /** Owns disabled and ARIA state for the optional generated or custom rotation reset. */
+  #syncResetRotationControl(): void {
+    const control = this.#resetRotationBtnEl;
+    if (!control) return;
+    control.disabled =
+      this.#status !== "ready" ||
+      this.#destroyed ||
+      this.#documentView.rotation === this.#initialRotation;
+    control.setAttribute("aria-disabled", String(control.disabled));
   }
 
   /** Excludes device-policy-ineligible profile controls from viewer wiring. */

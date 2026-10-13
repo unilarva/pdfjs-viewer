@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   createPdfjsViewerUi,
@@ -14,6 +15,22 @@ import {
 } from "../../src/default-ui.js";
 import { PDFJS_VIEWER_UI_HOOKS } from "../../src/viewer-contracts.js";
 import { discoverViewerUi } from "../../src/viewer-ui-discovery.js";
+
+test("Fit and Reset rotation icons share identical document geometry", () => {
+  const css = readFileSync("src/default-ui-theme.css", "utf8");
+  const documentPaths = ["fit", "reset-rotation"].map(name => {
+    const encoded = css.match(
+      new RegExp(`--pdf-ui-icon-${name}: url\\("data:image/svg\\+xml,([^\"]+)"\\)`),
+    )?.[1];
+    assert.ok(encoded);
+    const svg = decodeURIComponent(encoded);
+    assert.match(svg, /viewBox='0 0 16 16'/);
+    const path = svg.match(/fill-rule='evenodd' d='([^']+)'/)?.[1];
+    assert.ok(path);
+    return path;
+  });
+  assert.ok(documentPaths[0].endsWith(documentPaths[1]));
+});
 
 test("generated wake-lock choices occupy their own optional row with escaped labels", () => {
   const html = renderPdfjsViewerUi({ id: "wake" });

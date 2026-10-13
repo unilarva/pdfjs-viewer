@@ -76,7 +76,7 @@ test("generated UI loads and exposes accessible controls and state", async ({ pa
   await expect(page.locator("#primary .pdf-page-layout-group")).toHaveCount(1);
   await expect(page.locator("#primary .pdf-fit-mode-group")).toHaveCount(1);
   await expect(page.locator("#primary .pdf-rotate-counterclockwise-btn")).toBeEnabled();
-  await expect(page.locator("#primary .pdf-reset-rotation-btn")).toBeEnabled();
+  await expect(page.locator("#primary .pdf-reset-rotation-btn")).toBeDisabled();
   await expect(page.locator("#primary .pdf-rotate-clockwise-btn")).toBeEnabled();
   await expect(page.locator("#primary .pdf-rendering-profile-group")).toHaveCount(1);
   await expect(page.locator("#primary .pdf-download-filled-document-btn")).toHaveAttribute(
@@ -1076,6 +1076,65 @@ test("fit modes and document rotation publish canonical state", async ({ page })
   await expect(page.locator("#primary .pdf-page").first()).toHaveAttribute(
     "data-main-rotation",
     "0",
+  );
+});
+
+test("Reset rotation stays visible and tracks the original rotation @mobile", async ({ page }) => {
+  await page.locator("#primary .pdf-menu-toggle-btn").click();
+  const reset = page.locator("#primary .pdf-reset-rotation-btn");
+  await expect(reset).toBeVisible();
+  await expect(reset).toBeDisabled();
+  await expect(reset).toHaveAttribute("aria-disabled", "true");
+  const masks = await page.evaluate(() =>
+    [".pdf-fit-menu-btn", ".pdf-reset-rotation-btn", ".pdf-rotate-clockwise-btn"].map(
+      selector =>
+        getComputedStyle(document.querySelector(`#primary ${selector} .pdf-ui-icon`)!).maskImage,
+    ),
+  );
+  expect(masks[0]).not.toBe("none");
+  expect(masks[1]).not.toBe("none");
+  expect(masks[1]).not.toBe(masks[0]);
+  expect(masks[1]).not.toBe(masks[2]);
+
+  for (const selector of [".pdf-rotate-clockwise-btn", ".pdf-rotate-counterclockwise-btn"]) {
+    await page.locator(`#primary ${selector}`).click();
+    await expect(reset).toBeEnabled();
+    await expect(reset).toHaveAttribute("aria-disabled", "false");
+    await reset.click();
+    await expect(reset).toBeDisabled();
+    await expect(reset).toHaveAttribute("aria-disabled", "true");
+    await expect.poll(() => page.evaluate(() => window.fixture.primary.state.rotation)).toBe(0);
+  }
+  await page.evaluate(async () => {
+    await window.fixture.primary.rotateTo(270);
+    await window.fixture.primary.rotateBy(90);
+  });
+  await expect(reset).toBeDisabled();
+  await expect(reset).toBeVisible();
+});
+
+test("custom Reset rotation bindings use nonzero initial rotation across lifecycle @mobile", async ({
+  page,
+}) => {
+  const snapshots = await page.evaluate(() => window.fixture.probeResetRotationControl());
+  expect(snapshots).toEqual(
+    [
+      ["idle", true, 90],
+      ["loading", true, 90],
+      ["ready", true, 90],
+      ["full-turn", true, 90],
+      ["rotated", false, 0],
+      ["reset", true, 90],
+      ["closed", true, 90],
+      ["reloaded", true, 90],
+      ["destroyed", true, 90],
+    ].map(([phase, disabled, rotation]) => ({
+      phase,
+      disabled,
+      ariaDisabled: String(disabled),
+      hidden: false,
+      rotation,
+    })),
   );
 });
 

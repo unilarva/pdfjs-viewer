@@ -67,6 +67,7 @@
     --pdf-ui-icon-search-next: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6.2 4.467a.667.667 0 0 1 .933 0l3.067 3.066a.667.667 0 0 1 0 .934l-3.067 3.066a.667.667 0 1 1-.933-.933L8.8 8 6.2 5.4a.667.667 0 0 1 0-.933z'/%3E%3C/svg%3E");
     --pdf-ui-icon-text-selection: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 2h10v2h-1V3H9v10h2v1H5v-1h2V3H4v1H3zm-2 3h1v6H1zm13 0h1v6h-1z'/%3E%3C/svg%3E");
     --pdf-ui-icon-rotate-clockwise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 3a5 5 0 1 0 4.55 2.91.5.5 0 0 1 .91-.41A6 6 0 1 1 8 2z'/%3E%3Cpath d='M8 4.47V.53a.25.25 0 0 1 .41-.19l2.36 1.97a.25.25 0 0 1 0 .38L8.41 4.66A.25.25 0 0 1 8 4.47'/%3E%3C/svg%3E");
+    --pdf-ui-icon-reset-rotation: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M5.333 4.333h5.334v7.334H5.333zm.5.5v6.334h4.334V4.833zM6.333 6.333h3.334v.5H6.333zm0 1.334h3.334v.5H6.333zm0 1.333h3.334v.5H6.333z'/%3E%3Cpath d='M2 12v2h12v-2' fill='none' stroke='currentColor' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     --pdf-ui-icon-arrow-left: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='m10.6 5.6-5 5a2 2 0 0 0 0 2.8l5 5 1.4-1.4L8.4 13H19v-2H8.4l3.6-4z'/%3E%3C/svg%3E");
     --pdf-ui-icon-arrow-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='m13.4 5.6 5 5a2 2 0 0 1 0 2.8l-5 5-1.4-1.4 3.6-4H5v-2h10.6L12 7z'/%3E%3C/svg%3E");
     --pdf-ui-icon-fullscreen: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M4 9V4h5v2H6v3H4zm11-5h5v5h-2V6h-3V4zM4 15h2v3h3v2H4v-5zm14 0h2v5h-5v-2h3v-3z'/%3E%3C/svg%3E");
@@ -540,7 +541,7 @@
     transform: scaleX(-1);
   }
   .pdf-default-ui .pdf-reset-rotation-btn .pdf-ui-icon {
-    --pdf-ui-icon: var(--pdf-ui-icon-fit);
+    --pdf-ui-icon: var(--pdf-ui-icon-reset-rotation);
   }
   .pdf-default-ui .pdf-navigation-history-back-btn .pdf-ui-icon {
     --pdf-ui-icon: var(--pdf-ui-icon-arrow-left);

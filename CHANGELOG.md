@@ -4,6 +4,9 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Kept Reset rotation visible but disabled, with matching ARIA state, whenever the
+  viewer is at its configured initial rotation, for both generated and custom UI.
+  The default UI now uses a distinct upright-page-and-baseline icon instead of the Fit icon.
 - Prevented file drops outside the demo's URL field from navigating away from the demo;
   the reusable viewer's drop behavior is unchanged.
 - Added opt-in `fontRendering: "geometric"` to preserve larger embedded TrueType

@@ -154,6 +154,13 @@ markup, or the equivalent elements supplied through `uiBindings`:
 | Document progress                                  | `<progress class="pdf-document-progress">` / `documentProgress`                                                                                                                                    | Must be an `HTMLProgressElement` with an accessible name                                                                                                                  |
 | Print setup                                        | `.pdf-print-setup` / `printSetup`                                                                                                                                                                  | A controlled-native dialog requires every `PDFJS_VIEWER_UI_HOOKS.printSetup` descendant; direct descendants belong to the resolved dialog and controls belong to its form |
 
+The viewer owns `disabled` and `aria-disabled` on the optional Reset rotation button.
+It stays visible but disabled until a document is ready and its viewer-added rotation
+differs from the configured `initialRotation` (default `0`), independently of native
+PDF page rotation. Resetting or rotating back to that initial value disables it again.
+In the default UI, `--pdf-ui-icon-reset-rotation` customizes its upright-page-and-baseline
+mask independently of the Fit icon (`--pdf-ui-icon-fit`).
+
 Selector names are exported as the categorized `PDFJS_VIEWER_UI_HOOKS` object. Custom
 integrations may instead pass typed direct references through the current nested
 `uiBindings` groups: `navigation`, `navigationHistory`, `fullscreen`, `presentation`, `zoom`, `search`, `menu`, `sidebar`, `outline`, `thumbnails`, `attachments`, `layers`, and `printSetup`,
