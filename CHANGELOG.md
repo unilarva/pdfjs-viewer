@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Prevented file drops outside the demo's URL field from navigating away from the demo;
+  the reusable viewer's drop behavior is unchanged.
 - Added opt-in `fontRendering: "geometric"` to preserve larger embedded TrueType
   glyph proportions across zoom and base/detail DPR changes using owned native
   aliases without grid fitting. Native PDF.js rendering remains the default;

@@ -166,9 +166,29 @@ fileInput.addEventListener("change", () => {
   fileInput.value = "";
 });
 
+// Prevent file drops from navigating away from the demo, without blocking its URL-field handler.
+document.addEventListener(
+  "dragover",
+  event => {
+    if (!event.dataTransfer?.types.includes("Files")) return;
+    event.preventDefault();
+    if (event.target !== input) event.dataTransfer.dropEffect = "none";
+  },
+  { capture: true },
+);
+
+document.addEventListener(
+  "drop",
+  event => {
+    if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+  },
+  { capture: true },
+);
+
 input.addEventListener("dragover", event => {
   if (event.dataTransfer?.types.includes("Files")) {
     event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
     input.dataset.dragging = "true";
   }
 });
