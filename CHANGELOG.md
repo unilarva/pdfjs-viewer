@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Added reusable native disclosure styling to the default UI: More settings now uses a
+  rotating triangle and smooth expansion/collapse, respecting reduced-motion preferences.
 - Kept Reset rotation visible but disabled, with matching ARIA state, whenever the
   viewer is at its configured initial rotation, for both generated and custom UI.
   The default UI now uses a distinct upright-page-and-baseline icon instead of the Fit icon.

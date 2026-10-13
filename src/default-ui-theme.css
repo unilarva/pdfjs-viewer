@@ -59,6 +59,7 @@
     --pdf-ui-icon-search: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0'/%3E%3C/svg%3E");
     --pdf-ui-icon-menu: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.333 3.333h13.334v1.334H1.333zm0 4h13.334v1.334H1.333zm0 4h13.334v1.334H1.333z'/%3E%3C/svg%3E");
     --pdf-ui-icon-caret-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.467 6.2a.667.667 0 0 1 .933 0L8 8.8l2.6-2.6a.667.667 0 1 1 .933.933L8.467 10.2a.667.667 0 0 1-.934 0L4.467 7.133a.667.667 0 0 1 0-.933z'/%3E%3C/svg%3E");
+    --pdf-ui-icon-triangle-right: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m 1.565789,1.5 v 13 L 14.434211,8 Z'/%3E%3C/svg%3E");
     --pdf-ui-icon-close: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1.333 1.333 14.667 14.667M14.667 1.333 1.333 14.667' fill='none' stroke='%23000' stroke-linecap='round' stroke-width='1.333'/%3E%3C/svg%3E");
     --pdf-ui-icon-download: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5'/%3E%3Cpath d='M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708z'/%3E%3C/svg%3E");
     --pdf-ui-icon-print: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M4 1.333h8v3.334H4zm1.333 1.334v.666h5.334v-.666zM2.667 5.333h10.666a1.333 1.333 0 0 1 1.334 1.334v4.666H12v3.334H4v-3.334H1.333V6.667a1.333 1.333 0 0 1 1.334-1.334m2.666 8h5.334V10H5.333zm6.667-5.333h1.333v1.333H12z'/%3E%3C/svg%3E");
@@ -184,15 +185,41 @@
     gap: 0.75rem;
     min-width: 0;
   }
-  .pdf-default-ui .pdf-print-more {
+  /* Native disclosures retain keyboard semantics without a second toggle state. */
+  .pdf-default-ui .pdf-disclosure {
     min-width: 0;
   }
-  .pdf-default-ui .pdf-print-more > summary {
+  .pdf-default-ui .pdf-disclosure > summary {
+    display: flex;
+    align-items: center;
+    gap: 0.45em;
+    list-style: none;
     cursor: pointer;
     font-weight: 600;
   }
-  .pdf-default-ui .pdf-print-more[open] > summary {
-    margin-bottom: 0.75rem;
+  .pdf-default-ui .pdf-disclosure > summary::-webkit-details-marker {
+    display: none;
+  }
+  .pdf-default-ui .pdf-disclosure > summary::before {
+    content: "";
+    flex: none;
+    width: 0.7em;
+    height: 0.7em;
+    background: currentColor;
+    mask: var(--pdf-ui-icon-triangle-right) center / contain no-repeat;
+    transition: transform var(--pdf-ui-transition-normal) ease;
+  }
+  .pdf-default-ui .pdf-disclosure[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  .pdf-default-ui .pdf-disclosure-content {
+    min-height: 0;
+    overflow: clip;
+    /* Preserve the dialog controls' outward focus rings while clipping the reveal. */
+    overflow-clip-margin: 4px;
+  }
+  .pdf-default-ui .pdf-print-more .pdf-print-fields {
+    padding-top: var(--pdf-ui-space-xl);
   }
   .pdf-default-ui .pdf-print-fields {
     display: grid;
@@ -378,7 +405,7 @@
   }
   .pdf-default-ui
     :is(.pdf-print-setup, .pdf-document-information)
-    :is(button, input, select):focus-visible {
+    :is(button, input, select, summary):focus-visible {
     outline: 2px solid var(--pdf-ui-color-accent);
     outline-offset: 2px;
   }
@@ -1437,6 +1464,7 @@
     .pdf-default-ui .pdf-menu-panel[hidden],
     .pdf-default-ui .pdf-outline,
     .pdf-default-ui .pdf-sidebar,
+    .pdf-default-ui .pdf-disclosure > summary::before,
     .pdf-default-ui :is(.pdf-print-setup, .pdf-document-information),
     .pdf-default-ui :is(.pdf-print-setup, .pdf-document-information)::backdrop {
       transition: none;
@@ -1490,5 +1518,32 @@
     to {
       opacity: 1;
     }
+  }
+}
+
+/* Firefox/WebKit do not reliably lay out ::details-content styled inside @scope.
+   Keep explicit root/default-UI containment here. One clipped wrapper lets grid
+   interpolate intrinsic heights; defer native hiding until collapse finishes. */
+:where([data-pdfjs-viewer-root]).pdf-default-ui .pdf-disclosure::details-content,
+:where([data-pdfjs-viewer-root]) .pdf-default-ui .pdf-disclosure::details-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--pdf-ui-transition-normal) ease,
+    opacity var(--pdf-ui-transition-normal) ease,
+    content-visibility var(--pdf-ui-transition-normal) allow-discrete;
+}
+
+:where([data-pdfjs-viewer-root]).pdf-default-ui .pdf-disclosure[open]::details-content,
+:where([data-pdfjs-viewer-root]) .pdf-default-ui .pdf-disclosure[open]::details-content {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where([data-pdfjs-viewer-root]).pdf-default-ui .pdf-disclosure::details-content,
+  :where([data-pdfjs-viewer-root]) .pdf-default-ui .pdf-disclosure::details-content {
+    transition: none;
   }
 }

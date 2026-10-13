@@ -733,6 +733,13 @@ Orientation, then Page scaling with Quality. Help text is associated with and di
 relevant control. The print dialog is top-anchored,
 grows downward, and becomes internally scrollable at the viewport bound so dynamic feedback does not
 recenter existing controls.
+More settings uses reusable native disclosure styling in `default-ui.css`. Within
+`.pdf-default-ui`, use `<details class="pdf-disclosure">` with a direct `<summary>` and
+one `<div class="pdf-disclosure-content">` wrapping the section's contents. The summary's
+decorative triangle uses `--pdf-ui-icon-triangle-right`; its rotation and the content's
+grid-height/fade transitions use `--pdf-ui-transition-normal`. Both become immediate under
+`prefers-reduced-motion: reduce`. Browsers without `::details-content` support retain native
+instant expansion/collapse. No extra toggle state or JavaScript is required.
 In page-range and custom-dimension inputs, Enter confirms the field by removing focus instead of
 submitting the form; supporting mobile keyboards receive a Done enter-key hint.
 

@@ -16,6 +16,23 @@ import {
 import { PDFJS_VIEWER_UI_HOOKS } from "../../src/viewer-contracts.js";
 import { discoverViewerUi } from "../../src/viewer-ui-discovery.js";
 
+test("print More settings uses a reusable native disclosure with escaped text", () => {
+  const html = renderPdfjsViewerUi({
+    id: "print",
+    labels: { printMoreSettings: "<More & settings>" },
+  });
+  assert.match(
+    html,
+    /<details class="pdf-print-more pdf-disclosure"><summary>&lt;More &amp; settings&gt;<\/summary><div class="pdf-disclosure-content"><div class="pdf-print-fields">/,
+  );
+  const css = readFileSync("src/default-ui-theme.css", "utf8");
+  const encoded = css.match(
+    /--pdf-ui-icon-triangle-right: url\("data:image\/svg\+xml,([^"]+)"\)/,
+  )?.[1];
+  assert.ok(encoded);
+  assert.match(decodeURIComponent(encoded), /d='m 1\.565789,1\.5 v 13 L 14\.434211,8 Z'/);
+});
+
 test("Fit and Reset rotation icons share identical document geometry", () => {
   const css = readFileSync("src/default-ui-theme.css", "utf8");
   const documentPaths = ["fit", "reset-rotation"].map(name => {
@@ -245,7 +262,7 @@ test("generated print setup exposes one complete basic and advanced hook contrac
     "pdf-print-submit-detail",
   ])
     assert.match(html, new RegExp(`class="[^"]*${hook}`));
-  assert.match(html, /<details class="pdf-print-more">/);
+  assert.match(html, /<details class="pdf-print-more pdf-disclosure">/);
   assert.match(
     html,
     /<progress class="pdf-print-progress"[^>]*aria-label="Preparing print sheets"/,
@@ -253,7 +270,7 @@ test("generated print setup exposes one complete basic and advanced hook contrac
   assert.match(html, /<option value="spread">Two pages<\/option>/);
   assert.match(html, /<option value="custom">Custom<\/option>/);
   assert.ok(html.indexOf('class="pdf-print-sheet"') < html.indexOf('class="pdf-print-layout"'));
-  assert.ok(html.indexOf('class="pdf-print-more"') < html.indexOf('class="pdf-print-layout"'));
+  assert.ok(html.indexOf('class="pdf-print-more ') < html.indexOf('class="pdf-print-layout"'));
   assert.ok(
     html.indexOf('class="pdf-print-layout"') < html.indexOf('class="pdf-print-orientation"'),
   );

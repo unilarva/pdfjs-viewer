@@ -6470,6 +6470,101 @@ test.describe("strict CSP and Trusted Types", { tag: "@csp" }, () => {
   });
 });
 
+test("print More settings animates native disclosure height and triangle with reduced-motion support", async ({
+  page,
+}) => {
+  await page.locator("#primary .pdf-menu-toggle-btn").click();
+  await page.locator("#primary .pdf-print-btn").click();
+  const details = page.locator("#primary .pdf-print-more");
+  const summary = details.locator("summary");
+  await expect(summary).toHaveAccessibleName("More settings");
+  // WebKit does not expose ::details-content transitions through getAnimations().
+  // Allow slow PDF/viewport work between frames while sampling that native content.
+  await details.evaluate(element =>
+    (element as HTMLElement).style.setProperty("--pdf-ui-transition-normal", "2s"),
+  );
+
+  for (const width of [1280, 360]) {
+    await page.setViewportSize({ width, height: 800 });
+    for (const reducedMotion of ["no-preference", "reduce"] as const) {
+      await page.emulateMedia({ reducedMotion });
+      const toggle = () =>
+        details.evaluate(async element => {
+          const content = element.querySelector<HTMLElement>(".pdf-disclosure-content")!;
+          const fields = element.querySelector<HTMLElement>(".pdf-print-fields")!;
+          const summary = element.querySelector("summary")!;
+          // Establish the pre-toggle style after viewport/media changes.
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          content.getBoundingClientRect();
+          getComputedStyle(summary, "::before").transform;
+          summary.click();
+          // Sample halfway through actual transitions, independent of rendering load.
+          const animations = element.getAnimations({ subtree: true });
+          for (const animation of animations) {
+            animation.pause();
+            animation.currentTime = Number(animation.effect!.getTiming().duration) / 2;
+          }
+          await new Promise<void>(resolve =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          );
+          const sample = {
+            height: content.getBoundingClientRect().height,
+            fullHeight: fields.getBoundingClientRect().height,
+            duration: getComputedStyle(element, "::details-content").transitionDuration,
+            triangleDuration: getComputedStyle(summary, "::before").transitionDuration,
+            transform: getComputedStyle(summary, "::before").transform,
+          };
+          for (const animation of animations) animation.play();
+          return sample;
+        });
+      const opening = await toggle();
+      if (reducedMotion === "reduce") {
+        expect(opening.duration).toBe("0s");
+        expect(opening.triangleDuration).toBe("0s");
+        expect(opening.height).toBeCloseTo(opening.fullHeight, 0);
+      } else {
+        expect(opening.height).toBeGreaterThan(0);
+        expect(opening.height).toBeLessThan(opening.fullHeight);
+        expect(opening.transform).not.toBe("none");
+        expect(opening.transform).not.toBe("matrix(0, 1, -1, 0, 0, 0)");
+      }
+      await expect
+        .poll(() => summary.evaluate(element => getComputedStyle(element, "::before").transform))
+        .toBe("matrix(0, 1, -1, 0, 0, 0)");
+      await expect
+        .poll(() =>
+          details.evaluate(element => {
+            const content = element.querySelector(".pdf-disclosure-content")!;
+            const fields = element.querySelector(".pdf-print-fields")!;
+            return Math.abs(
+              content.getBoundingClientRect().height - fields.getBoundingClientRect().height,
+            );
+          }),
+        )
+        .toBeLessThan(1);
+      const closing = await toggle();
+      if (reducedMotion === "reduce") {
+        expect(closing.height).toBe(0);
+      } else {
+        expect(closing.height).toBeGreaterThan(0);
+        expect(closing.height).toBeLessThan(opening.fullHeight);
+      }
+      await expect
+        .poll(() => summary.evaluate(element => getComputedStyle(element, "::before").transform))
+        .toBe("none");
+      await expect(details.locator(".pdf-print-layout")).toBeHidden();
+      await summary.focus();
+      await page.keyboard.press("Tab");
+      await expect(details.locator("select:focus")).toHaveCount(0);
+    }
+  }
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(details).toHaveAttribute("open", "");
+  await page.keyboard.press("Space");
+  await expect(details).not.toHaveAttribute("open");
+});
+
 test("generated print action opens only the accessible package setup controls", async ({
   page,
 }) => {
