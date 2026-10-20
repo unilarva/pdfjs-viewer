@@ -5919,6 +5919,60 @@ test("device compatibility defaults and host refinements are viewer-local and de
   });
 });
 
+for (const layout of ["single", "double", "book"] as const) {
+  test(`initial page rendering waits for its scroll anchor in ${layout} layout`, async ({
+    page,
+  }) => {
+    const result = await page.evaluate(async layout => {
+      const viewer = window.fixture.primary;
+      await viewer.setPageLayout(layout);
+      const offset = window.fixture.logs.length;
+      const loaded = await viewer.load("/queue-fixture.pdf", { initialPage: 6 });
+      const logs = window.fixture.logs.slice(offset).filter(entry => entry.viewerId === "primary");
+      return {
+        loaded: loaded.ok,
+        starts: logs
+          .filter(entry => entry.event === "page-render-started")
+          .map(entry => entry.details?.pageNo),
+        committed: logs.findIndex(
+          entry => entry.event === "page-render-completed" && entry.details?.pageNo === 6,
+        ),
+        ready: logs.findIndex(entry => entry.event === "load-ready"),
+      };
+    }, layout);
+    expect(result.loaded).toBe(true);
+    expect(result.starts[0]).toBe(layout === "double" ? 5 : 6);
+    expect(result.committed).toBeGreaterThanOrEqual(0);
+    expect(result.ready).toBeGreaterThan(result.committed);
+  });
+}
+
+test("closing during initial surface mounting releases rendering admission for the next load", async ({
+  page,
+}) => {
+  const result = await page.evaluate(async () => {
+    const viewer = window.fixture.primary;
+    await viewer.setPageLayout("single");
+    const root = document.querySelector("#primary")!;
+    let closing: Promise<void> | undefined;
+    const observer = new MutationObserver(() => {
+      if (viewer.state.status === "loading" && root.querySelector('.pdf-page[data-page="6"]')) {
+        observer.disconnect();
+        closing = viewer.close();
+      }
+    });
+    await viewer.close();
+    observer.observe(root, { childList: true, subtree: true });
+    const cancelled = await viewer.load("/queue-fixture.pdf", { initialPage: 6 });
+    observer.disconnect();
+    await closing;
+    const loaded = await viewer.load("/queue-fixture.pdf", { initialPage: 6 });
+    return { cancelled, loaded: loaded.ok };
+  });
+  expect(result.cancelled).toMatchObject({ ok: false, reason: "cancelled", cause: "closed" });
+  expect(result.loaded).toBe(true);
+});
+
 test("viewer can start closed and load its first document later", async ({ page }) => {
   await expect(page.evaluate(() => window.fixture.probeDeferredInitialLoad())).resolves.toEqual({
     initialStatus: "closed",
@@ -8096,9 +8150,22 @@ test("width-only resize recenters fixed-scale pages without rerendering", async 
   await page.evaluate(() => window.fixture.primary.zoomTo(0.8));
   const viewport = page.getByRole("region", { name: "primary PDF" });
   const canvas = page.locator("#primary .pdf-page canvas").first();
+  // A retained zoom placeholder has pixels but does not satisfy the requested scale.
   await expect
-    .poll(() => canvas.evaluate((el: HTMLCanvasElement) => el.width > 0 && el.height > 0))
-    .toBe(true);
+    .poll(() =>
+      page.evaluate(
+        () =>
+          [...window.fixture.logs]
+            .reverse()
+            .find(
+              entry =>
+                entry.event === "page-render-completed" &&
+                entry.viewerId === "primary" &&
+                entry.details?.pageNo === 1,
+            )?.details?.scale,
+      ),
+    )
+    .toBe(0.8);
   const bitmapBefore = await canvas.evaluate((el: HTMLCanvasElement) => ({
     width: el.width,
     height: el.height,

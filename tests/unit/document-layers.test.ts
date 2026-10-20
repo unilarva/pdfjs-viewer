@@ -8,9 +8,12 @@ import { DocumentLayers } from "../../src/document-layers.js";
 type GroupData = { id: string; name?: string; visible: boolean; rbGroups?: string[][] };
 
 class FakeOptionalContentConfig {
+  static clones = 0;
+  static groupReads = 0;
   static fromSerializable(
     serializable: ReturnType<FakeOptionalContentConfig["snapshot"]>,
   ): FakeOptionalContentConfig {
+    this.clones++;
     return new FakeOptionalContentConfig(serializable.groups, serializable.order);
   }
 
@@ -37,6 +40,7 @@ class FakeOptionalContentConfig {
     return structuredClone(this.#order);
   }
   getGroup(id: string): GroupData | null {
+    FakeOptionalContentConfig.groupReads++;
     return this.#groups.get(id) ?? null;
   }
   setVisibility(id: string, visible: boolean, preserveRB = true): void {
@@ -48,6 +52,18 @@ class FakeOptionalContentConfig {
       }
     }
     group.visible = visible;
+  }
+  setOCGState({ state, preserveRB }: { state: string[]; preserveRB: boolean }): void {
+    let operator = "";
+    for (const item of state) {
+      if (["ON", "OFF", "Toggle"].includes(item)) operator = item;
+      else
+        this.setVisibility(
+          item,
+          operator === "Toggle" ? !this.#groups.get(item)!.visible : operator === "ON",
+          preserveRB,
+        );
+    }
   }
   *[Symbol.iterator](): IterableIterator<[string, GroupData]> {
     yield* this.#groups;
@@ -252,4 +268,79 @@ test("each document lifetime advances identity exactly once", async () => {
   const second = await owner.beginDocument(pdf(configuration()) as never);
   assert.ok(first && second);
   assert.equal(second.documentId, first.documentId + 1);
+});
+
+test("caches immutable queries and static names, shares branches, and clones only once per mutation", async () => {
+  const owner = new DocumentLayers(true);
+  await owner.beginDocument(pdf(configuration()) as never);
+  const initial = owner.getLayers();
+  assert.ok(initial.ok);
+  const reads = FakeOptionalContentConfig.groupReads;
+  const clones = FakeOptionalContentConfig.clones;
+  assert.equal(owner.getLayers(), initial);
+  assert.equal(await owner.setVisibility([{ id: "named", visible: true }]), initial);
+  assert.equal(owner.getLayers(), initial);
+  const result = await owner.setVisibility([{ id: "named", visible: false }]);
+  assert.ok(result.ok);
+  assert.equal(FakeOptionalContentConfig.clones - clones, 2);
+  assert.equal(FakeOptionalContentConfig.groupReads, reads);
+  assert.notEqual(result.layers[0], initial.layers[0]);
+  assert.equal(result.layers[1], initial.layers[1]);
+  const before = initial.layers[0];
+  const after = result.layers[0];
+  assert.ok(before.kind === "label" && after.kind === "label");
+  assert.equal(after.children[1], before.children[1]);
+  assert.ok(Object.isFrozen(after.children));
+  assert.equal(owner.getLayers(), result);
+  assert.equal(await owner.setVisibility([]), result);
+});
+
+test("reports actual frozen changed IDs including implicit RB effects, reset and net no-ops", async () => {
+  const changes: (readonly string[])[] = [];
+  const diagnostics: { event: string; details: Readonly<Record<string, unknown>> }[] = [];
+  const owner = new DocumentLayers(true, {
+    committed: (_state, _render, ids) => changes.push(ids),
+    diagnostic: entry => diagnostics.push(entry),
+  });
+  await owner.beginDocument(pdf(configuration()) as never);
+  await owner.setVisibility([{ id: "radio-b", visible: true }]);
+  assert.deepEqual(changes, [["radio-a", "radio-b"]]);
+  assert.ok(Object.isFrozen(changes[0]));
+  await owner.resetLayers();
+  assert.deepEqual(changes[1], ["radio-a", "radio-b"]);
+  const before = owner.getLayers();
+  const first = owner.setVisibility([{ id: "named", visible: false }]);
+  const second = owner.setVisibility([{ id: "named", visible: true }]);
+  assert.deepEqual(await first, { ok: false, reason: "cancelled" });
+  assert.equal(await second, before);
+  assert.equal(changes.length, 2);
+  await owner.executeSetOCGState({ state: ["ON", "radio-b"], preserveRB: true });
+  assert.deepEqual(changes[2], ["radio-a", "radio-b"]);
+  await owner.executeSetOCGState({ state: ["ON", "radio-a"], preserveRB: false });
+  assert.deepEqual(changes[3], ["radio-a"]);
+  for (const event of ["layers-tree", "layers-clone", "layers-commit"]) {
+    const entries = diagnostics.filter(entry => entry.event === event);
+    assert.ok(entries.length > 0);
+    assert.ok(
+      entries.every(
+        entry => typeof entry.details.elapsedMs === "number" && entry.details.elapsedMs >= 0,
+      ),
+    );
+  }
+});
+
+test("timing callbacks cannot stage old configuration into a replacement document", async () => {
+  let resetOnClone = false;
+  const owner = new DocumentLayers(true, {
+    diagnostic: entry => {
+      if (resetOnClone && entry.event === "layers-clone") owner.resetDocument();
+    },
+  });
+  await owner.beginDocument(pdf(configuration()) as never);
+  resetOnClone = true;
+  assert.deepEqual(await owner.setVisibility([{ id: "named", visible: false }]), {
+    ok: false,
+    reason: "cancelled",
+  });
+  assert.deepEqual(owner.getLayers(), { ok: false, reason: "not-ready" });
 });

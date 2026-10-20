@@ -493,6 +493,201 @@ test("sufficient committed output does not reserve a nonexistent replacement can
   }
 });
 
+test("mandatory first renders fit their temporary and commit-copy peak", () => {
+  const plan = createRenderPlan(
+    input({
+      rows: [[1], [2]],
+      visibleRange: { first: 0, last: 1 },
+      maxBufferViewportHeights: 0,
+      requestedDpr: 3,
+      currentScale: 0.5,
+      fallbackPageSize: { width: 612, height: 792 },
+      settings: {
+        ...input().settings,
+        memoryLimitMiB: 8,
+        maxCanvasPixels: 750_000,
+        maxCanvasDimension: 1024,
+        minRenderDpr: 1,
+      },
+    }),
+  );
+  assert.equal(plan.maxConcurrentRenders, 1);
+  assert.equal(plan.directRenderPages.size, 0);
+  assert.ok(plan.estimatedPeakBytes <= 8 * BYTES_PER_MIB);
+  assert.equal(plan.visibleDprReduced, true);
+  assert.equal(plan.pageRenderDprs.get(1), plan.pageRenderDprs.get(2));
+});
+
+test("same-scale quality upgrades reuse committed pixels when replacement cannot fit", () => {
+  const firstDpr = 721 / 306;
+  const secondDpr = 761 / 306;
+  const firstBytes = 721 * 934 * 4;
+  const secondBytes = 761 * 985 * 4;
+  const plan = createRenderPlan(
+    input({
+      rows: [[1], [2]],
+      visibleRange: { first: 0, last: 1 },
+      maxBufferViewportHeights: 0,
+      requestedDpr: 3,
+      currentScale: 0.5,
+      fallbackPageSize: { width: 612, height: 792 },
+      committedPageRenderDprs: new Map([
+        [1, firstDpr],
+        [2, secondDpr],
+      ]),
+      committedPageBytes: new Map([
+        [1, firstBytes],
+        [2, secondBytes],
+      ]),
+      settings: {
+        ...input().settings,
+        memoryLimitMiB: 8,
+        maxCanvasPixels: 750_000,
+        maxCanvasDimension: 1024,
+        minRenderDpr: 1,
+      },
+    }),
+  );
+  assert.ok(plan.pageRenderDprs.get(1)! <= firstDpr + 1e-6);
+  assert.equal(plan.visibleQualityUpgradeCount, 0);
+  assert.ok(plan.estimatedPeakBytes <= 8 * BYTES_PER_MIB);
+  assert.ok(
+    plan.estimatedSteadyBytes >= firstBytes + secondBytes,
+    "reused allocations stay accounted",
+  );
+  assert.equal(plan.directRenderPages.size, 0);
+});
+
+for (const [requestedDpr, allowVisibleDirectRendering] of [
+  [1, false],
+  [1, true],
+  [3, false],
+  [3, true],
+] as const) {
+  test(`canvas-limited zoom replacements fit peak while preserving fallback (DPR ${requestedDpr}, direct ${allowVisibleDirectRendering})`, () => {
+    const oldBytes = 761 * 985 * 4;
+    const base = input({
+      rows: [[1]],
+      visibleRange: { first: 0, last: 0 },
+      maxBufferViewportHeights: 0,
+      requestedDpr,
+      currentScale: 12.375,
+      fallbackPageSize: { width: 612, height: 792 },
+      fixedOccupiedBytes: oldBytes,
+      fixedReplacementPageBytes: new Map([[1, oldBytes]]),
+      settings: {
+        ...input().settings,
+        memoryLimitMiB: 5,
+        maxCanvasPixels: 750_000,
+        maxCanvasDimension: 1024,
+        minRenderDpr: 1,
+        allowVisibleDirectRendering,
+      },
+    });
+    const plan = createRenderPlan(base);
+    const dpr = plan.pageRenderDprs.get(1)!;
+    assert.ok(plan.estimatedPeakBytes <= 5 * BYTES_PER_MIB);
+    assert.ok(plan.estimatedSteadyBytes > oldBytes, "fallback remains occupied");
+    assert.equal(plan.directRenderPages.has(1), false);
+    assert.equal(plan.canvasLimitPages.has(1), true);
+    assert.equal(plan.memoryLimitPages.has(1), true);
+    assert.ok(dpr > 0 && dpr < 1);
+
+    // Once the placeholder is replaced, any quality upgrade must still fit both
+    // the committed bitmap and its temporary replacement, then stabilize.
+    let committedDpr = dpr;
+    for (let pass = 0; pass < 3; pass++) {
+      const raster = resolveRasterDimensions(
+        612 * base.currentScale,
+        792 * base.currentScale,
+        committedDpr,
+        750_000,
+        1024,
+      );
+      const upgraded = createRenderPlan({
+        ...base,
+        fixedOccupiedBytes: 0,
+        fixedReplacementPageBytes: new Map(),
+        committedPageRenderDprs: new Map([[1, committedDpr]]),
+        committedPageBytes: new Map([[1, raster.width * raster.height * 4]]),
+      });
+      assert.ok(upgraded.estimatedPeakBytes <= 5 * BYTES_PER_MIB);
+      assert.equal(upgraded.directRenderPages.has(1), false);
+      if (pass === 2) assert.equal(upgraded.visibleQualityUpgradeCount, 0);
+      committedDpr = upgraded.pageRenderDprs.get(1)!;
+    }
+  });
+}
+
+test("ordinary memory fitting respects the quality floor and disabled DPR reduction", () => {
+  for (const allowDprReduction of [false, true]) {
+    const plan = createRenderPlan(
+      input({
+        rows: [[1]],
+        visibleRange: { first: 0, last: 0 },
+        maxBufferViewportHeights: 0,
+        requestedDpr: 2,
+        fallbackPageSize: { width: 1000, height: 1000 },
+        settings: { ...input().settings, minRenderDpr: 1, allowDprReduction },
+      }),
+    );
+    assert.equal(plan.pageRenderDprs.get(1), allowDprReduction ? 1 : 2);
+    assert.ok(plan.estimatedPeakBytes > 5 * BYTES_PER_MIB, "mandatory floor overage is explicit");
+    assert.equal(plan.canvasLimitPages.size, 0);
+    assert.equal(plan.directRenderPages.size, 0);
+  }
+});
+
+test("observed allocation ceilings below the quality floor still permit replacement peak fitting", () => {
+  const oldBytes = 3_000_000;
+  const plan = createRenderPlan(
+    input({
+      rows: [[1]],
+      visibleRange: { first: 0, last: 0 },
+      maxBufferViewportHeights: 0,
+      requestedDpr: 3,
+      fallbackPageSize: { width: 1000, height: 1000 },
+      pageRenderDprLimits: new Map([[1, 0.7]]),
+      fixedOccupiedBytes: oldBytes,
+      fixedReplacementPageBytes: new Map([[1, oldBytes]]),
+      settings: { ...input().settings, minRenderDpr: 1 },
+    }),
+  );
+  assert.ok(plan.pageRenderDprs.get(1)! < 0.7);
+  assert.ok(plan.estimatedSteadyBytes > oldBytes);
+  assert.ok(plan.estimatedPeakBytes <= 5 * BYTES_PER_MIB);
+  assert.equal(plan.canvasLimitPages.has(1), true);
+  assert.equal(plan.memoryLimitPages.has(1), true);
+});
+
+test("mixed mandatory canvas ceilings preserve each page's applicable quality floor", () => {
+  const oldBytes = 3_000_000;
+  const plan = createRenderPlan(
+    input({
+      rows: [[1, 2]],
+      visibleRange: { first: 0, last: 0 },
+      maxBufferViewportHeights: 0,
+      requestedDpr: 3,
+      pageBaseSizes: new Map([
+        [1, { width: 500, height: 500 }],
+        [2, { width: 6120, height: 7920 }],
+      ]),
+      fixedOccupiedBytes: oldBytes,
+      fixedReplacementPageBytes: new Map([[2, oldBytes]]),
+      settings: {
+        ...input().settings,
+        maxCanvasPixels: 750_000,
+        maxCanvasDimension: 1024,
+        minRenderDpr: 1,
+      },
+    }),
+  );
+  assert.equal(plan.pageRenderDprs.get(1), 1);
+  assert.ok(plan.pageRenderDprs.get(2)! < 1);
+  assert.ok(plan.estimatedPeakBytes <= 5 * BYTES_PER_MIB);
+  assert.equal(plan.directRenderPages.size, 0);
+});
+
 test("high-zoom buffer admission remains stable after constrained pages commit", () => {
   const base = input({
     rows: [[1], [2]],

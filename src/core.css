@@ -172,6 +172,25 @@
   .pdf-text-selection-highlight {
     background: var(--pdf-ui-color-text-highlight, rgb(40 85 166 / 42%));
   }
+  /* Consumer controls stay independent of raster, text, and annotation replacement. */
+  .pdf-page-overlay-host {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    pointer-events: none;
+  }
+  .pdf-page-overlay-host[hidden] {
+    display: none !important;
+  }
+  .pdf-page-overlay {
+    position: absolute;
+    width: max-content;
+    height: max-content;
+    pointer-events: none;
+  }
+  .pdf-page-overlay > * {
+    pointer-events: auto;
+  }
   /* Functional subset adapted from Mozilla PDF.js pdf_viewer.css `.annotationLayer` (Apache-2.0). */
   .pdf-annotation-layer {
     position: absolute;
@@ -903,6 +922,9 @@
 }
 
 @media print {
+  .pdf-page-overlay-host {
+    display: none !important;
+  }
   /*
    * Controlled native printing renders from a package-owned body child.
    * Neutralize host-app viewport sizing/clipping so all prepared sheets can

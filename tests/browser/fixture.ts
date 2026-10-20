@@ -305,6 +305,8 @@ const gateNextNamedDestination = (): PageAcquisitionGate => {
   namedDestinationGates.push({ entered: markEntered, settlement });
   return { entered, release: () => resolve() };
 };
+let instrumentDetailPage: ((page: PDFJS.PDFPageProxy) => void) | null = null;
+let cleanupDetailInstrumentation: (() => void) | null = null;
 const fixturePdfjs = {
   ...PDFJS,
   getDocument: (...args: Parameters<typeof PDFJS.getDocument>) => {
@@ -344,7 +346,9 @@ const fixturePdfjs = {
                 gate.entered();
                 await gate.settlement;
               }
-              return target.getPage(pageNo);
+              const page = await target.getPage(pageNo);
+              instrumentDetailPage?.(page);
+              return page;
             };
           }
           if (property === "getDestination") {
@@ -594,36 +598,82 @@ window.fixture = {
     fontRendering: "native" | "geometric" = "native",
   ) {
     await primary.close();
+    window.fixture.detailViewer?.destroy();
+    cleanupDetailInstrumentation?.();
     window.fixture.fontSource = sourceUrl;
-    const task = PDFJS.getDocument({ url: "/fixture.pdf" });
-    const pdf = await task.promise;
-    const pdfPage = await pdf.getPage(1);
-    const prototype = Object.getPrototypeOf(pdfPage) as { render: typeof pdfPage.render };
-    const original = prototype.render;
-    // Record the PDF.js boundary, not the renderer's private crop planner.
-    prototype.render = function (parameters) {
-      const canvas = parameters.canvas ?? parameters.canvasContext?.canvas;
-      if (canvas instanceof HTMLCanvasElement) {
-        window.fixture.detailRenderCalls.push({
-          canvas,
-          transform: [...(parameters.transform ?? [1, 0, 0, 1, 0, 0])],
-          width: parameters.viewport.width,
-          height: parameters.viewport.height,
-          rotation: parameters.viewport.rotation,
-          explicitContext: parameters.canvas == null,
-        });
-        const canvases = new Set([
-          ...window.fixture.detailRenderCalls.map(call => call.canvas),
-          ...document.querySelectorAll<HTMLCanvasElement>("#detail-viewer canvas"),
-        ]);
-        window.fixture.detailAllocationPeakBytes = Math.max(
-          window.fixture.detailAllocationPeakBytes,
-          [...canvases].reduce((bytes, canvas) => bytes + canvas.width * canvas.height * 4, 0),
-        );
-      }
-      return original.call(this, parameters);
+    const canvases = new Set<HTMLCanvasElement>();
+    const pages = new Map<PDFJS.PDFPageProxy, PDFJS.PDFPageProxy["render"]>();
+    const dimensions = ["width", "height"] as const;
+    const descriptors = dimensions.map(name =>
+      Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, name)!,
+    );
+    const sample = () => {
+      window.fixture.detailAllocationPeakBytes = Math.max(
+        window.fixture.detailAllocationPeakBytes,
+        [...canvases].reduce((bytes, canvas) => bytes + canvas.width * canvas.height * 4, 0),
+      );
     };
-    await task.destroy();
+    const track = (canvas: HTMLCanvasElement) => {
+      if (canvases.has(canvas)) return;
+      canvases.add(canvas);
+      dimensions.forEach((name, index) => {
+        const descriptor = descriptors[index];
+        Object.defineProperty(canvas, name, {
+          configurable: true,
+          get() {
+            return descriptor.get!.call(this);
+          },
+          set(value: number) {
+            descriptor.set!.call(this, value);
+            sample();
+          },
+        });
+      });
+    };
+    const recordRender =
+      (original: PDFJS.PDFPageProxy["render"], page: PDFJS.PDFPageProxy) =>
+      (parameters: Parameters<PDFJS.PDFPageProxy["render"]>[0]) => {
+        const canvas = parameters.canvas ?? parameters.canvasContext?.canvas;
+        if (canvas instanceof HTMLCanvasElement) {
+          window.fixture.detailRenderCalls.push({
+            canvas,
+            transform: [...(parameters.transform ?? [1, 0, 0, 1, 0, 0])],
+            width: parameters.viewport.width,
+            height: parameters.viewport.height,
+            rotation: parameters.viewport.rotation,
+            explicitContext: parameters.canvas == null,
+          });
+          // Only initialized PDF.js targets and attached page rasters participate:
+          // not scratch/reference canvases or native 300x150 uninitialized stores.
+          track(canvas);
+          for (const attached of document.querySelectorAll<HTMLCanvasElement>(
+            "#detail-viewer .pdf-page > canvas",
+          )) {
+            track(attached);
+          }
+          sample();
+        }
+        return original.call(page, parameters);
+      };
+    instrumentDetailPage = page => {
+      if (pages.has(page)) return;
+      const original = page.render;
+      pages.set(page, original);
+      page.render = recordRender(original, page);
+    };
+    const cleanup = () => {
+      instrumentDetailPage = null;
+      for (const [page, original] of pages) page.render = original;
+      for (const canvas of canvases) {
+        for (const name of dimensions) delete (canvas as Partial<HTMLCanvasElement>)[name];
+      }
+      pages.clear();
+      canvases.clear();
+      window.removeEventListener("pagehide", cleanup);
+      cleanupDetailInstrumentation = null;
+    };
+    cleanupDetailInstrumentation = cleanup;
+    window.addEventListener("pagehide", cleanup, { once: true });
     const host = document.createElement("section");
     host.id = "detail-viewer";
     host.className = "viewer-host";
@@ -631,6 +681,7 @@ window.fixture = {
     document.body.append(host);
     const viewer = new PdfjsViewer({
       rootEl: host,
+      viewerId: "detail",
       fontRendering,
       runtime,
       ui: "default",
@@ -650,9 +701,22 @@ window.fixture = {
       features: { search: false, outline: false, thumbnails: false },
       logger: entry => logs.push(entry),
     });
+    const destroy = viewer.destroy.bind(viewer);
+    viewer.destroy = () => {
+      try {
+        destroy();
+      } finally {
+        cleanup();
+      }
+    };
     window.fixture.detailViewer = viewer;
-    const result = await viewer.load(sourceUrl);
-    if (!result.ok) throw new Error("Detail fixture did not load");
+    try {
+      const result = await viewer.load(sourceUrl);
+      if (!result.ok) throw new Error("Detail fixture did not load");
+    } catch (error) {
+      viewer.destroy();
+      throw error;
+    }
   },
   async compareFontGeometry() {
     const wrapper = document.querySelector<HTMLElement>("#detail-viewer .pdf-page[data-page='1']")!;

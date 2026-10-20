@@ -579,6 +579,13 @@ viewer-managed raster budget; `thumbnailMemoryLimitMiB` controls the thumbnail c
 limit nearby speculative work. These constraints are cumulative. Visible pages retain priority
 even when a configured limit is too small to represent them.
 
+Replacement planning includes the retained bitmap, temporary rendering, and the attached commit
+copy, not just final settled pixels. When permitted, quality is reduced further after concurrency and
+direct-render fallback to fit that peak. Existing same-scale output is reused when an upgrade cannot
+fit. The configured `minRenderDpr` floor still applies unless canvas safety has already forced a lower
+effective DPR; memory fitting may reduce that constrained output further. Visible old-scale bitmaps
+remain available until their replacements commit, and direct-render policy is not bypassed.
+
 #### Inactive viewers and hidden documents
 
 `viewer.setActive()` controls that instance's presentation, rendering window, global-keyboard
@@ -941,6 +948,12 @@ unneeded offscreen page rasters. `setActive(true)` restores presentation and tak
 ownership when the viewer uses a unique `viewerId`; normal buffering resumes only while the owning
 document is visible unless `behavior.reduceRenderingWhenDocumentHidden` is disabled.
 
+Page-anchored overlays are retained but hidden and inert while their viewer is inactive,
+even if consumer controls explicitly request visible/pointer-enabled styles. This also
+applies to registrations that finish while inactive and to subsequent documents. Activation
+restores the same registered DOM without changing consumer-owned hidden, inert, or disabled
+state, re-registering controls, or restoring focus automatically.
+
 Use unique `viewerId` values when multiple globally routed viewers share a runtime.
 After construction, explicit `setActive()` calls control global keyboard and navigation-state
 write ownership; the most recently activated globally routed viewer owns window-level
@@ -1212,6 +1225,90 @@ are detached snapshots, so caller mutation does not affect later queries or view
 Layer mutations additionally return `reason: "unknown-layer"` with all unknown IDs and reject
 the whole operation. Successful changes increment `revision` and preserve PDF radio-button
 group semantics.
+
+### Precise Layer Page Dependencies
+
+By default a visibility change conservatively invalidates the whole document. Applications
+with authoritative knowledge of **every displayed-page effect** of an OCG can opt in to
+page-selective invalidation. Include affected annotations as well as canvas content. An
+incomplete list can leave stale pixels; the viewer does not infer or verify PDF dependencies.
+
+```ts
+const documentId = viewer.documentId;
+const layers = viewer.getLayers();
+if (documentId !== null && layers.ok) {
+  const registered = viewer.setLayerPageDependencies(
+    [{ id: "exact-id-from-getLayers", pages: [20, 21] }],
+    documentId,
+  );
+  if (registered.ok) {
+    await viewer.setLayerVisibility([{ id: "exact-id-from-getLayers", visible: false }]);
+  }
+}
+```
+
+Page numbers are **1-based physical PDF pages**, not labels or zero-based indices. Each
+call atomically replaces the entire map; `[]` clears it. Unknown IDs, duplicate IDs/pages,
+noninteger pages and out-of-range pages return `invalid-dependencies` without changing the
+old map. A registered empty page list attests that the group has no displayed-page effects;
+an **omitted group is unknown**, not empty. If any effectively changed group is unknown,
+including a group implicitly disabled by PDF radio-button rules, that transaction uses
+global invalidation. No-op mutations leave raster validity and revisions unchanged.
+
+Fully mapped changes invalidate the union of affected pages. Other cached/in-flight main,
+detail and thumbnail outputs remain visually equivalent and reusable, even though new work
+receives the latest immutable full display configuration. Stale offscreen pages are rendered
+on demand rather than eagerly rebuilding the document. Raster memory budgets still depend
+on output dimensions and DPR, not group count; estimates exclude PDF.js internal resources.
+
+`documentId` is an opaque, ready-document token, not a PDF fingerprint. Capture it **before**
+asynchronous metadata work. Replacement, close and destroy revoke it and clear registrations;
+passing an old token returns `stale-document`. Ordinary lifecycle/feature failures use the
+existing query-result reasons. No existing API requires dependency registration.
+
+### Page-Anchored DOM Overlays
+
+Use `registerPageOverlay()` to place consumer-owned DOM without querying private page
+wrappers or canvas nodes. It works with generated, custom and headless UI:
+
+```ts
+const documentId = viewer.documentId;
+if (documentId !== null) {
+  const control = document.createElement("button");
+  control.type = "button";
+  control.textContent = "Details";
+  const result = await viewer.registerPageOverlay(
+    {
+      page: 6,
+      anchor: { x: 397.125, y: 554.375 },
+      element: control,
+      onGeometry: ({ x, y, width, height }) => {
+        control.hidden = x < 0 || y < 0 || x > width || y > height;
+      },
+    },
+    documentId,
+  );
+  // Keep result.dispose() to remove it early; document teardown also removes it.
+}
+```
+
+The page is 1-based. Anchors are **native PDF user-space coordinates**, not top-left CSS
+pixels: PDF.js applies the crop box, intrinsic/viewer rotation, user unit and current scale.
+The element's top-left origin is the transformed anchor. Geometry callbacks receive that
+point and full page bounds in CSS pixels, independent of canvas DPR. Consumers own sizing,
+clamping/hiding, icons, labels and interaction. The viewer never silently moves the anchor.
+Callbacks run on registration and viewport changes, not every scroll frame.
+
+Registration is asynchronous because page geometry may need acquisition. Invalid pages,
+nonfinite anchors and invalid elements return `invalid-overlay`; document replacement while
+acquiring returns `stale-document`. Use a distinct element for each registration. The returned
+disposer is idempotent and safe after replacement. Overlay hosts survive raster/detail repaint,
+do not intercept interaction outside their content, and remove registrations on replacement,
+close and destroy. Native controls retain keyboard semantics. Overlays are DOM-only: they
+never enter exported PDF bytes, downloads or controlled print output.
+
+Call `setActive(false)` when switching away from a retained viewer. Its overlay hosts
+are hidden and inert until reactivation; the registrations themselves remain intact.
 
 `getDocumentInformation()` returns normalized data rather than PDF.js objects. Standard PDF
 Info fields and parsed XMP `metadata` remain separate because they may
@@ -1764,6 +1861,27 @@ cleanup, and allocation or rendering fallback. Decision details explain why a de
 requested or skipped, its target versus achieved resolution and dimensions, and canvas or memory
 constraints, including replacement costs. These opt-in lifecycle diagnostics help distinguish
 intentional downsampling from failures without per-frame scrolling or zoom logging.
+
+With a viewer logger enabled, `page-render-completed` includes millisecond durations:
+`elapsedMs` (admission through bitmap commit), `pageAcquisitionMs`, `fontPreparationMs`
+(zero for native rendering), `renderTaskMs` (awaiting the PDF.js render task), and `commitMs`
+(post-render validation, admission, and bitmap publication). `thumbnail-render-completed`
+reports the same fields except font preparation. Totals exclude scheduler queue wait,
+cleanup, and subsequent text/annotation/consumer-overlay presentation. These are wall-clock
+durations, not additive CPU/GPU profiles: PDF.js task time can include streaming, resource
+loading, browser scheduling, and contention with other pages. Timing clocks are not sampled
+for these events without a viewer logger. Detail rendering retains its separate events.
+
+`page-render-admitted` is emitted before page acquisition, unlike `page-render-started`,
+which follows font preparation. `page-render-cancel-requested` and unsuccessful
+`page-render-settled` events include the operation ID, page number, elapsed admission time,
+and stage (`page-acquisition`, `font-preparation`, `raster`, or `commit`). Settlement adds
+`outcome: "cancelled" | "failed"` and follows physical task/resource release; `raster`
+includes viewport/budget/allocation work as well as the PDF.js task. These events distinguish
+queue/admission delays from long preparation and cancellation settlement. They do not imply
+abandoned PDF.js worker work has stopped: an uncancellable operator-list request can outlive
+the canceled operation's wait. No extra timing samples or abort listeners are installed for
+these events when diagnostic logging is disabled.
 
 The logger is for development and host telemetry. User-facing load handling should still
 use `pdf:error` and `viewer.state`; diagnostics do not replace the public event contract.

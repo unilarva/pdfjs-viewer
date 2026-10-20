@@ -40,6 +40,13 @@ interface DocumentLayersPresentationCallbacks {
   ) => Promise<PdfjsViewerLayerMutationResult>;
   readonly reset: () => Promise<PdfjsViewerLayerMutationResult>;
   readonly diagnostic?: (error: unknown) => void;
+  readonly measurement?: (
+    entry: Readonly<{
+      event: string;
+      message: string;
+      details: Readonly<Record<string, unknown>>;
+    }>,
+  ) => void;
 }
 
 /** Owns nested accessible layer controls and delegated interaction. */
@@ -50,6 +57,11 @@ export class DocumentLayersPresentation {
   #generation = 0;
   #state: Readonly<PdfjsViewerLayerState> | null = null;
   #busy = false;
+  #active = false;
+  #status: "idle" | "loading" | "ready" | "error" = "idle";
+  #rendered: Readonly<PdfjsViewerLayerState> | null = null;
+  #controls = new Map<string, HTMLInputElement>();
+  #textDirty = false;
   #onChange: (event: Event) => void;
   #onClick: (event: Event) => void;
 
@@ -65,7 +77,11 @@ export class DocumentLayersPresentation {
         event.target && typeof (event.target as Element).closest === "function"
           ? (event.target as Element).closest<HTMLInputElement>("input[data-pdf-layer-id]")
           : null;
-      if (!input || this.#busy || !this.#options.content?.contains(input)) return;
+      if (!input || !this.#options.content?.contains(input)) return;
+      if (this.#busy || !this.#active) {
+        this.#updateChecked([], this.#state?.layers ?? []);
+        return;
+      }
       void this.#mutate(
         [{ id: input.dataset.pdfLayerId!, visible: input.checked }],
         input.dataset.pdfLayerId!,
@@ -87,8 +103,11 @@ export class DocumentLayersPresentation {
     this.#generation++;
     this.#state = null;
     this.#busy = false;
+    this.#status = "loading";
+    this.#rendered = null;
+    this.#controls.clear();
     const content = this.#options.content;
-    if (!content) return;
+    if (!content || !this.#active) return;
     content.classList.add("pdf-layers--loading");
     content.setAttribute("aria-busy", "true");
     content.replaceChildren(
@@ -97,10 +116,23 @@ export class DocumentLayersPresentation {
   }
 
   ready(state: Readonly<PdfjsViewerLayerState>, preferredFocusId?: string): void {
+    // Committed publication precedes mutation settlement and may synchronously
+    // trigger a successor. All older success/error/finally paths lose ownership.
+    this.#generation++;
     this.#state = state;
     this.#busy = false;
+    this.#status = "ready";
     const content = this.#options.content;
-    if (!content) return;
+    if (!content || !this.#active) return;
+    const started = this.#callbacks.measurement ? performance.now() : 0;
+    if (this.#rendered) {
+      const updated = this.#updateChecked(this.#rendered.layers, state.layers);
+      this.#rendered = state;
+      content.removeAttribute("aria-busy");
+      if (preferredFocusId) this.#focusLayer(preferredFocusId);
+      this.#domTiming(started, 0, updated);
+      return;
+    }
     const activeElement = this.#document?.activeElement;
     const Input = this.#document?.defaultView?.HTMLInputElement;
     const focusId =
@@ -114,6 +146,8 @@ export class DocumentLayersPresentation {
       content.replaceChildren(
         this.#message(this.#options.emptyLabel, "status", "pdf-layers-empty"),
       );
+      this.#rendered = state;
+      this.#domTiming(started, 0, 0);
       return;
     }
     const ownerDocument = this.#document;
@@ -127,20 +161,20 @@ export class DocumentLayersPresentation {
     reset.dataset.pdfjsUiTextContent = "resetLayers";
     reset.textContent = this.#options.resetLabel;
     content.replaceChildren(tree, reset);
-    if (focusId)
-      content
-        .querySelector<HTMLInputElement>(
-          `input[data-pdf-layer-id="${this.#selectorValue(focusId)}"]`,
-        )
-        ?.focus();
+    this.#rendered = state;
+    this.#domTiming(started, this.#controls.size, 0);
+    if (focusId) this.#focusLayer(focusId);
   }
 
   error(error?: unknown): void {
     this.#generation++;
     this.#state = null;
     this.#busy = false;
+    this.#status = "error";
+    this.#rendered = null;
+    this.#controls.clear();
     const content = this.#options.content;
-    if (content) {
+    if (content && this.#active) {
       content.classList.remove("pdf-layers--loading");
       content.classList.add("pdf-layers--error");
       content.removeAttribute("aria-busy");
@@ -155,6 +189,9 @@ export class DocumentLayersPresentation {
     this.#generation++;
     this.#state = null;
     this.#busy = false;
+    this.#status = "idle";
+    this.#rendered = null;
+    this.#controls.clear();
     const content = this.#options.content;
     content?.classList.remove("pdf-layers--loading", "pdf-layers--error");
     content?.removeAttribute("aria-busy");
@@ -167,11 +204,23 @@ export class DocumentLayersPresentation {
     this.#options.content?.removeEventListener("click", this.#onClick);
   }
 
+  /** Defers control construction and updates until the layers sidebar is visible. */
+  setActive(active: boolean): void {
+    if (this.#active === active) return;
+    this.#active = active;
+    if (!active) return;
+    if (this.#status === "ready" && this.#state) this.ready(this.#state);
+    else if (this.#status === "loading") this.loading();
+    else if (this.#status === "error") this.error();
+    if (this.#textDirty) this.setUiText(this.#options);
+  }
+
   /** Refreshes package fallback and status nodes without replacing layer controls. */
   setUiText(options: Omit<DocumentLayersPresentationOptions, "content">): void {
     this.#options = { ...this.#options, ...options };
+    this.#textDirty = !this.#active;
     const content = this.#options.content;
-    if (!content) return;
+    if (!content || !this.#active) return;
     for (const message of content.querySelectorAll<HTMLElement>(
       "[data-pdfjs-ui-text-content='layersLoading']",
     ))
@@ -204,13 +253,16 @@ export class DocumentLayersPresentation {
     try {
       const result = await this.#callbacks.setVisibility(changes);
       if (generation !== this.#generation) return;
-      if (result.ok) this.#focusLayer(focusId);
+      if (result.ok) this.ready(result, focusId);
       else if (result.reason !== "cancelled")
         this.error("error" in result ? result.error : result.reason);
     } catch (error) {
       if (generation === this.#generation) this.error(error);
     } finally {
-      if (generation === this.#generation) this.#setBusy(false);
+      if (generation === this.#generation) {
+        this.#updateChecked([], this.#state?.layers ?? []);
+        this.#setBusy(false);
+      }
     }
   }
 
@@ -220,13 +272,16 @@ export class DocumentLayersPresentation {
     try {
       const result = await this.#callbacks.reset();
       if (generation !== this.#generation) return;
-      if (result.ok) return;
+      if (result.ok) this.ready(result);
       else if (result.reason !== "cancelled")
         this.error("error" in result ? result.error : result.reason);
     } catch (error) {
       if (generation === this.#generation) this.error(error);
     } finally {
-      if (generation === this.#generation) this.#setBusy(false);
+      if (generation === this.#generation) {
+        this.#updateChecked([], this.#state?.layers ?? []);
+        this.#setBusy(false);
+      }
     }
   }
 
@@ -240,6 +295,7 @@ export class DocumentLayersPresentation {
       input.type = "checkbox";
       input.checked = node.visible;
       input.dataset.pdfLayerId = node.id;
+      this.#controls.set(node.id, input);
       const text = ownerDocument.createElement("span");
       if (node.name.trim()) text.textContent = node.name;
       else {
@@ -282,31 +338,56 @@ export class DocumentLayersPresentation {
   }
 
   #focusLayer(id: string): void {
-    this.#options.content
-      ?.querySelector<HTMLInputElement>(`input[data-pdf-layer-id="${this.#selectorValue(id)}"]`)
-      ?.focus();
+    if (this.#active) this.#controls.get(id)?.focus();
+  }
+
+  /** Shared branches require no traversal and only effective differences write DOM. */
+  #updateChecked(
+    before: readonly PdfjsViewerLayerNode[],
+    after: readonly PdfjsViewerLayerNode[],
+  ): number {
+    if (before === after) return 0;
+    let updated = 0;
+    after.forEach((node, index) => {
+      const previous = before[index];
+      if (node === previous) return;
+      if (node.kind === "group") {
+        const control = this.#controls.get(node.id);
+        if (control && control.checked !== node.visible) {
+          control.checked = node.visible;
+          updated++;
+        }
+      } else {
+        updated += this.#updateChecked(
+          previous?.kind === "label" ? previous.children : [],
+          node.children,
+        );
+      }
+    });
+    return updated;
+  }
+
+  #domTiming(started: number, createdControls: number, updatedControls: number): void {
+    if (!this.#callbacks.measurement) return;
+    try {
+      this.#callbacks.measurement({
+        event: "layers-dom",
+        message: "Measured optional-content controls",
+        details: { elapsedMs: performance.now() - started, createdControls, updatedControls },
+      });
+    } catch {}
   }
 
   #setBusy(busy: boolean): void {
     this.#busy = busy;
     const content = this.#options.content;
-    if (!content) return;
+    if (!content || !this.#active) return;
     content.toggleAttribute("aria-busy", busy);
-    for (const control of content.querySelectorAll<HTMLInputElement | HTMLButtonElement>(
-      "input, button",
-    )) {
-      control.disabled = busy;
-    }
   }
 
   #diagnostic(error: unknown): void {
     try {
       this.#callbacks.diagnostic?.(error);
     } catch {}
-  }
-
-  /** Escapes the only characters that can terminate this quoted attribute selector. */
-  #selectorValue(value: string): string {
-    return value.replace(/["\\]/g, "\\$&");
   }
 }

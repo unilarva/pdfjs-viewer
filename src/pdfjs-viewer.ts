@@ -119,6 +119,7 @@ import {
 } from "./document-attachments.js";
 import { DocumentAttachmentsPresentation } from "./document-attachments-presentation.js";
 import { DocumentLayers } from "./document-layers.js";
+import { LayerPageDependencies } from "./layer-page-dependencies.js";
 import { DocumentLayersPresentation } from "./document-layers-presentation.js";
 import { DocumentPageUsage, type DocumentPageUse } from "./document-page-usage.js";
 import { DocumentTextPresentation } from "./document-text-presentation.js";
@@ -202,6 +203,10 @@ import type {
   PdfjsViewerLayersResult,
   PdfjsViewerLayerVisibilityChange,
   PdfjsViewerLayerMutationResult,
+  PdfjsViewerLayerPageDependency,
+  PdfjsViewerLayerPageDependenciesResult,
+  PdfjsViewerPageOverlay,
+  PdfjsViewerPageOverlayResult,
   PdfjsViewerFormResetResult,
   PdfjsViewerDocumentVariant,
   PdfjsViewerDocumentDataOptions,
@@ -291,6 +296,7 @@ export class PdfjsViewer {
   // --- Instance identity and lifecycle ---
 
   static #nextViewerId = 0;
+  static #nextDocumentId = 0;
   #destroyed = false;
   #viewerLifetime!: LifecycleScope;
   #documentLifetime!: LifecycleScope;
@@ -345,6 +351,9 @@ export class PdfjsViewer {
   #documentInformation = new DocumentInformation();
   #documentAttachments = new DocumentAttachments();
   #documentLayers!: DocumentLayers;
+  #documentId: number | null = null;
+  #layerPageDependencies = new LayerPageDependencies();
+  #installingTargetedRasterState = false;
   #documentNavigation = new DocumentNavigation();
   #documentNavigationHistory = new DocumentNavigationHistory();
   #navigationIntentGeneration = 0;
@@ -585,7 +594,12 @@ export class PdfjsViewer {
       },
       annotationOperatorIds: () => this.#pdfjs.OPS,
       diagnostic: entry => this.#log(entry.level, entry.event, entry.message, entry.details),
-      primaryPressureChanged: pressure => this.#rasterWorkCoordinator.setPrimaryPressure(pressure),
+      diagnosticsEnabled: () => this.#logger != null,
+      primaryPressureChanged: pressure =>
+        this.#rasterWorkCoordinator.setPrimaryPressure(
+          pressure,
+          this.#installingTargetedRasterState,
+        ),
     },
   );
   #scrollRaf: number | null = null;
@@ -1193,12 +1207,21 @@ export class PdfjsViewer {
         },
       );
       this.#documentLayers = new DocumentLayers(this.#features.layers, {
-        committed: (state, renderState) => {
+        committed: (state, renderState, changedIds) => {
+          const affectedPages = this.#layerPageDependencies.affected(changedIds);
           this.#installRasterState(
             renderState.revision,
             this.#formAppearanceRevision,
             renderState.configurationPromise,
+            false,
+            affectedPages,
           );
+          this.#log("debug", "layers-invalidation", "Applied optional-content page invalidation", {
+            changedGroups: changedIds.length,
+            scope: affectedPages ? "pages" : "document",
+            invalidatedPages: affectedPages?.size ?? this.#documentView.pageCount,
+            retainedPages: affectedPages ? this.#documentView.pageCount - affectedPages.size : 0,
+          });
           this.#documentLayersPresentation.ready(state);
           this.#pdfRootEl.dispatchEvent(
             new this.#ownerWindow.CustomEvent("pdf:layerschange", { detail: state }),
@@ -1220,6 +1243,7 @@ export class PdfjsViewer {
         {
           setVisibility: changes => this.setLayerVisibility(changes),
           reset: () => this.resetLayers(),
+          measurement: entry => this.#log("debug", entry.event, entry.message, entry.details),
           diagnostic: error =>
             this.#log(
               "debug",
@@ -1246,6 +1270,9 @@ export class PdfjsViewer {
             this.#scrollToPageWithHistory(pageNo, true);
             if (this.#viewerPanels.isSidebarOverlay()) this.#viewerPanels.setSidebarOpen(false);
           },
+          diagnostic: this.#logger
+            ? entry => this.#log(entry.level, entry.event, entry.message, entry.details)
+            : undefined,
         },
       );
       this.#rasterWorkCoordinator.setAdmissionOwners(
@@ -1306,6 +1333,7 @@ export class PdfjsViewer {
         },
         {
           sidebarOpened: view => {
+            this.#documentLayersPresentation.setActive(view === "layers");
             if (view === "outline") {
               void this.#prepareOutline();
               this.#documentOutlinePresentation.open();
@@ -1319,6 +1347,7 @@ export class PdfjsViewer {
             this.#scheduleContainerLayoutSync();
           },
           sidebarClosed: view => {
+            if (view === "layers") this.#documentLayersPresentation.setActive(false);
             if (view === "outline") this.#documentOutlinePresentation.close();
             if (view === "thumbnails") {
               this.#documentRenderer.setBackgroundRasterWaiting(false);
@@ -1570,7 +1599,9 @@ export class PdfjsViewer {
    *
    * When inactive, the viewer keeps its internal state (e.g. sidebar open), but
    * overlay UI is forced hidden and outside-click closers are disabled so it
-   * cannot interfere with other views. Effective rendering activity also becomes
+   * cannot interfere with other views. Page-overlay hosts are hidden and inert;
+   * reactivation preserves their registrations and consumer-owned DOM state.
+   * Effective rendering activity also becomes
    * inactive, reducing speculative buffering and offscreen raster retention.
    * Inactivity also releases viewer-owned screen wake locks. Owner-document
    * visibility contributes to rendering and wake-lock eligibility independently
@@ -1594,6 +1625,7 @@ export class PdfjsViewer {
       void this.#viewerFullscreen.exit();
     }
     this.#hostActive = next;
+    this.#documentView.setPageOverlaysActive(next);
     this.#reconcileScreenWakeLock();
     this.#syncModeControls();
     this.#syncRuntimeActiveViewer(next);
@@ -1707,6 +1739,9 @@ export class PdfjsViewer {
       ...this.#defaultDocumentOptions,
       ...options.documentOptions,
     });
+    this.#documentId = null;
+    this.#layerPageDependencies.clear();
+    this.#documentView.clearPageOverlays();
     this.#cancelActiveLoad("superseded");
     const requestGeneration = ++this.#documentRequestGeneration;
     const attempt = this.#createLoadAttempt(requestGeneration);
@@ -1781,6 +1816,11 @@ export class PdfjsViewer {
   /** Stable identity of this viewer instance for global routing and navigation-state ownership. */
   public get viewerId(): string {
     return this.#viewerId;
+  }
+
+  /** Opaque ready-document token; capture before async extension work and pass it back on registration. */
+  public get documentId(): number | null {
+    return this.#documentId;
   }
 
   #printState(): Readonly<PdfjsViewerPrintState> {
@@ -2640,6 +2680,79 @@ export class PdfjsViewer {
     if (!this.#features.layers) return { ok: false, reason: "disabled" };
     if (this.#status !== "ready" || !this.#pdf) return { ok: false, reason: "not-ready" };
     return this.#documentLayers.getLayers();
+  }
+
+  /**
+   * Atomically replaces caller-attested complete OCG page dependencies for a captured document.
+   * Pages are 1-based. Omitted groups remain unknown and force conservative invalidation;
+   * an empty registration array clears the map. Incorrectly incomplete lists can retain stale pixels.
+   */
+  public setLayerPageDependencies(
+    dependencies: readonly PdfjsViewerLayerPageDependency[],
+    documentId: number,
+  ): PdfjsViewerLayerPageDependenciesResult {
+    if (this.#destroyed) return { ok: false, reason: "destroyed" };
+    if (!this.#features.layers) return { ok: false, reason: "disabled" };
+    if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+    const layers = this.getLayers();
+    if (!layers.ok) return layers;
+    const ids = new Set<string>();
+    const visit = (nodes: typeof layers.layers): void => {
+      for (const node of nodes) {
+        if (node.kind === "group") ids.add(node.id);
+        else visit(node.children);
+      }
+    };
+    visit(layers.layers);
+    return this.#layerPageDependencies.replace(dependencies, ids, this.#documentView.pageCount)
+      ? { ok: true }
+      : { ok: false, reason: "invalid-dependencies" };
+  }
+
+  /**
+   * Mounts consumer-owned DOM at a native PDF point for the captured ready document.
+   * The returned disposer is idempotent; replacement/close/destroy also removes the overlay.
+   * Geometry callbacks report CSS pixels and leave sizing and edge policy to the consumer.
+   */
+  public async registerPageOverlay(
+    overlay: PdfjsViewerPageOverlay,
+    documentId: number,
+  ): Promise<PdfjsViewerPageOverlayResult> {
+    if (this.#destroyed) return { ok: false, reason: "destroyed" };
+    if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+    if (this.#status !== "ready" || !this.#documentPageUsage)
+      return { ok: false, reason: "not-ready" };
+    if (
+      !overlay ||
+      !Number.isSafeInteger(overlay.page) ||
+      overlay.page < 1 ||
+      overlay.page > this.#documentView.pageCount ||
+      !overlay.anchor ||
+      !Number.isFinite(overlay.anchor.x) ||
+      !Number.isFinite(overlay.anchor.y) ||
+      !(overlay.element instanceof this.#ownerWindow.HTMLElement) ||
+      overlay.element.ownerDocument !== this.#ownerDocument ||
+      overlay.element.contains(this.#pdfRootEl) ||
+      (overlay.onGeometry !== undefined && typeof overlay.onGeometry !== "function")
+    )
+      return { ok: false, reason: "invalid-overlay" };
+    const detached = { ...overlay, anchor: { ...overlay.anchor } };
+    let use: DocumentPageUse | undefined;
+    try {
+      use = await this.#documentPageUsage.acquire(detached.page);
+      if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+      const viewport = use.page.getViewport({ scale: 1, rotation: use.page.rotate });
+      try {
+        return { ok: true, dispose: this.#documentView.registerPageOverlay(detached, viewport) };
+      } catch {
+        return { ok: false, reason: "invalid-overlay" };
+      }
+    } catch (error) {
+      if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+      return { ok: false, reason: "error", error };
+    } finally {
+      use?.release();
+    }
   }
 
   /** Applies one atomic optional-content visibility transaction. */
@@ -3963,6 +4076,9 @@ export class PdfjsViewer {
     renderSettlements: readonly Promise<unknown>[];
     preparationSettlements: readonly Promise<unknown>[];
   } {
+    this.#documentId = null;
+    this.#layerPageDependencies.clear();
+    this.#documentView.clearPageOverlays();
     this.#cancelPresentationMode(true);
     this.#previousBoundaryControlPress?.reset();
     this.#nextBoundaryControlPress?.reset();
@@ -4256,6 +4372,9 @@ export class PdfjsViewer {
   /** Updates lifecycle status and emits a fresh observable state snapshot. */
   #setStatus(status: PdfjsViewerStatus): void {
     const previousStatus = this.#status;
+    if (status === "ready" && this.#documentId === null)
+      this.#documentId = ++PdfjsViewer.#nextDocumentId;
+    else if (status !== "ready") this.#documentId = null;
     this.#status = status;
     this.#syncReadyControls(status === "ready");
     this.#syncDownloadControl();
@@ -5298,7 +5417,14 @@ export class PdfjsViewer {
 
       this.#documentProgressFeedback.update(0.9, 1, false, "render");
 
-      await this.#afterPdfLoaded(pdf, generation);
+      // Surface mounting reconciles immediately, before initial navigation. Do not
+      // admit raster work or pin readiness to that provisional scroll position.
+      const initialAdmission = this.#documentRenderer.suspendAdmission();
+      try {
+        await this.#afterPdfLoaded(pdf, generation);
+      } finally {
+        this.#documentRenderer.resumeAdmission(initialAdmission.token);
+      }
       await this.#waitForDocumentReadiness(pdf, generation, ac.signal);
       if (!this.#isCurrentDocument(pdf, generation) || !this.#isCurrentLoadAttempt(attempt))
         return null;
@@ -5480,10 +5606,15 @@ export class PdfjsViewer {
       ],
     );
     this.#updateFitUI();
-    this.#documentLifetime.requestAnimationFrame(() => {
-      this.#documentView.measureRows();
-      this.#applyPendingInitialNavigation();
-    });
+    await this.#waitForDocumentValue(
+      new Promise<void>(resolve => {
+        this.#documentLifetime.requestAnimationFrame(() => resolve());
+      }),
+      this.#documentLifetime.signal,
+    );
+    if (!this.#isCurrentDocument(pdf, generation)) return;
+    this.#documentView.measureRows();
+    this.#applyPendingInitialNavigation();
 
     // Start optional background feature preparation and kick off rendering.
     if (
@@ -6525,9 +6656,12 @@ export class PdfjsViewer {
       Parameters<PDFJS.PDFPageProxy["render"]>[0]["optionalContentConfigPromise"]
     >,
     force = false,
+    affectedPages?: ReadonlySet<number>,
   ): void {
-    const main = this.#documentRenderer.suspendAdmission();
-    const thumbnails = this.#documentThumbnails.suspendAdmission();
+    const previousTargetedInstall = this.#installingTargetedRasterState;
+    this.#installingTargetedRasterState = affectedPages !== undefined && !force;
+    const main = affectedPages ? null : this.#documentRenderer.suspendAdmission();
+    const thumbnails = affectedPages ? null : this.#documentThumbnails.suspendAdmission();
     try {
       const shared = {
         optionalContentRevision,
@@ -6540,6 +6674,7 @@ export class PdfjsViewer {
             ? this.#pdfjs.AnnotationMode.ENABLE_FORMS
             : this.#pdfjs.AnnotationMode.ENABLE,
         }),
+        affectedPages,
         force,
       );
       this.#documentThumbnails.setRasterState(
@@ -6554,11 +6689,13 @@ export class PdfjsViewer {
           printAnnotationStorageFor: (pageNo: number, revision: number) =>
             this.#documentPresentation.thumbnailStorage(pageNo, revision),
         }),
+        affectedPages,
         force,
       );
     } finally {
-      this.#documentRenderer.resumeAdmission(main.token);
-      this.#documentThumbnails.resumeAdmission(thumbnails.token);
+      if (main) this.#documentRenderer.resumeAdmission(main.token);
+      if (thumbnails) this.#documentThumbnails.resumeAdmission(thumbnails.token);
+      this.#installingTargetedRasterState = previousTargetedInstall;
     }
   }
 

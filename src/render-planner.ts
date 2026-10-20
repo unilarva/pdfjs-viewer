@@ -540,6 +540,54 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
     throw new Error("Render planner selected direct rendering before reducing concurrency to one");
   }
 
+  // Settled output may fit while one temporary replacement (including its
+  // attached commit copy) does not. Fit that transition before admitting it.
+  if (steadyBytes() + temporaryPeakBytes() > limit && input.settings.allowDprReduction) {
+    const targets = new Map(pageRenderDprs);
+    const qualityFloor = Math.min(input.settings.minRenderDpr, input.requestedDpr);
+    const floors = new Map(
+      [...mandatoryPages].map(page => {
+        const ceiling = rasterFor(page, input.requestedDpr).renderDpr;
+        const size = input.pageBaseSizes.get(page) ?? input.fallbackPageSize;
+        // A canvas ceiling already below the configured quality floor must not
+        // prevent further memory fitting. One covered pixel is the lower bound.
+        const floor =
+          ceiling < qualityFloor
+            ? 1 / Math.max(1, size.width * input.currentScale, size.height * input.currentScale)
+            : qualityFloor;
+        return [page, Math.min(targets.get(page)!, floor)];
+      }),
+    );
+    const applyFraction = (fraction: number): void => {
+      desiredSteadyBytes = 0;
+      for (const page of mandatoryPages) {
+        // Fit relative to the effective canvas ceiling, not an unattainable
+        // absolute DPR above that ceiling at extreme zoom.
+        const raster = rasterFor(page, Math.max(floors.get(page)!, targets.get(page)! * fraction));
+        const bytes = rasterBytes(page, raster);
+        pageRenderDprs.set(page, raster.renderDpr);
+        desiredPageBytes.set(page, bytes);
+        desiredSteadyBytes += bytes;
+      }
+    };
+    let low = 0;
+    let high = 1;
+    applyFraction(low);
+    if (steadyBytes() + temporaryPeakBytes() <= limit) {
+      for (let iteration = 0; iteration < DPR_SEARCH_ITERATIONS; iteration++) {
+        const middle = (low + high) / 2;
+        applyFraction(middle);
+        if (steadyBytes() + temporaryPeakBytes() <= limit) low = middle;
+        else high = middle;
+      }
+    }
+    applyFraction(low);
+    for (const page of mandatoryPages) {
+      if (pageRenderDprs.get(page)! < targets.get(page)! - DPR_EPSILON) memoryLimitPages.add(page);
+    }
+    visibleDprReduced = memoryLimitPages.size > 0;
+  }
+
   // Phase 4: Admit complete rows intersecting one total CSS-distance budget,
   // nearest-first and leading-side-first. True document-edge shortage is
   // redistributed; row-boundary overshoot is not.

@@ -145,6 +145,30 @@ test("canceling one preparation caller releases it without canceling shared font
   await owner.close([]);
 });
 
+test("caller abort releases operator-list preparation without waiting for its late settlement", async () => {
+  for (const rejects of [false, true]) {
+    const f = fixture();
+    const owner = new DocumentFonts(f.document);
+    const pending = deferred<typeof f.operators>();
+    f.page.getOperatorList = () => pending.promise as never;
+    const abort = new AbortController();
+    const preparing = owner.prepare(f.page, 2, abort.signal);
+    abort.abort();
+    await preparing;
+    assert.equal(f.loaded(), 0);
+
+    // Another page can prepare while the abandoned PDF.js request is still pending.
+    await owner.prepare(fixture().page, 2);
+    assert.equal(f.loaded(), 1);
+    if (rejects) pending.reject(new Error("late operator-list rejection"));
+    else pending.resolve(f.operators);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    assert.equal(f.loaded(), 1);
+    assert.equal(f.faces.size, 1);
+    await owner.close([]);
+  }
+});
+
 test("closing revokes pending font loads without registering late aliases", async () => {
   const f = fixture(),
     owner = new DocumentFonts(f.document);

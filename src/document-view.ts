@@ -35,6 +35,11 @@ import {
 import type { RenderMotion } from "./render-planner.js";
 import type { CatalogPrintPreference } from "./catalog-page-layout.js";
 import {
+  DocumentPageOverlays,
+  type DocumentPageOverlay,
+  type DocumentPageOverlayViewport,
+} from "./document-page-overlays.js";
+import {
   documentLocationFromDisplay,
   documentLocationToDisplay,
   type DocumentLocation,
@@ -178,6 +183,7 @@ export class DocumentView {
   #renderer: DocumentViewRendererPort;
   #text: DocumentViewTextPort;
   #layout = new PageLayoutEngine();
+  #overlays = new DocumentPageOverlays(page => this.#layout.pageWrapFor(page));
   #content: HTMLDivElement | null = null;
   #pageCount = 0;
   #scale = 1;
@@ -368,6 +374,7 @@ export class DocumentView {
   /** Synchronously drops document topology, surfaces, and pending geometry work. */
   resetDocument(): void {
     this.#revision++;
+    this.#overlays.reset();
     if (this.#geometryFrame != null) this.#cancelFrame(this.#geometryFrame);
     if (this.#layoutMeasurementFrame != null) this.#cancelFrame(this.#layoutMeasurementFrame);
     this.#geometryFrame = null;
@@ -447,6 +454,23 @@ export class DocumentView {
   /** Returns a page wrapper from the current surface registry. */
   pageWrapFor(pageNo: number): HTMLDivElement | null {
     return this.#layout.pageWrapFor(pageNo);
+  }
+  /** Registers consumer DOM using a detached intrinsic, scale-one PDF.js viewport. */
+  registerPageOverlay(
+    overlay: Readonly<DocumentPageOverlay>,
+    viewport: DocumentPageOverlayViewport,
+  ): () => void {
+    if (!Number.isInteger(overlay.page) || overlay.page < 1 || overlay.page > this.#pageCount)
+      throw new Error("Invalid page overlay page");
+    return this.#overlays.register(overlay, viewport, this.#scale, this.#rotation);
+  }
+  /** Synchronously releases consumer DOM before asynchronous document replacement starts. */
+  clearPageOverlays(): void {
+    this.#overlays.reset();
+  }
+  /** Applies host activity to retained and subsequently registered page overlays. */
+  setPageOverlaysActive(active: boolean): void {
+    this.#overlays.setActive(active);
   }
   /** Resolves a client point to the geometrically nearest page in the nearest row. */
   nearestPageAt(
@@ -803,7 +827,7 @@ export class DocumentView {
     try {
       this.#scale = next;
       if (anchor) this.#preserveAnchor(previous, next, anchor);
-      this.#renderer.invalidateView({ retainPlaceholders: false, graceMs: 0 });
+      this.#renderer.invalidateView({ retainPlaceholders: true, graceMs: 1200 });
       this.#prepareScaledLayout();
       this.reconcile();
     } finally {
@@ -1404,6 +1428,7 @@ export class DocumentView {
         wrapper.style.height = `${Math.max(1, size.height * this.#scale)}px`;
       }
     }
+    this.#overlays.refresh(this.#scale, this.#rotation);
   }
 
   /** Keeps content width large enough for both the viewport and scaled rows. */

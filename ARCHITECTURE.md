@@ -97,6 +97,8 @@ All other source modules are private implementation details for package maintain
 | `document-attachments.ts`              | Atomic normalized embedded-file metadata and transient lazy attachment-byte reads.                                                                                                      |
 | `document-attachments-presentation.ts` | Attachment-view preparation handoff, safe DOM, download interaction, and reset.                                                                                                         |
 | `document-layers.ts`                   | Display-intent optional-content configuration, detached tree, immutable revisions, and atomic mutation ownership.                                                                       |
+| `layer-page-dependencies.ts`           | Atomic caller-attested complete OCG page-dependency maps and conservative affected-page unions.                                                                                         |
+| `document-page-overlays.ts`            | Document-scoped consumer DOM registration, PDF viewport positioning, geometry callbacks, and disposal.                                                                                  |
 | `document-layers-presentation.ts`      | Nested accessible layer controls, loading/empty/error/reset state, delegated mutation, and focus retention.                                                                             |
 | `document-outline-presentation.ts`     | Outline-view handoff, DOM, filtering, active selection, focus, reveal, scrolling, and reset.                                                                                            |
 | `document-form-state.ts`               | Loaded form baselines, logical bindings, storage translation, dirty/revision state, reset, snapshots, and revision-aware export queue.                                                  |
@@ -253,6 +255,29 @@ The current owners are:
   owns loading/empty/error/reset presentation and focus retention, and never accesses PDF.js.
   The facade installs each committed configuration across main raster, thumbnail, and
   annotation owners and then dispatches `pdf:layerschange`.
+  Static layer hierarchy/name data is normalized once per document. Visibility projections
+  share unchanged frozen branches; no-op mutations retain the revision and published tree.
+  A staged configuration is transferred at commit, not cloned a second time. The layer
+  panel defers checkbox creation until opened and preserves control DOM/focus thereafter;
+  closed-panel visibility and text changes are applied when it is reopened.
+  Authoritative presentation publication supersedes pending UI settlements, so reentrant
+  consumer mutations cannot be rolled back by an older checkbox/reset result or error.
+- `LayerPageDependencies`: a private detached index of caller-attested complete displayed-page
+  effects. The facade validates its required opaque ready-document token and clears it at
+  load admission, replacement, close and destruction. Unknown changed IDs force global
+  invalidation; known empty sets mean authoritatively no displayed-page effects. Actual
+  changed IDs include implicit radio-group changes and are computed by `DocumentLayers`.
+- `DocumentPageOverlays`: private DOM positioning owned by `DocumentView`, not by the raster
+  owner. Registrations use native PDF coordinates and the actual PDF.js viewport clone, so
+  crop boxes, user units, scale and intrinsic/viewer rotation remain authoritative. The
+  facade acquires a page through `DocumentPageUsage`, checks its captured document token
+  after acquisition, registers the overlay, and immediately releases the page use. Geometry
+  updates follow page-surface transactions, not scrolling or bitmap replacement. Hosts are
+  page-local and pointer-transparent outside consumer elements. The facade forwards host
+  activity through `DocumentView`; the owner hides and inerts existing and newly created
+  hosts without changing consumer nodes or publishing geometry. Activity survives document
+  reset, while registrations do not. Disposal and document reset remove elements and
+  listeners; controlled printing never consumes overlay DOM.
 - `DocumentFormState`: the complete document-scoped form-value owner. It captures visible loaded
   values from the PDF.js field-object `Map` plus initial annotation storage, keeps every widget binding and
   affected page for each logical ID, translates namespaced storage access, owns dirty/storage/page
@@ -672,7 +697,12 @@ or feeds an integer axis ratio back into the requested quality target.
 
 The plan uses exact integer backing dimensions and stable uniform render DPRs, models settled and
 temporary replacement stores at their actual overlapping lifetimes, and reduces concurrency before
-allowing direct visible rendering. Queue admission remains separate from policy: the scheduler renders
+allowing direct visible rendering. If that still cannot fit the mandatory peak, permitted DPR reduction
+fits the retained/temporary/commit-copy transition rather than only the final settled output. The
+configured quality floor is preserved unless a per-canvas ceiling already lies below it; such pages
+can be fitted further down to one covered pixel. Reused committed output keeps its actual cost and
+needs no replacement reservation, so an unaffordable quality upgrade cannot force a memory overage.
+Queue admission remains separate from policy: the scheduler renders
 visible work first, favors the leading edge while scrolling, returns to center-out order when
 stationary, and may preempt only speculative work. `PdfjsViewerRenderingProfileSettings` TSDoc is the
 authoritative consumer-facing sequence for deciding which profile limits to configure; the lifecycle
@@ -906,6 +936,9 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    and viewport or profile changes cannot replace or enlarge that cohort. Subsequent same-document
    plans caused by navigation, zoom, layout, resize, profile, or DPR changes do not reopen
    progress UI.
+   Initial raster admission stays suspended through mounting, the cancellable first geometry
+   frame, and initial navigation. A provisional zero-scroll surface plan must not start page-one
+   work or capture the readiness cohort when the requested initial row is elsewhere.
 10. The facade derives effective rendering activity from host activity and, by default, the
     owning `Document`'s Page Visibility state. Host inactivity and a hidden owner document both
     apply the active profile's inactive buffer, disable committed offscreen retention, cancel
@@ -931,8 +964,11 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    motion becomes stationary 120 ms after the latest scroll sample. Work sufficiently far behind
    current motion may be revoked.
 3. `RasterWorkCoordinator` admits only one thumbnail background lease. Main-document vertical
-   motion, any active primary raster work, transient view work, host/view inactivity, or acquired
-   exclusive work revokes that lease. While thumbnails are visible, `DocumentRenderer` suppresses
+   motion, active primary raster work, transient view work, host/view inactivity, or acquired
+   exclusive work revokes that lease. Targeted optional-content reconciliation may retain an
+   unaffected existing writer while blocking new background admission; this exception never
+   bypasses independent interaction gates or later thumbnail viewport-demand preemption.
+   While thumbnails are visible, `DocumentRenderer` suppresses
    new speculative buffering so the background lane can make progress after required visible work
    settles without overlapping PDF.js page rendering. Closing the view restores profile buffering.
    Revocation removes commit authority immediately but retains the lease, page use, temporary
@@ -1245,9 +1281,88 @@ revisions. A pre-aborted caller or document signal is rejected before either adm
 
 Optional-content groups require a separate `DocumentLayers` owner. It must own the
 detached hierarchy, visibility mutation and revision, PDF.js optional-content
-configuration, persistence/reset policy, and sidebar-view state. The primary renderer,
+configuration and loaded-default reset policy. It does not own consumer persistence or
+sidebar DOM. The primary renderer,
 thumbnail owner, and print owner consume immutable configuration plus revision;
 none owns layer UI or mutates configuration independently.
+
+The full immutable configuration and a page's raster-content validity are separate identities.
+Each targeted transaction installs the latest full configuration for future work but advances
+only affected page generations. Earlier cached/in-flight outputs on unaffected pages are
+visually equivalent and retain commit authority; they must not be invalidated just because
+the global OCG revision/promise changed. Main, detail and thumbnail validity use these local
+generations. Affected staging work loses authority, while old committed pixels remain until
+atomic replacement and offscreen work refreshes lazily. Annotation presentation follows the
+affected output identity. The facade does not globally suspend raster admission for targeted
+OCG transactions. Unknown dependencies and unrelated global changes retain full suspension
+and invalidation safeguards. Dependency correctness is caller-attested, not inferred from PDF
+positions or operator-list scans. Managed raster estimates exclude PDF.js internal resources;
+OCG count never multiplies canvas-memory budgets.
+
+The opt-in generic OCG benchmark is `node scripts/benchmark-ocg.mjs --repeat-each=3`.
+Use `PDFJS_VIEWER_OCG_DEPENDENCIES=registered` to exercise complete dependency maps;
+`PDFJS_VIEWER_OCG_BASELINE_REF=<git-ref>` benchmarks a frozen committed module without
+changing the worktree. Generated ordinary and 2/6/12-alternative 240-page fixtures include
+shared-page, multipage, radio-group and unknown-dependency cases. Each run retains raw
+diagnostics, semantic render/cancel counts and timing summaries under `test-results/ocg-*`.
+Timings are descriptive and include instrumentation/host contention, not brittle acceptance
+thresholds. The benchmark does not isolate PDF.js operator-list or internal-memory costs.
+
+For representative consumer documents, the same harness accepts an external PDF without
+copying it into this repository or imposing document-specific semantics:
+
+```sh
+PDFJS_VIEWER_BENCHMARK_PDF=/absolute/path/example.pdf \
+PDFJS_VIEWER_BENCHMARK_PAGES=6,7 \
+node scripts/benchmark-ocg.mjs --project=chromium --project=firefox --repeat-each=3 --retries=0
+```
+
+Pages are physical, 1-based, and default to page 1. Each case compares native and geometric
+viewer font policies with default balanced scheduling at DPR 1, then destroys the viewer
+and renders the same page with bare native PDF.js at matching raster dimensions and annotation
+mode. Separate fresh documents measure cold raster, warm raster, warm all-OCGs-hidden raster,
+and explicit operator-list acquisition with operation counts. The operator probe never warms
+the measured cold raster. Only this test harness enables PDF.js `pdfBug` statistics; production
+does not. `Page Request` ends at display readiness, not completion of every operator-list chunk;
+`Rendering` includes streamed-resource waits and scheduling, not just canvas execution.
+
+`PDFJS_VIEWER_BENCHMARK_CONCURRENCY=1` and `PDFJS_VIEWER_BENCHMARK_BUFFER=0` independently
+override existing profile knobs to diagnose contention; neither changes production defaults.
+`PDFJS_VIEWER_BENCHMARK_MODULE=/absolute/frozen/index.js` compares an existing frozen build.
+Raw reports retain lifecycle/layer/render logs, acquisition/font/task/commit timings, explicit
+operator-list timings, and bare-render timings. Summaries include module and PDF SHA-256,
+browser version in raw reports, min/median/max, profile knobs, and sample counts.
+
+The viewer runs before bare PDF.js, and resource/OS caches are not reset, so do not interpret
+their ratio as isolated framework overhead or Firefox's built-in viewer performance. Hidden
+layers still require PDF.js processing; all-hidden rendering is not an equivalent unlayered
+document. Inspect per-page operations and cold/warm differences before considering generator
+or upstream PDF.js work. Never filter hidden operators or monkeypatch PDF.js to manufacture
+better timings. These probes do not measure isolated worker CPU, GPU time, or PDF.js heap.
+Private PDFs and generated reports remain outside published fixtures and package artifacts.
+
+The same external-PDF command supports `PDFJS_VIEWER_BENCHMARK_ZOOM=1` for bitmap continuity:
+only that opt-in probe holds a replacement render's settlement past the 1200 ms placeholder
+grace deadline and checks original canvas retention and exactly one replacement task. It
+tests both wheel gestures and explicit zoom. `PDFJS_VIEWER_BENCHMARK_SCROLL=1` records real
+fast scroll events, admission/cancellation stages, and final-target raster latency in native
+and geometric font modes, without artificial delays. Its five jumps span 35-75% of physical
+pages; actual frame times and cached-target state are recorded rather than assumed.
+
+Visible zoom placeholders remain budget-accounted until atomic replacement, including
+successive zoom invalidations. Grace expiry delegates to normal visibility/readiness/pin
+reconciliation, so it can evict unneeded offscreen placeholders without clearing an ordinary
+visible one. Explicit scale changes reuse surfaces and request the same retention as transient
+zoom; this does not extend to rotation/topology changes. Direct attached rendering remains
+an explicitly different budget strategy and cannot preserve pixels it is overwriting.
+
+Canvas cancellation rejects the active PDF.js render task rather than waiting for a complete
+raster. The scheduler still owns its physical slot/resources until that rejection settles.
+Geometric font preparation races its caller's abort signal and can settle without waiting
+for an abandoned `getOperatorList()` request; the PDF.js worker may nevertheless continue
+that uncancellable request and contend with newer work. Admission/cancellation/settlement
+events expose the renderer lifecycle, not proof of worker termination. Never free physical
+canvas ownership early to disguise this distinction.
 
 The facade reads catalog `PageLayout` once through `catalog-page-layout.ts` and hands its two
 projections to `DocumentView`: viewer topology and print preference. Neither `DocumentView` nor

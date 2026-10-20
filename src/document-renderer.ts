@@ -176,6 +176,8 @@ interface DocumentRendererCallbacks {
   readonly ready?: (documentId: number) => void;
   readonly failed?: (documentId: number, error: Error) => void;
   readonly diagnostic?: (entry: Readonly<DocumentRendererDiagnostic>) => void;
+  /** Gates timing when the facade supplies a diagnostic sink without an active logger. */
+  readonly diagnosticsEnabled?: () => boolean;
   readonly primaryPressureChanged?: (pressure: PrimaryRasterPressure) => void;
 }
 
@@ -210,6 +212,7 @@ interface DocumentRendererSnapshot {
 type OutputState = "committed" | "placeholder" | "direct-mutating";
 
 interface RenderOutput {
+  readonly contentGeneration: number;
   readonly documentId: number;
   readonly pageNo: number;
   readonly lease: Readonly<RenderSurfaceLease>;
@@ -224,6 +227,7 @@ interface RenderOutput {
 }
 
 interface OperationContext {
+  readonly contentGeneration: number;
   readonly documentId: number;
   readonly lease: Readonly<RenderSurfaceLease>;
   readonly rasterState: MainRasterState;
@@ -300,6 +304,10 @@ export class DocumentRenderer {
   #renderingActive = true;
   #interactionActive = false;
   #rasterState: MainRasterState = Object.freeze({ optionalContentRevision: 0, annotationMode: 1 });
+  // Full configuration is global; validity belongs to the page, not its config revision.
+  #contentGeneration = 0;
+  #pageContentGenerations = new Map<number, number>();
+  #globalContentGeneration = 0;
   #admissionSuspensions = new Set<symbol>();
   #backgroundRasterWaiting = false;
   #view: RenderViewSnapshot | null = null;
@@ -401,8 +409,16 @@ export class DocumentRenderer {
     return this.#documentId;
   }
 
-  /** Atomically installs semantic display-raster state and invalidates non-equivalent work. */
-  setRasterState(state: Readonly<MainRasterState>, force = false): boolean {
+  /**
+   * Installs the latest full display configuration. A supplied page set attests
+   * visual equivalence everywhere else; undefined or a mode change invalidates globally.
+   * Output and operation generations are immutable, including while old pixels remain visible.
+   */
+  setRasterState(
+    state: Readonly<MainRasterState>,
+    affectedPages?: ReadonlySet<number>,
+    force = false,
+  ): boolean {
     if (
       !Number.isSafeInteger(state.optionalContentRevision) ||
       state.optionalContentRevision < 0 ||
@@ -417,6 +433,18 @@ export class DocumentRenderer {
       state.annotationMode === this.#rasterState.annotationMode
     )
       return false;
+    const targeted =
+      affectedPages !== undefined &&
+      !force &&
+      state.annotationMode === this.#rasterState.annotationMode;
+    const pages = targeted ? new Set(affectedPages) : undefined;
+    const generation = ++this.#contentGeneration;
+    if (pages) {
+      for (const pageNo of pages) this.#pageContentGenerations.set(pageNo, generation);
+    } else {
+      this.#globalContentGeneration = generation;
+      this.#pageContentGenerations.clear();
+    }
     this.#rasterState = Object.freeze({
       optionalContentRevision: state.optionalContentRevision,
       annotationMode: state.annotationMode,
@@ -424,10 +452,31 @@ export class DocumentRenderer {
         ? { optionalContentConfigPromise: state.optionalContentConfigPromise }
         : {}),
     });
-    this.#cancelOperations();
-    this.#rasterFailureAttempts.clear();
-    this.#terminalRasterRequirements.clear();
+    const installed = this.#rasterState;
+    const documentId = this.#documentId;
+    if (pages) {
+      for (const failures of [this.#rasterFailureAttempts, this.#allocationFailureAttempts]) {
+        for (const key of failures.keys()) {
+          if (pages.has(Number(key.slice(0, key.indexOf("|"))))) failures.delete(key);
+        }
+      }
+      for (const key of this.#terminalRasterRequirements) {
+        if (pages.has(Number(key.slice(0, key.indexOf("|")))))
+          this.#terminalRasterRequirements.delete(key);
+      }
+      this.#scheduler.cancelIncompatible(
+        operation => !pages.has(operation.pageNo),
+        task => safely(() => task.cancel()),
+      );
+      for (const pageNo of pages) this.#detailTargets.delete(pageNo);
+    } else {
+      this.#cancelOperations();
+      this.#rasterFailureAttempts.clear();
+      this.#terminalRasterRequirements.clear();
+    }
+    if (this.#rasterState !== installed || this.#documentId !== documentId) return true;
     for (const [pageNo, output] of this.#outputs) {
+      if (pages && !pages.has(pageNo)) continue;
       if (output.state === "committed") {
         this.#replaceOutputRecord(
           pageNo,
@@ -437,7 +486,7 @@ export class DocumentRenderer {
       }
     }
     this.#lastPlanSignature = "";
-    if (this.#view && !this.#admissionSuspensions.size) this.#reconcileCurrent(true);
+    if (this.#view && !this.#admissionSuspensions.size) this.#reconcileCurrent(true, !pages);
     return true;
   }
 
@@ -527,6 +576,8 @@ export class DocumentRenderer {
     this.#ownsPages = false;
     if (pages && ownsPages) void pages.close();
     this.#view = null;
+    this.#pageContentGenerations.clear();
+    this.#globalContentGeneration = ++this.#contentGeneration;
     this.#interactionActive = false;
     this.#cachedTopologyRevision = null;
     this.#cachedGeometryRevision = null;
@@ -636,7 +687,7 @@ export class DocumentRenderer {
     this.#lastPlanSignature = "";
     this.#clearPlaceholderTimer();
     for (const [pageNo, output] of [...this.#outputs]) {
-      if (options.retainPlaceholders && output.state === "committed") {
+      if (options.retainPlaceholders && output.state !== "direct-mutating") {
         this.#replaceOutputRecord(
           pageNo,
           output,
@@ -653,13 +704,8 @@ export class DocumentRenderer {
       this.#placeholderTimer = ownerWindow.setTimeout(() => {
         this.#placeholderTimer = null;
         if (documentId !== this.#documentId) return;
-        for (const output of [...this.#outputs.values()]) {
-          if (output.state !== "placeholder") continue;
-          const required = this.#scheduler.currentRequirementFor(output.pageNo) != null;
-          if (!required || !this.#callbacks.retainPlaceholder?.(output.pageNo)) {
-            this.#evictOutput(output);
-          }
-        }
+        // Reconciliation releases unneeded placeholders, but visible old pixels
+        // must survive the grace deadline until a slow replacement commits.
         this.#lastPlanSignature = "";
         this.#reconcileCurrent(true);
       }, options.graceMs);
@@ -939,7 +985,7 @@ export class DocumentRenderer {
     );
   }
 
-  #reconcileCurrent(force: boolean): void {
+  #reconcileCurrent(force: boolean, preempt = true): void {
     const pdf = this.#pdf;
     const documentId = this.#documentId;
     const view = this.#view;
@@ -984,12 +1030,16 @@ export class DocumentRenderer {
         pageNo => this.#pageSatisfiesPlan(pageNo) || this.#pageHasTerminalFailure(pageNo),
         pageNo => this.#rowIndexFor(pageNo),
       );
-      const preempted = this.#scheduler.preemptForVisible(
-        pageNo => this.#rowIndexFor(pageNo),
-        view.visibleRange.center,
-        view.motion,
-        task => safely(() => task.cancel()),
-      );
+      // Content repaint alone does not revoke an unrelated speculative writer.
+      // Replanning is still required to account for old pixels plus replacements.
+      const preempted = preempt
+        ? this.#scheduler.preemptForVisible(
+            pageNo => this.#rowIndexFor(pageNo),
+            view.visibleRange.center,
+            view.motion,
+            task => safely(() => task.cancel()),
+          )
+        : [];
       const visiblePages = new Set<number>();
       for (let row = view.visibleRange.first; row <= view.visibleRange.last; row++) {
         for (const pageNo of view.rows[row] ?? []) visiblePages.add(pageNo);
@@ -1214,6 +1264,7 @@ export class DocumentRenderer {
         Object.freeze({
           documentId: this.#documentId,
           lease: capturedLease,
+          contentGeneration: this.#contentGenerationFor(operation.pageNo),
           rasterState: operation.requirement.rasterState,
         }),
       );
@@ -1511,7 +1562,7 @@ export class DocumentRenderer {
           maxCanvasDimension: this.#settings.maxCanvasDimension,
           reservedBytes: target.raster.bytes,
           surfaceIdentity: target.base.lease.canvas,
-          rasterState: target.base.rasterState,
+          rasterState: this.#rasterState,
         },
       );
       if (!operation) continue;
@@ -1578,8 +1629,11 @@ export class DocumentRenderer {
           intent: "display",
           annotationMode: base.rasterState.annotationMode,
           ...(operationsFilter ? { operationsFilter } : {}),
-          ...(base.rasterState.optionalContentConfigPromise
-            ? { optionalContentConfigPromise: base.rasterState.optionalContentConfigPromise }
+          ...(operation.requirement.rasterState.optionalContentConfigPromise
+            ? {
+                optionalContentConfigPromise:
+                  operation.requirement.rasterState.optionalContentConfigPromise,
+              }
             : {}),
         },
         undefined,
@@ -1705,6 +1759,13 @@ export class DocumentRenderer {
       this.#scheduler.settleOperation(operation);
       return;
     }
+    const measure =
+      !!this.#callbacks.diagnostic && (this.#callbacks.diagnosticsEnabled?.() ?? true);
+    const started = measure ? performance.now() : 0;
+    let pageAcquisitionMs = 0;
+    let fontPreparationMs = 0;
+    let renderTaskMs = 0;
+    let commitStarted = 0;
     const previous = this.#outputs.get(operation.pageNo);
     const replacesBitmap = previous != null && previous.state !== "direct-mutating";
     let pageUse: DocumentPageUse | null = null;
@@ -1715,20 +1776,59 @@ export class DocumentRenderer {
     this.#activeAnnotationCanvasMaps.set(operation, annotationCanvasMap);
     let committed = false;
     let failure: unknown = null;
+    let stage: "page-acquisition" | "font-preparation" | "raster" | "commit" = "page-acquisition";
+    const reportCancellation = measure
+      ? () => {
+          if (committed) return;
+          this.#diagnostic(
+            "debug",
+            "page-render-cancel-requested",
+            `Cancellation requested for page ${operation.pageNo} render`,
+            {
+              operationId: operation.id,
+              pageNo: operation.pageNo,
+              stage,
+              elapsedMs: performance.now() - started,
+            },
+          );
+        }
+      : null;
     try {
+      if (reportCancellation) {
+        operation.signal.addEventListener("abort", reportCancellation, { once: true });
+        this.#diagnostic(
+          "debug",
+          "page-render-admitted",
+          `Admitted page ${operation.pageNo} render`,
+          {
+            operationId: operation.id,
+            pageNo: operation.pageNo,
+            stage,
+            elapsedMs: 0,
+          },
+        );
+        if (!this.#operationIsCurrent(operation, context)) return;
+      }
       const pages = this.#pages;
       if (!pages) throw new Error("Renderer page usage is unavailable");
+      const acquisitionStarted = measure ? performance.now() : 0;
       pageUse = await pages.acquire(operation.pageNo);
+      if (measure) pageAcquisitionMs = performance.now() - acquisitionStarted;
       const page = pageUse.page;
       if (!this.#operationIsCurrent(operation, context)) return;
       const fonts = this.#fonts;
-      if (fonts)
+      if (fonts) {
+        stage = "font-preparation";
+        const fontsStarted = measure ? performance.now() : 0;
         await fonts.prepare(
           page,
           operation.requirement.rasterState.annotationMode,
           operation.signal,
         );
+        if (measure) fontPreparationMs = performance.now() - fontsStarted;
+      }
       if (!this.#operationIsCurrent(operation, context)) return;
+      stage = "raster";
       const viewerRotation = this.#view?.rotation ?? 0;
       const viewport = page.getViewport({
         scale: operation.requirement.scale,
@@ -1769,6 +1869,7 @@ export class DocumentRenderer {
         const output = Object.freeze({
           documentId: context.documentId,
           pageNo: operation.pageNo,
+          contentGeneration: context.contentGeneration,
           lease: context.lease,
           state: "direct-mutating",
           budget: Object.freeze({ ...budget }),
@@ -1823,7 +1924,13 @@ export class DocumentRenderer {
           await render.promise;
           return;
         }
+        const taskStarted = measure ? performance.now() : 0;
         await render.promise;
+        stage = "commit";
+        if (measure) {
+          commitStarted = performance.now();
+          renderTaskMs = commitStarted - taskStarted;
+        }
         if (!this.#operationIsCurrent(operation, context, budget.renderDpr)) return;
         if (drawing.isContextLost?.())
           throw new CanvasAllocationError("Page canvas context was lost");
@@ -1881,7 +1988,13 @@ export class DocumentRenderer {
           await render.promise;
           return;
         }
+        const taskStarted = measure ? performance.now() : 0;
         await render.promise;
+        stage = "commit";
+        if (measure) {
+          commitStarted = performance.now();
+          renderTaskMs = commitStarted - taskStarted;
+        }
         if (!this.#operationIsCurrent(operation, context, budget.renderDpr)) return;
         if (drawing.isContextLost?.())
           throw new CanvasAllocationError("Page canvas context was lost");
@@ -1912,6 +2025,8 @@ export class DocumentRenderer {
       if (output?.state === "committed" && this.#outputIsCurrent(output)) {
         presentationOutput = output;
       }
+      // End before diagnostics, cleanup, and independent overlay presentation.
+      const completed = measure ? performance.now() : 0;
       this.#diagnostic(
         "debug",
         "page-render-completed",
@@ -1925,11 +2040,21 @@ export class DocumentRenderer {
           dpr: budget.renderDpr,
           previousScale: previous?.budget.scale ?? null,
           scale: budget.scale,
+          ...(measure
+            ? {
+                elapsedMs: completed - started,
+                pageAcquisitionMs,
+                fontPreparationMs,
+                renderTaskMs,
+                commitMs: completed - commitStarted,
+              }
+            : {}),
         },
       );
     } catch (error) {
       failure = error;
     } finally {
+      if (reportCancellation) operation.signal.removeEventListener("abort", reportCancellation);
       if (temporary) {
         temporary.width = 0;
         temporary.height = 0;
@@ -1949,6 +2074,20 @@ export class DocumentRenderer {
         this.#recordRasterFailure(operation, failure);
       }
       const settledKnown = this.#scheduler.settleOperation(operation);
+      if (measure && !committed && (operation.signal.aborted || failure != null)) {
+        this.#diagnostic(
+          "debug",
+          "page-render-settled",
+          `Settled unsuccessful page ${operation.pageNo} render`,
+          {
+            operationId: operation.id,
+            pageNo: operation.pageNo,
+            stage,
+            elapsedMs: performance.now() - started,
+            outcome: operation.signal.aborted ? "cancelled" : "failed",
+          },
+        );
+      }
       if (settledKnown) {
         this.#publishProgress();
         if (this.#view && this.#pdf) {
@@ -2063,6 +2202,7 @@ export class DocumentRenderer {
     const output = Object.freeze({
       documentId: context.documentId,
       pageNo: operation.pageNo,
+      contentGeneration: context.contentGeneration,
       lease: context.lease,
       state: "committed",
       budget,
@@ -2160,8 +2300,7 @@ export class DocumentRenderer {
       context.documentId === this.#documentId &&
       operation.pdf === this.#pdf &&
       operation.documentGeneration === this.#documentId &&
-      operation.requirement.rasterState.optionalContentRevision ===
-        this.#rasterState.optionalContentRevision &&
+      context.contentGeneration === this.#contentGenerationFor(operation.pageNo) &&
       operation.requirement.rasterState.annotationMode === this.#rasterState.annotationMode &&
       this.#scheduler.ownsOperation(operation) &&
       this.#operationSatisfiesCurrent(operation, resultDpr) &&
@@ -2172,7 +2311,20 @@ export class DocumentRenderer {
   #operationSatisfiesCurrent(operation: RenderOperation, resultDpr?: number): boolean {
     if (operation.kind === "detail") return this.#detailIsCurrent(operation);
     const requirement = this.#scheduler.currentRequirementFor(operation.pageNo);
-    return requirement != null && renderOperationSatisfies(operation, requirement, resultDpr);
+    const context = this.#operationContexts.get(operation);
+    return (
+      requirement != null &&
+      context?.contentGeneration === this.#contentGenerationFor(operation.pageNo) &&
+      renderOperationSatisfies(
+        operation,
+        {
+          ...requirement,
+          // Generation above attests visual equivalence across full-config revisions.
+          rasterState: operation.requirement.rasterState,
+        },
+        resultDpr,
+      )
+    );
   }
 
   #pageSatisfiesPlan(pageNo: number): boolean {
@@ -2183,7 +2335,7 @@ export class DocumentRenderer {
     return (
       output.budget.scale === requirement.scale &&
       output.viewerRotation === this.#view?.rotation &&
-      output.rasterState.optionalContentRevision === this.#rasterState.optionalContentRevision &&
+      output.contentGeneration === this.#contentGenerationFor(pageNo) &&
       output.rasterState.annotationMode === this.#rasterState.annotationMode &&
       output.budget.renderDpr + DPR_EPSILON >= requirement.renderDpr &&
       output.lease.canvas.width === output.budget.bufferWidth &&
@@ -2206,7 +2358,7 @@ export class DocumentRenderer {
 
   #requirementKey(pageNo: number): string {
     const requirement = this.#scheduler.currentRequirementFor(pageNo);
-    return `${pageNo}|${requirement?.scale ?? this.#view?.scale ?? 0}|${requirement?.renderDpr ?? 0}|${this.#view?.rotation ?? 0}|${this.#rasterState.optionalContentRevision}|${this.#rasterState.annotationMode}`;
+    return `${pageNo}|${requirement?.scale ?? this.#view?.scale ?? 0}|${requirement?.renderDpr ?? 0}|${this.#view?.rotation ?? 0}|${this.#contentGenerationFor(pageNo)}|${this.#rasterState.annotationMode}`;
   }
 
   #pageHasTerminalFailure(pageNo: number): boolean {
@@ -2215,7 +2367,7 @@ export class DocumentRenderer {
 
   #recordRasterFailure(operation: RenderOperation, error: unknown): void {
     const key = this.#requirementKey(operation.pageNo);
-    const allocationKey = `${operation.pageNo}|${operation.requirement.scale}|${this.#view?.rotation}|${operation.requirement.rasterState.optionalContentRevision}|${operation.requirement.rasterState.annotationMode}`;
+    const allocationKey = `${operation.pageNo}|${operation.requirement.scale}|${this.#view?.rotation}|${this.#contentGenerationFor(operation.pageNo)}|${operation.requirement.rasterState.annotationMode}`;
     const attempts =
       error instanceof CanvasAllocationError
         ? (this.#allocationFailureAttempts.get(allocationKey) ?? 0) + 1
@@ -2281,7 +2433,7 @@ export class DocumentRenderer {
       requirement != null &&
       output.budget.scale === requirement.scale &&
       output.viewerRotation === this.#view?.rotation &&
-      output.rasterState.optionalContentRevision === this.#rasterState.optionalContentRevision &&
+      output.contentGeneration === this.#contentGenerationFor(output.pageNo) &&
       output.rasterState.annotationMode === this.#rasterState.annotationMode &&
       output.budget.renderDpr + DPR_EPSILON >= requirement.renderDpr
     );
@@ -2290,12 +2442,17 @@ export class DocumentRenderer {
   #outputIsCurrent(output: RenderOutput): boolean {
     return (
       output.documentId === this.#documentId &&
-      output.rasterState.optionalContentRevision === this.#rasterState.optionalContentRevision &&
+      output.contentGeneration === this.#contentGenerationFor(output.pageNo) &&
       output.rasterState.annotationMode === this.#rasterState.annotationMode &&
       this.#surfaces.isCurrent(output.lease) &&
       output.lease.canvas.width === output.budget.bufferWidth &&
       output.lease.canvas.height === output.budget.bufferHeight
     );
+  }
+
+  /** Only affected pages advance; old configs remain valid on all other pages. */
+  #contentGenerationFor(pageNo: number): number {
+    return this.#pageContentGenerations.get(pageNo) ?? this.#globalContentGeneration;
   }
 
   #publishProgress(): void {

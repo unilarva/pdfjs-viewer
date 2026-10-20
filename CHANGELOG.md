@@ -4,6 +4,18 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Added `setLayerPageDependencies()` and document-scoped `documentId` tokens so
+  consumers can preserve unaffected page and thumbnail renders during layer changes.
+  Unmapped groups retain conservative document-wide invalidation.
+- Added `registerPageOverlay()` for PDF-anchored consumer DOM with geometry callbacks,
+  automatic cleanup, and inactivity handling. Overlays are excluded from PDF exports
+  and controlled printing.
+- Improved layer-sidebar responsiveness and focus preservation during visibility changes.
+- Kept visible pages onscreen during slow or repeated zoom changes and improved
+  replacement-render memory budgeting.
+- Fixed initial-page rendering and readiness when opening a document at a later page.
+- Added opt-in page and thumbnail render timings, admission, and cancellation diagnostics.
+
 ## 0.8.1
 
 - Fixed overflowing default menus so all controls remain reachable by scrolling.

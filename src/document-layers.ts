@@ -86,6 +86,7 @@ interface DocumentLayersCallbacks {
   readonly committed?: (
     state: Readonly<PdfjsViewerLayerState>,
     renderState: Readonly<DocumentLayersRenderState>,
+    changedIds: readonly string[],
   ) => void;
   readonly diagnostic?: (entry: Readonly<DocumentLayersDiagnostic>) => void;
 }
@@ -130,6 +131,8 @@ export class DocumentLayers {
   #error: unknown = null;
   #nextMutationId = 0;
   #pending: PendingMutation | null = null;
+  #state: Readonly<PdfjsViewerLayerState> | null = null;
+  #result: PdfjsViewerLayersResult | null = null;
 
   constructor(enabled: boolean, callbacks: DocumentLayersCallbacks = {}) {
     this.#enabled = enabled;
@@ -168,6 +171,7 @@ export class DocumentLayers {
       const acquired = await pdf.getOptionalContentConfig({ intent: "display" });
       if (!this.#isCurrent(pdf, documentId)) return null;
       const configuration = this.#clone(acquired.serializable, acquired);
+      if (!this.#isCurrent(pdf, documentId)) return null;
       this.#defaultSerializable = acquired.serializable;
       this.#order = acquired.getOrder();
       this.#ids = Object.freeze([...configuration].map(([id]) => String(id)));
@@ -178,6 +182,10 @@ export class DocumentLayers {
       this.#revision = 0;
       this.#status = "ready";
       this.#error = null;
+      const treeStarted = this.#callbacks.diagnostic ? performance.now() : 0;
+      this.#state = Object.freeze({ revision: 0, layers: this.#normalizedTree() });
+      this.#result = Object.freeze({ ok: true, ...this.#state });
+      this.#timing("layers-tree", treeStarted, { layerCount: this.#ids.length });
       this.#diagnostic(
         "debug",
         "layers-acquisition-complete",
@@ -207,8 +215,7 @@ export class DocumentLayers {
   getLayers(): PdfjsViewerLayersResult {
     const failure = this.#failure();
     if (failure) return failure;
-    const state = this.#publicState();
-    return Object.freeze({ ok: true, ...state });
+    return this.#result!;
   }
 
   /** Returns the exact configuration identity for the current committed revision. */
@@ -251,7 +258,9 @@ export class DocumentLayers {
       );
     }
     const base = this.#pending?.configuration ?? this.#configuration!;
+    const documentId = this.#documentId;
     const staged = this.#clone(base.serializable, base);
+    if (documentId !== this.#documentId) return Promise.resolve(cancelled());
     for (const change of changes) staged.setVisibility(change.id, change.visible, true);
     return this.#stage(staged);
   }
@@ -260,7 +269,9 @@ export class DocumentLayers {
   resetLayers(): Promise<PdfjsViewerLayerMutationResult> {
     const failure = this.#failure();
     if (failure) return Promise.resolve(failure);
+    const documentId = this.#documentId;
     const defaults = this.#clone(this.#defaultSerializable!, this.#configuration!);
+    if (documentId !== this.#documentId) return Promise.resolve(cancelled());
     return this.#stage(defaults);
   }
 
@@ -287,7 +298,9 @@ export class DocumentLayers {
         Object.freeze({ ok: false, reason: "unknown-layer", ids: Object.freeze([]) }),
       );
     const source = this.#pending?.configuration ?? this.#configuration!;
+    const documentId = this.#documentId;
     const staged = this.#clone(source.serializable, source);
+    if (documentId !== this.#documentId) return Promise.resolve(cancelled());
     staged.setOCGState({ state: [...action.state], preserveRB: action.preserveRB });
     return this.#stage(staged);
   }
@@ -303,6 +316,8 @@ export class DocumentLayers {
     this.#defaultVisibility.clear();
     this.#currentVisibility.clear();
     this.#order = null;
+    this.#state = null;
+    this.#result = null;
     this.#ids = Object.freeze([]);
     this.#revision = 0;
     this.#error = null;
@@ -336,23 +351,38 @@ export class DocumentLayers {
     )
       return;
     this.#pending = null;
+    const started = this.#callbacks.diagnostic ? performance.now() : 0;
     const nextVisibility = this.#readVisibility(pending.configuration);
-    const changed = this.#ids.some(
-      layerId => nextVisibility.get(layerId) !== this.#currentVisibility.get(layerId),
+    const changedIds = Object.freeze(
+      this.#ids.filter(
+        layerId => nextVisibility.get(layerId) !== this.#currentVisibility.get(layerId),
+      ),
     );
-    if (!changed) {
-      pending.resolve(Object.freeze({ ok: true, ...this.#publicState() }));
+    if (!changedIds.length) {
+      const result = this.#result!;
+      this.#timing("layers-commit", started, { changedCount: 0 });
+      pending.resolve(result as PdfjsViewerLayerMutationResult);
       return;
     }
-    const configuration = this.#clone(pending.configuration.serializable, pending.configuration);
+    // Staging owns this object exclusively; future mutations clone before writing.
+    const configuration = pending.configuration;
     this.#configuration = configuration;
     this.#configurationPromise = Promise.resolve(configuration);
     this.#currentVisibility = nextVisibility;
     this.#revision++;
+    const treeStarted = this.#callbacks.diagnostic ? performance.now() : 0;
+    this.#state = Object.freeze({
+      revision: this.#revision,
+      layers: this.#projectVisibility(this.#state!.layers),
+    });
+    this.#result = Object.freeze({ ok: true, ...this.#state });
+    const result = this.#result;
     const state = this.#publicState();
     const renderState = this.renderState()!;
+    this.#timing("layers-tree", treeStarted, { changedCount: changedIds.length });
     try {
-      this.#callbacks.committed?.(state, renderState);
+      if (documentId === this.#documentId)
+        this.#callbacks.committed?.(state, renderState, changedIds);
     } catch (error) {
       this.#diagnostic(
         "error",
@@ -368,12 +398,32 @@ export class DocumentLayers {
     this.#diagnostic("debug", "layers-committed", "Committed optional-content visibility", {
       documentId,
       revision: this.#revision,
+      changedCount: changedIds.length,
     });
-    pending.resolve(Object.freeze({ ok: true, ...state }));
+    this.#timing("layers-commit", started, { changedCount: changedIds.length });
+    pending.resolve(result as PdfjsViewerLayerMutationResult);
   }
 
   #publicState(): Readonly<PdfjsViewerLayerState> {
-    return Object.freeze({ revision: this.#revision, layers: this.#normalizedTree() });
+    return this.#state!;
+  }
+
+  /** Reuses unchanged immutable branches; names and hierarchy are document-static. */
+  #projectVisibility(nodes: readonly PdfjsViewerLayerNode[]): readonly PdfjsViewerLayerNode[] {
+    let changed = false;
+    const projected = nodes.map(node => {
+      if (node.kind === "group") {
+        const visible = this.#currentVisibility.get(node.id)!;
+        if (visible === node.visible) return node;
+        changed = true;
+        return Object.freeze({ ...node, visible });
+      }
+      const children = this.#projectVisibility(node.children);
+      if (children === node.children) return node;
+      changed = true;
+      return Object.freeze({ ...node, children });
+    });
+    return changed ? Object.freeze(projected) : nodes;
   }
 
   #normalizedTree(): readonly PdfjsViewerLayerNode[] {
@@ -410,7 +460,18 @@ export class DocumentLayers {
   }
 
   #clone(serializable: SerializableConfig, source: OptionalContentConfig): OptionalContentConfig {
-    return clonePdfjsOptionalContentConfig(serializable, source);
+    const started = this.#callbacks.diagnostic ? performance.now() : 0;
+    const configuration = clonePdfjsOptionalContentConfig(serializable, source);
+    this.#timing("layers-clone", started, { layerCount: this.#ids.length });
+    return configuration;
+  }
+
+  #timing(event: string, started: number, details: Readonly<Record<string, unknown>>): void {
+    if (!this.#callbacks.diagnostic) return;
+    this.#diagnostic("debug", event, "Measured optional-content work", {
+      ...details,
+      elapsedMs: performance.now() - started,
+    });
   }
 
   #readVisibility(configuration: OptionalContentConfig): Map<string, boolean> {

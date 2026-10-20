@@ -44,6 +44,34 @@ test("urgent pressure revokes idempotently and retains occupancy until settlemen
   assert.equal(coordinator.canStartBackground, true);
 });
 
+test("targeted repaint retains an existing lease but blocks new background admission", () => {
+  const coordinator = new RasterWorkCoordinator();
+  coordinator.setViewActive(true);
+  let cancels = 0;
+  const lease = coordinator.acquireBackground(() => {
+    cancels++;
+  })!;
+  coordinator.setPrimaryPressure("urgent", true);
+  coordinator.setPrimaryPressure("urgent");
+  assert.equal(cancels, 0, "republishing unchanged pressure cannot revoke retained work");
+  assert.equal(lease.revoked, false);
+  lease.release();
+  assert.equal(coordinator.canStartBackground, false);
+  assert.equal(
+    coordinator.acquireBackground(() => {}),
+    null,
+  );
+  coordinator.setPrimaryPressure("idle");
+  const next = coordinator.acquireBackground(() => {
+    cancels++;
+  })!;
+  coordinator.setPrimaryPressure("urgent", true);
+  coordinator.setStationary(false);
+  assert.equal(next.revoked, true, "independent interaction gates still revoke work");
+  assert.equal(cancels, 1);
+  next.release();
+});
+
 test("exclusive acquisition suspends owners and waits for physical background drain", async () => {
   const coordinator = new RasterWorkCoordinator();
   coordinator.setViewActive(true);

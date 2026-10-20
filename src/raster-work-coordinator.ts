@@ -61,10 +61,11 @@ export class RasterWorkCoordinator {
     this.#changed = changed ?? null;
   }
 
-  setPrimaryPressure(pressure: PrimaryRasterPressure): void {
+  /** Targeted content repaint may retain an existing visually independent lease. */
+  setPrimaryPressure(pressure: PrimaryRasterPressure, retainBackground = false): void {
     if (this.#pressure === pressure) return;
     this.#pressure = pressure;
-    if (pressure === "urgent") this.#revoke();
+    if (pressure === "urgent" && !retainBackground) this.#revoke();
     this.#changed?.();
   }
 

@@ -8,6 +8,7 @@ import path from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeHintedFontPdf } from "./hinted-font-fixture.mjs";
+import { makeOcgBenchmarkFixture } from "./ocg-benchmark-fixture.mjs";
 
 const packageDir = path.resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.resolve(
@@ -15,6 +16,12 @@ const outDir = path.resolve(
   process.env.PLAYWRIGHT_DIST_DIR ?? ".playwright-dist/default",
 );
 const legacyPdfjs = process.env.PDFJS_VIEWER_TEST_LEGACY === "1";
+const ocgBenchmark = process.env.PDFJS_VIEWER_OCG_BENCHMARK === "1";
+// Explicit file opt-in only; never copy consumer documents into package fixtures.
+const benchmarkPdf =
+  ocgBenchmark && process.env.PDFJS_VIEWER_BENCHMARK_PDF
+    ? await readFile(path.resolve(process.env.PDFJS_VIEWER_BENCHMARK_PDF))
+    : null;
 const pdfWorkerPath = fileURLToPath(
   import.meta.resolve(
     legacyPdfjs
@@ -34,9 +41,29 @@ const [coreCss, defaultUiThemeCss] = await Promise.all([
 await mkdir(outDir, { recursive: true });
 
 await build({
-  entryPoints: [path.join(packageDir, "tests/browser/fixture.ts")],
+  entryPoints: [
+    path.join(
+      packageDir,
+      ocgBenchmark ? "tests/browser/ocg-benchmark-fixture.ts" : "tests/browser/fixture.ts",
+    ),
+  ],
   bundle: true,
-  alias: legacyPdfjs ? { "pdfjs-dist/build/pdf.mjs": "pdfjs-dist/legacy/build/pdf.mjs" } : {},
+  alias: {
+    ...(legacyPdfjs ? { "pdfjs-dist/build/pdf.mjs": "pdfjs-dist/legacy/build/pdf.mjs" } : {}),
+  },
+  plugins:
+    ocgBenchmark && process.env.PDFJS_VIEWER_BENCHMARK_MODULE
+      ? [
+          {
+            name: "frozen-benchmark-module",
+            setup(builder) {
+              builder.onResolve({ filter: /^\.\.\/\.\.\/src\/index$/ }, () => ({
+                path: path.resolve(process.env.PDFJS_VIEWER_BENCHMARK_MODULE),
+              }));
+            },
+          },
+        ]
+      : [],
   format: "esm",
   platform: "browser",
   target: ["es2022"],
@@ -365,6 +392,30 @@ createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   if (url.pathname === "/health") {
     res.end("ok");
+    return;
+  }
+  if (url.pathname === "/external-benchmark.pdf" && benchmarkPdf) {
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", benchmarkPdf.length);
+    res.setHeader("Cache-Control", "no-store");
+    res.end(benchmarkPdf);
+    return;
+  }
+  if (url.pathname === "/ocg-benchmark.pdf" || url.pathname === "/ocg-benchmark.json") {
+    try {
+      const fixture = makeOcgBenchmarkFixture({
+        pages: Number(url.searchParams.get("pages") ?? 240),
+        alternatives: Number(url.searchParams.get("alternatives") ?? 12),
+      });
+      const json = url.pathname.endsWith(".json");
+      const body = json ? JSON.stringify(fixture.manifest) : fixture.pdf;
+      res.setHeader("Content-Type", json ? "application/json" : "application/pdf");
+      res.setHeader("Content-Length", Buffer.byteLength(body));
+      res.end(body);
+    } catch (error) {
+      res.writeHead(400);
+      res.end(String(error));
+    }
     return;
   }
   if (url.pathname === "/" || url.pathname === "/csp") {

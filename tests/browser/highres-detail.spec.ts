@@ -38,7 +38,42 @@ test("@mobile base and detail glyph bounds agree within low-resolution pixel cov
 
 async function zoom(page: Page, scale = 12.375): Promise<void> {
   await page.evaluate(scale => window.fixture.detailViewer!.zoomTo(scale), scale);
-  await expect(page.locator(detail)).toHaveCount(1);
+  await expect
+    .poll(() =>
+      page.locator(detail).evaluateAll(canvases => {
+        const canvas = canvases[0];
+        if (!canvas) return false;
+        const call = [...window.fixture.detailRenderCalls]
+          .reverse()
+          .find(call => call.canvas === canvas);
+        // A retained old-scale crop is not readiness for the requested zoom.
+        const bounds = canvas.parentElement!.getBoundingClientRect();
+        return (
+          !!call &&
+          Math.abs(call.width - bounds.width) < 0.1 &&
+          Math.abs(call.height - bounds.height) < 0.1
+        );
+      }),
+    )
+    .toBe(true);
+}
+
+async function waitForBaseCommit(page: Page, scale: number): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        scale =>
+          window.fixture.logs.some(
+            entry =>
+              entry.viewerId === "detail" &&
+              entry.event === "page-render-completed" &&
+              entry.details?.pageNo === 1 &&
+              entry.details?.scale === scale,
+          ),
+        scale,
+      ),
+    )
+    .toBe(true);
 }
 
 async function checkCrop(page: Page, rotation = 0): Promise<void> {
@@ -318,14 +353,7 @@ test("@mobile details are unnecessary at native resolution and obey a constraine
 }) => {
   await page.evaluate(() => window.fixture.createDetailViewer(8));
   await page.evaluate(() => window.fixture.detailViewer!.zoomTo(0.5));
-  await expect
-    .poll(() =>
-      page
-        .locator(`${wrapper} canvas:not(.pdf-detail-canvas)`)
-        .evaluate(canvas => (canvas as HTMLCanvasElement).width),
-    )
-    .toBeGreaterThan(0);
-  await page.waitForTimeout(300);
+  await waitForBaseCommit(page, 0.5);
   await expect(page.locator(detail)).toHaveCount(0);
   await zoom(page);
   await checkCrop(page);
@@ -358,12 +386,7 @@ test("@mobile a tight memory profile retains its base fallback without oversized
   // Public rendering profiles clamp the main memory budget to at least 5 MiB.
   await page.evaluate(() => window.fixture.createDetailViewer(5));
   await page.evaluate(() => window.fixture.detailViewer!.zoomTo(12.375));
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.fixture.detailRenderCalls.some(call => call.width > 6000)),
-    )
-    .toBe(true);
-  await page.waitForTimeout(300);
+  await waitForBaseCommit(page, 12.375);
   await expect(page.locator(`${wrapper} canvas:not(.pdf-detail-canvas)`)).toBeVisible();
   expect(await page.evaluate(() => window.fixture.detailAllocationPeakBytes)).toBeLessThanOrEqual(
     5 * 1024 * 1024,

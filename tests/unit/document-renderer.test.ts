@@ -12,6 +12,7 @@ import {
 } from "../../src/document-renderer.js";
 import type { PdfjsViewerRenderingProfileSettings } from "../../src/viewer-contracts.js";
 import { installTestPlatform } from "./test-platform.js";
+import { DocumentFonts } from "../../src/document-fonts.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -281,6 +282,595 @@ async function withDetailDocument(
 function detailView(region = { x: 300.25, y: 350.5, width: 100, height: 120 }): RenderViewSnapshot {
   return { ...view(2, 8), visiblePageRegions: new Map([[1, region]]) };
 }
+
+for (const direct of [false, true]) {
+  test(`page completion timings cover ${direct ? "direct" : "temporary"} rendering and font preparation`, async t => {
+    await withFakeDocument(async () => {
+      let clock = 0;
+      t.mock.method(performance, "now", () => (clock += 10));
+      t.mock.method(DocumentFonts.prototype, "prepare", async () => {});
+      Object.defineProperty(globalThis.document, "fonts", { value: {} });
+      const surfaces = new Surfaces();
+      const lease = surfaces.register(1);
+      const completed: Readonly<Record<string, unknown>>[] = [];
+      const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
+      const renderer = new DocumentRenderer(
+        surfaces,
+        "test",
+        settings,
+        {
+          diagnostic: entry => {
+            if (entry.event === "page-render-completed") completed.push(entry.details);
+          },
+        },
+        {
+          document: globalThis.document,
+          setTimeout: globalThis.window.setTimeout,
+          clearTimeout: globalThis.window.clearTimeout,
+        } as unknown as Window,
+      );
+      renderer.setFontRendering("geometric");
+      const width = direct ? 2000.2 : 100;
+      const height = direct ? 1599.8 : 120;
+      renderer.beginDocument(
+        pdf(
+          page({ value: 0 }, () => null, { width, height, renderParams: params }),
+          { value: 0 },
+        ),
+      );
+      renderer.reconcile({
+        ...view(direct ? 1.25 : 1),
+        rowBounds: [{ top: 0, bottom: height }],
+        viewport: { top: 0, height },
+        pageBaseSizes: new Map([[1, { width, height }]]),
+        fallbackPageSize: { width, height },
+      });
+      await settle();
+      assert.equal(params[0].canvas === lease.canvas, direct);
+      assert.equal(completed.length, 1);
+      assert.deepEqual(
+        Object.fromEntries(Object.entries(completed[0]).filter(([key]) => key.endsWith("Ms"))),
+        {
+          elapsedMs: 70,
+          pageAcquisitionMs: 10,
+          fontPreparationMs: 10,
+          renderTaskMs: 10,
+          commitMs: 10,
+        },
+      );
+      await Promise.all(renderer.resetDocument());
+    });
+  });
+}
+
+test("page render timing does not read the clock without an enabled diagnostic logger", async t => {
+  await withFakeDocument(async () => {
+    const now = t.mock.method(performance, "now", () => 0);
+    for (const diagnostic of [undefined, () => {}]) {
+      const surfaces = new Surfaces();
+      surfaces.register(1);
+      const renderer = new DocumentRenderer(surfaces, "test", settings, {
+        diagnostic,
+        diagnosticsEnabled: () => false,
+      });
+      renderer.beginDocument(pdf(page({ value: 0 }), { value: 0 }));
+      renderer.reconcile(view());
+      await settle();
+      assert.equal(renderer.snapshot().renderedPageCount, 1);
+      await Promise.all(renderer.resetDocument());
+    }
+    assert.equal(now.mock.callCount(), 0);
+  });
+});
+
+test("disabled lifecycle diagnostics add no abort listeners, events, or clock samples", async t => {
+  await withFakeDocument(async () => {
+    const now = t.mock.method(performance, "now", () => 0);
+    const listen = t.mock.method(AbortSignal.prototype, "addEventListener");
+    const events: string[] = [];
+    for (const diagnostic of [undefined, (entry: { event: string }) => events.push(entry.event)]) {
+      const surfaces = new Surfaces();
+      surfaces.register(1);
+      const acquisition = deferred<import("pdfjs-dist").PDFPageProxy>();
+      const renderer = new DocumentRenderer(surfaces, "test", settings, {
+        diagnostic,
+        diagnosticsEnabled: () => false,
+      });
+      renderer.beginDocument({ getPage: () => acquisition.promise } as never);
+      renderer.reconcile(view());
+      const settlements = renderer.resetDocument();
+      acquisition.resolve(page({ value: 0 }));
+      await Promise.all(settlements);
+    }
+    assert.equal(now.mock.callCount(), 0);
+    assert.equal(listen.mock.callCount(), 0);
+    assert.equal(
+      events.some(event =>
+        ["page-render-admitted", "page-render-cancel-requested", "page-render-settled"].includes(
+          event,
+        ),
+      ),
+      false,
+    );
+  });
+});
+
+test("admission diagnostics may reentrantly close before page acquisition", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    const acquisitions = { value: 0 };
+    const events: Array<{ event: string; details: Readonly<Record<string, unknown>> }> = [];
+    const renderer = new DocumentRenderer(surfaces, "test", settings, {
+      diagnostic: entry => {
+        if (entry.event.startsWith("page-render-")) events.push(entry);
+        if (entry.event === "page-render-admitted") {
+          renderer.resetDocument();
+          throw new Error("consumer logger failure");
+        }
+      },
+    });
+    renderer.beginDocument(pdf(page({ value: 0 }), acquisitions));
+    renderer.reconcile(view());
+    await settle();
+    assert.equal(acquisitions.value, 0);
+    assert.deepEqual(
+      events.map(entry => entry.event),
+      ["page-render-admitted", "page-render-cancel-requested", "page-render-settled"],
+    );
+    assert.ok(events.every(entry => entry.details.stage === "page-acquisition"));
+    assert.equal(events[2].details.outcome, "cancelled");
+    assert.equal(renderer.snapshot().admittedRenderCount, 0);
+    assert.equal(renderer.snapshot().reservationBytes, 0);
+  });
+});
+
+test("successful lifecycle removes its abort listener and does not report cancellation after commit", async t => {
+  await withFakeDocument(async () => {
+    const listen = t.mock.method(AbortSignal.prototype, "addEventListener");
+    const unlisten = t.mock.method(AbortSignal.prototype, "removeEventListener");
+    const events: string[] = [];
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    const renderer = new DocumentRenderer(surfaces, "test", settings, {
+      diagnostic: entry => {
+        events.push(entry.event);
+        if (entry.event === "page-render-completed") renderer.resetDocument();
+      },
+    });
+    renderer.beginDocument(pdf(page({ value: 0 }), { value: 0 }));
+    renderer.reconcile(view());
+    await settle();
+    assert.equal(listen.mock.callCount(), 1);
+    assert.equal(unlisten.mock.callCount(), 1);
+    assert.equal(listen.mock.calls[0].arguments[1], unlisten.mock.calls[0].arguments[1]);
+    assert.deepEqual(
+      events.filter(event =>
+        ["page-render-admitted", "page-render-cancel-requested", "page-render-settled"].includes(
+          event,
+        ),
+      ),
+      ["page-render-admitted"],
+    );
+    assert.equal(renderer.snapshot().admittedRenderCount, 0);
+  });
+});
+
+test("raster cancellation diagnostics retain ownership until physical settlement despite reentrant close", async t => {
+  await withFakeDocument(async () => {
+    let clock = 0;
+    t.mock.method(performance, "now", () => clock);
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    const physical = deferred<void>();
+    const settled: Readonly<Record<string, unknown>>[] = [];
+    const cancellations: Readonly<Record<string, unknown>>[] = [];
+    const renderer = new DocumentRenderer(surfaces, "test", settings, {
+      diagnostic: entry => {
+        if (entry.event === "page-render-cancel-requested") {
+          cancellations.push(entry.details);
+          renderer.resetDocument();
+          throw new Error("consumer cancellation logger failure");
+        }
+        if (entry.event === "page-render-settled") {
+          settled.push(entry.details);
+          renderer.resetDocument();
+          throw new Error("consumer settlement logger failure");
+        }
+      },
+    });
+    const fakePage = page({ value: 0 });
+    fakePage.render = () =>
+      ({ promise: physical.promise, cancel() {} }) as import("pdfjs-dist").RenderTask;
+    renderer.beginDocument(pdf(fakePage, { value: 0 }));
+    renderer.reconcile(view());
+    await settle();
+    clock = 25;
+    const suspension = renderer.suspendAdmission();
+    assert.equal(cancellations.length, 1);
+    assert.equal(cancellations[0].stage, "raster");
+    assert.equal(cancellations[0].elapsedMs, 25);
+    assert.equal(renderer.snapshot().settlingRenderCount, 1);
+    assert.ok(renderer.snapshot().activeTemporaryBytes > 0);
+    assert.equal(settled.length, 0);
+    clock = 80;
+    physical.reject(new Error("physical cancellation settled"));
+    await suspension.settlement;
+    assert.equal(settled.length, 1);
+    assert.deepEqual(settled[0], {
+      operationId: cancellations[0].operationId,
+      pageNo: 1,
+      stage: "raster",
+      elapsedMs: 80,
+      outcome: "cancelled",
+    });
+    assert.equal(renderer.snapshot().admittedRenderCount, 0);
+    assert.equal(renderer.snapshot().activeTemporaryBytes, 0);
+  });
+});
+
+for (const stage of ["page-acquisition", "font-preparation", "raster", "commit"] as const) {
+  test(`failed render lifecycle reports ${stage} without cancellation events`, async t => {
+    await withFakeDocument(async () => {
+      const surfaces = new Surfaces();
+      const canvas = new FakeCanvas();
+      surfaces.register(1, canvas);
+      const events: Array<{ event: string; details: Readonly<Record<string, unknown>> }> = [];
+      const renderer = new DocumentRenderer(
+        surfaces,
+        "test",
+        settings,
+        { diagnostic: entry => events.push(entry) },
+        {
+          document: globalThis.document,
+          setTimeout: globalThis.window.setTimeout,
+          clearTimeout: globalThis.window.clearTimeout,
+        } as unknown as Window,
+      );
+      const fail = () => {
+        throw new Error("pipeline failure");
+      };
+      if (stage === "font-preparation") {
+        Object.defineProperty(globalThis.document, "fonts", { value: {} });
+        t.mock.method(DocumentFonts.prototype, "prepare", async () => fail());
+        renderer.setFontRendering("geometric");
+      }
+      const fakePage = page({ value: 0 });
+      if (stage === "raster") fakePage.render = fail;
+      if (stage === "commit") t.mock.method(canvas.context, "drawImage", fail);
+      renderer.beginDocument({
+        getPage: async () => (stage === "page-acquisition" ? fail() : fakePage),
+      } as never);
+      renderer.reconcile(view());
+      for (let i = 0; i < 8; i++) await settle();
+      const admitted = events.filter(entry => entry.event === "page-render-admitted");
+      const settled = events.filter(entry => entry.event === "page-render-settled");
+      assert.ok(settled.length > 0);
+      assert.equal(admitted.length, settled.length);
+      for (const [index, entry] of settled.entries()) {
+        assert.equal(entry.details.operationId, admitted[index].details.operationId);
+        assert.equal(entry.details.pageNo, 1);
+        assert.equal(entry.details.stage, stage);
+        assert.equal(entry.details.outcome, "failed");
+        assert.ok(Number(entry.details.elapsedMs) >= 0);
+      }
+      assert.equal(
+        events.some(entry => entry.event === "page-render-cancel-requested"),
+        false,
+      );
+      assert.equal(renderer.snapshot().admittedRenderCount, 0);
+      await Promise.all(renderer.resetDocument());
+    });
+  });
+}
+
+test("selective OCG generations retain unrelated in-flight work and reject repeated stale page work", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    surfaces.register(2);
+    const pending = [deferred<void>(), deferred<void>()];
+    const renders: number[] = [];
+    const cancelled: number[] = [];
+    const configs: unknown[] = [];
+    const fakePdf = {
+      getPage: async (pageNo: number) => ({
+        ...page({ value: 0 }),
+        render: (params: Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]) => {
+          renders.push(pageNo);
+          configs.push(params.optionalContentConfigPromise);
+          return {
+            promise: renders.length <= 2 ? pending[pageNo - 1].promise : Promise.resolve(),
+            // Deliberately uncancellable: settlement must still fail the page-generation check.
+            cancel: () => cancelled.push(pageNo),
+          };
+        },
+      }),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy;
+    const renderer = new DocumentRenderer(surfaces, "test", settings);
+    renderer.beginDocument(fakePdf);
+    renderer.reconcile({ ...view(), rows: [[1, 2]] });
+    await settle();
+    assert.deepEqual(renders, [1, 2]);
+    renderer.setRasterState({ optionalContentRevision: 1, annotationMode: 1 }, new Set([1]));
+    const latest = Promise.resolve({} as never);
+    renderer.setRasterState(
+      { optionalContentRevision: 2, annotationMode: 1, optionalContentConfigPromise: latest },
+      new Set([1]),
+    );
+    assert.deepEqual(cancelled, [1], "unaffected page must never be cancelled");
+    pending[1].resolve();
+    await settle();
+    assert.equal(renderer.snapshot().renderedPageCount, 1, "prior-config unaffected pixels commit");
+    pending[0].resolve();
+    await settle();
+    await settle();
+    assert.deepEqual(renders, [1, 2, 1]);
+    assert.equal(configs[2], latest);
+    assert.equal(renderer.snapshot().renderedPageCount, 2);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("selective OCG invalidation keeps old pixels atomically and leaves offscreen caches lazy", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    const leases = [surfaces.register(1), surfaces.register(2), surfaces.register(3)];
+    const renders: number[] = [];
+    const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
+    const replacement = deferred<void>();
+    const fakePdf = {
+      getPage: async (pageNo: number) => ({
+        ...page({ value: 0 }),
+        render: (input: Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]) => {
+          renders.push(pageNo);
+          params.push(input);
+          return {
+            promise: renders.length > 3 ? replacement.promise : Promise.resolve(),
+            cancel() {},
+          };
+        },
+      }),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy;
+    const renderer = new DocumentRenderer(surfaces, "test", settings);
+    renderer.beginDocument(fakePdf);
+    const all = {
+      ...view(),
+      rows: [[1], [2], [3]],
+      rowBounds: [0, 1, 2].map(i => ({ top: i * 120, bottom: (i + 1) * 120 })),
+      visibleRange: { first: 0, last: 2, center: 1 },
+    };
+    renderer.reconcile(all);
+    await settle();
+    await settle();
+    assert.equal(renderer.snapshot().renderedPageCount, 3);
+    renderer.reconcile({ ...all, visibleRange: { first: 0, last: 0, center: 0 } });
+    const latest = Promise.resolve({} as never);
+    renderer.setRasterState(
+      { optionalContentRevision: 1, annotationMode: 1, optionalContentConfigPromise: latest },
+      new Set([1, 3]),
+    );
+    await settle();
+    assert.deepEqual(renders, [2, 1, 3, 1], "offscreen affected cache is not eagerly repainted");
+    assert.equal(renderer.snapshot().renderedPageCount, 1);
+    assert.ok(leases[0].canvas.width > 0, "affected bitmap survives pending replacement");
+    assert.equal((leases[0].canvas as unknown as FakeCanvas).context.drawCount, 1);
+    assert.equal((leases[1].canvas as unknown as FakeCanvas).context.drawCount, 1);
+    assert.equal(params[3].optionalContentConfigPromise, latest);
+    replacement.resolve();
+    await settle();
+    assert.equal((leases[0].canvas as unknown as FakeCanvas).context.drawCount, 2);
+    renderer.reconcile({
+      ...all,
+      viewport: { top: 240, height: 120 },
+      visibleRange: { first: 2, last: 2, center: 2 },
+    });
+    await settle();
+    await settle();
+    assert.deepEqual(renders, [2, 1, 3, 1, 3]);
+    assert.equal(params[4].optionalContentConfigPromise, latest);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("unaffected detail writers and cached crops survive targeted OCG changes", async () => {
+  await withDetailDocument(async flush => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    const pending = deferred<void>();
+    const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
+    const count = { value: 0 };
+    const renderer = new DocumentRenderer(surfaces, "test", {
+      ...settings,
+      maxCanvasPixels: 1_000_000,
+    });
+    renderer.beginDocument(
+      pdf(
+        page(count, () => (count.value === 2 ? pending : null), { renderParams: params }),
+        { value: 0 },
+      ),
+    );
+    renderer.reconcile(detailView());
+    await settle();
+    await flush();
+    assert.equal(params.length, 2);
+    renderer.setRasterState({ optionalContentRevision: 1, annotationMode: 1 }, new Set([2]));
+    pending.resolve();
+    await settle();
+    await flush();
+    assert.equal(renderer.snapshot().detailCanvasCount, 1);
+    const bytes = renderer.snapshot().detailBytes;
+    renderer.setRasterState({ optionalContentRevision: 2, annotationMode: 1 }, new Set([2]));
+    await flush();
+    assert.equal(params.length, 2);
+    assert.equal(renderer.snapshot().detailBytes, bytes);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("detail admitted after an unrelated OCG change receives latest full configuration", async () => {
+  await withDetailDocument(async flush => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
+    const renderer = new DocumentRenderer(surfaces, "test", {
+      ...settings,
+      maxCanvasPixels: 1_000_000,
+    });
+    renderer.beginDocument(
+      pdf(
+        page({ value: 0 }, () => null, { renderParams: params }),
+        { value: 0 },
+      ),
+    );
+    renderer.reconcile({ ...detailView(), visiblePageRegions: undefined });
+    await settle();
+    const latest = Promise.resolve({} as never);
+    renderer.setRasterState(
+      { optionalContentRevision: 1, annotationMode: 1, optionalContentConfigPromise: latest },
+      new Set(),
+    );
+    renderer.reconcile(detailView());
+    await flush();
+    assert.equal(params.length, 2);
+    assert.equal(params[1].optionalContentConfigPromise, latest);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("affected detail cannot commit across an OCG page generation and replacement uses latest config", async () => {
+  await withDetailDocument(async flush => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    const pending = deferred<void>();
+    const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
+    const count = { value: 0 };
+    const renderer = new DocumentRenderer(surfaces, "test", {
+      ...settings,
+      maxCanvasPixels: 1_000_000,
+    });
+    renderer.beginDocument(
+      pdf(
+        page(count, () => (count.value === 2 ? pending : null), { renderParams: params }),
+        { value: 0 },
+      ),
+    );
+    renderer.reconcile(detailView());
+    await settle();
+    await flush();
+    assert.equal(params.length, 2);
+    const staleCanvas = params[1].canvas as HTMLCanvasElement;
+    const latest = Promise.resolve({} as never);
+    renderer.setRasterState(
+      { optionalContentRevision: 1, annotationMode: 1, optionalContentConfigPromise: latest },
+      new Set([1]),
+    );
+    await settle();
+    await flush();
+    assert.ok(params.length >= 4);
+    assert.equal(staleCanvas.width, 0, "cancelled detail store is released, never committed");
+    assert.ok(params.slice(2).every(input => input.optionalContentConfigPromise === latest));
+    assert.equal(renderer.snapshot().detailCanvasCount, 1);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("selective visible repaint does not preempt an unaffected admitted buffer page", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    surfaces.register(2);
+    const buffer = deferred<void>();
+    const renders: number[] = [];
+    const cancellations: number[] = [];
+    const renderer = new DocumentRenderer(surfaces, "test", {
+      ...settings,
+      maxConcurrentRenders: 1,
+      maxBufferViewportHeights: 1,
+      maxBufferPages: 1,
+    });
+    renderer.beginDocument({
+      getPage: async (pageNo: number) => ({
+        ...page({ value: 0 }),
+        render: () => {
+          renders.push(pageNo);
+          return {
+            promise: pageNo === 2 ? buffer.promise : Promise.resolve(),
+            cancel: () => cancellations.push(pageNo),
+          };
+        },
+      }),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    renderer.reconcile({
+      ...view(),
+      rows: [[1], [2]],
+      rowBounds: [
+        { top: 0, bottom: 120 },
+        { top: 120, bottom: 240 },
+      ],
+    });
+    await settle();
+    assert.deepEqual(renders, [1, 2]);
+    renderer.setRasterState({ optionalContentRevision: 1, annotationMode: 1 }, new Set([1]));
+    await settle();
+    assert.deepEqual(cancellations, []);
+    assert.deepEqual(renders, [1, 2], "buffer keeps its physical slot until completion");
+    buffer.resolve();
+    await settle();
+    await settle();
+    assert.deepEqual(renders, [1, 2, 1]);
+    assert.equal(renderer.snapshot().renderedPageCount, 2);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("OCG presentation generations revoke affected annotation work only and hand off new config", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    surfaces.register(2);
+    const contexts: import("../../src/document-renderer.js").RenderPresentationContext[] = [];
+    const presentation = deferred<void>();
+    const renderer = new DocumentRenderer(surfaces, "test", settings, {
+      present: context => {
+        contexts.push(context);
+        return presentation.promise;
+      },
+    });
+    renderer.beginDocument(
+      pdf(
+        page({ value: 0 }, () => null, { annotationCanvasSize: { width: 10, height: 10 } }),
+        { value: 0 },
+      ),
+    );
+    renderer.reconcile({ ...view(), rows: [[1, 2]] }, { annotations: true, textPages: [] });
+    await settle();
+    const affected = contexts.find(context => context.pageNo === 1)!;
+    const unaffected = contexts.find(context => context.pageNo === 2)!;
+    assert.equal(affected.isCurrent("annotations"), true);
+    assert.equal(unaffected.isCurrent("annotations"), true);
+    const latest = Promise.resolve({} as never);
+    renderer.setRasterState(
+      { optionalContentRevision: 1, annotationMode: 1, optionalContentConfigPromise: latest },
+      new Set([1]),
+    );
+    assert.equal(affected.isCurrent("annotations"), false);
+    assert.equal(unaffected.isCurrent("annotations"), true);
+    assert.ok(
+      [...affected.annotationCanvasMap.values()].every(canvas => canvas.width > 0),
+      "old presentation retains backing stores until its own settlement",
+    );
+    await settle();
+    presentation.resolve();
+    await settle();
+    await settle();
+    assert.equal(contexts.filter(context => context.pageNo === 2).length, 1);
+    const replacement = contexts.filter(context => context.pageNo === 1).at(-1)!;
+    assert.notEqual(replacement, affected);
+    assert.equal(replacement.rasterState.optionalContentConfigPromise, latest);
+    await Promise.all(renderer.resetDocument());
+  });
+});
 
 test("detail reuses the exact base viewport with a clipped transform and no presentation side effects", async () => {
   await withDetailDocument(async flush => {
@@ -2006,37 +2596,287 @@ test("zoom placeholders remain occupied but never satisfy the new plan", async (
   });
 });
 
-test("selected required placeholders survive grace until replacement commit", async () => {
-  await withFakeDocument(async () => {
-    const surfaces = new Surfaces();
-    surfaces.register(1);
-    const renders = { value: 0 };
-    const replacement = deferred<void>();
-    let renderAttempt = 0;
-    const renderer = new DocumentRenderer(surfaces, "test", settings, {
-      retainPlaceholder: pageNo => pageNo === 1,
+for (const pinned of [false, true]) {
+  test(`${pinned ? "selected" : "ordinary visible"} placeholders survive grace until slow replacement commit`, async () => {
+    await withDetailDocument(async flush => {
+      const surfaces = new Surfaces();
+      const lease = surfaces.register(1);
+      const renders = { value: 0 };
+      const replacement = deferred<void>();
+      const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
+      const evicted: number[] = [];
+      let renderAttempt = 0;
+      const renderer = new DocumentRenderer(surfaces, "test", settings, {
+        retainPlaceholder: pageNo => pinned && pageNo === 1,
+        evicted: pageNo => evicted.push(pageNo),
+      });
+      renderer.beginDocument(
+        pdf(
+          page(renders, () => (++renderAttempt === 2 ? replacement : null), {
+            renderParams: params,
+          }),
+          { value: 0 },
+        ),
+      );
+      renderer.reconcile(view(1, 1));
+      await settle();
+      const oldBytes = renderer.snapshot().committedBytes;
+      const canvas = lease.canvas as unknown as FakeCanvas;
+      assert.equal(canvas.context.drawCount, 1);
+
+      renderer.invalidateView({ retainPlaceholders: true, graceMs: 1 });
+      renderer.reconcile(view(1, 1.5));
+      await settle();
+      assert.equal(renders.value, 2);
+      assert.notEqual(
+        params[1].canvas,
+        lease.canvas,
+        "replacement renders into a temporary canvas",
+      );
+      await flush();
+      assert.equal(renderer.snapshot().placeholderPageCount, 1);
+      assert.equal(renderer.snapshot().placeholderBytes, oldBytes);
+      assert.equal(
+        renderer.snapshot().renderedPageCount,
+        0,
+        "old pixels do not satisfy new demand",
+      );
+      assert.equal(lease.canvas.width, 100);
+      assert.equal(lease.canvas.height, 120);
+      assert.equal(lease.canvas.style.width, "100%");
+      assert.equal(
+        canvas.context.drawCount,
+        1,
+        "old bitmap remains untouched while replacement waits",
+      );
+      assert.deepEqual(evicted, []);
+      assert.equal(renders.value, 2, "grace expiry does not start a duplicate replacement");
+      const snapshot = renderer.snapshot();
+      assert.ok(
+        snapshot.placeholderBytes + snapshot.activeTemporaryBytes + snapshot.reservationBytes <=
+          settings.memoryLimitMiB * 1024 * 1024,
+      );
+
+      replacement.resolve();
+      await settle();
+      assert.equal(renderer.snapshot().placeholderPageCount, 0);
+      assert.equal(renderer.snapshot().renderedPageCount, 1);
+      assert.equal(lease.canvas.width, 150);
+      assert.equal(lease.canvas.height, 180);
+      assert.equal(canvas.context.drawCount, 2);
+      assert.equal(renders.value, 2);
+      assert.deepEqual(evicted, []);
+      renderer.resetDocument();
     });
-    renderer.beginDocument(
-      pdf(
-        page(renders, () => (++renderAttempt === 2 ? replacement : null)),
-        { value: 0 },
-      ),
-    );
-    renderer.reconcile(view(1, 1));
-    await settle();
+  });
+}
 
+test("a slow zoom replacement does not pin its placeholder after scrolling offscreen", async () => {
+  await withDetailDocument(async flush => {
+    const surfaces = new Surfaces();
+    const first = surfaces.register(1);
+    const second = surfaces.register(2);
+    const replacement = deferred<void>();
+    const firstRenders = { value: 0 };
+    const secondRenders = { value: 0 };
+    const firstPage = page(firstRenders, () => (firstRenders.value === 2 ? replacement : null));
+    const secondPage = page(secondRenders);
+    const evicted: number[] = [];
+    const renderer = new DocumentRenderer(surfaces, "test", settings, {
+      evicted: pageNo => evicted.push(pageNo),
+    });
+    renderer.beginDocument({
+      getPage: async (pageNo: number) => (pageNo === 1 ? firstPage : secondPage),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    const twoPages = (scale: number, row: number): RenderViewSnapshot => ({
+      ...view(1, scale),
+      rows: [[1], [2]],
+      rowBounds: [
+        { top: 0, bottom: 120 * scale },
+        { top: 120 * scale, bottom: 240 * scale },
+      ],
+      viewport: { top: row * 120 * scale, height: 120 * scale },
+      visibleRange: { first: row, last: row, center: row },
+    });
+    renderer.reconcile(twoPages(1, 0));
+    await settle();
     renderer.invalidateView({ retainPlaceholders: true, graceMs: 1 });
-    renderer.reconcile(view(1, 1.5));
-    await new Promise(resolve => setTimeout(resolve, 5));
-    assert.equal(renderer.snapshot().placeholderPageCount, 1);
-
-    replacement.resolve();
+    renderer.reconcile(twoPages(1.5, 0));
     await settle();
+    await flush();
+    assert.equal(first.canvas.width, 100, "visible placeholder survives expiry");
+
+    renderer.reconcile(twoPages(1.5, 1));
+    await settle();
+    await settle();
+    assert.equal(first.canvas.width, 0, "non-desired offscreen placeholder is evictable");
+    assert.equal(first.canvas.height, 0);
+    assert.deepEqual(evicted, [1]);
     assert.equal(renderer.snapshot().placeholderPageCount, 0);
+    assert.equal(second.canvas.width, 150);
     assert.equal(renderer.snapshot().renderedPageCount, 1);
     renderer.resetDocument();
   });
 });
+
+test("successive zooms retain the old placeholder while replacing a canceled temporary render", async () => {
+  await withDetailDocument(async flush => {
+    const surfaces = new Surfaces();
+    const lease = surfaces.register(1);
+    const renders = { value: 0 };
+    const firstReplacement = deferred<void>();
+    const latestReplacement = deferred<void>();
+    const evicted: number[] = [];
+    const renderer = new DocumentRenderer(surfaces, "test", settings, {
+      evicted: pageNo => evicted.push(pageNo),
+    });
+    renderer.beginDocument(
+      pdf(
+        page(renders, () => {
+          if (renders.value === 2) return firstReplacement;
+          if (renders.value === 3) return latestReplacement;
+          return null;
+        }),
+        { value: 0 },
+      ),
+    );
+    renderer.reconcile(view());
+    await settle();
+    renderer.invalidateView({ retainPlaceholders: true, graceMs: 1 });
+    renderer.reconcile(view(1, 1.5));
+    await settle();
+    assert.equal(renders.value, 2);
+
+    renderer.invalidateView({ retainPlaceholders: true, graceMs: 1 });
+    assert.equal(lease.canvas.width, 100, "a second zoom retains the original bitmap");
+    renderer.reconcile(view(1, 2));
+    await settle();
+    await flush();
+    assert.equal(renders.value, 3);
+    assert.equal(lease.canvas.width, 100);
+    assert.equal(lease.canvas.height, 120);
+    assert.equal(renderer.snapshot().placeholderPageCount, 1);
+    assert.deepEqual(evicted, []);
+
+    latestReplacement.resolve();
+    await settle();
+    assert.equal(lease.canvas.width, 200);
+    assert.equal(lease.canvas.height, 240);
+    assert.equal(renderer.snapshot().placeholderPageCount, 0);
+    assert.equal(renderer.snapshot().renderedPageCount, 1);
+    assert.equal(renders.value, 3);
+    assert.deepEqual(evicted, []);
+    renderer.resetDocument();
+  });
+});
+
+for (const [memoryLimitMiB, devicePixelRatio] of [
+  [5, 1],
+  [5, 3],
+  [8, 1],
+  [8, 3],
+]) {
+  test(`${memoryLimitMiB} MiB DPR ${devicePixelRatio} peak covers allocation and commit copying while zoom fallback stays visible`, async () => {
+    const canvases = new Set<FakeCanvas>();
+    let peak = 0;
+    const sample = () => {
+      const bytes = [...canvases].reduce(
+        (total, canvas) => total + canvas.width * canvas.height * 4,
+        0,
+      );
+      peak = Math.max(peak, bytes);
+    };
+    const createCanvas = () => {
+      const canvas = new FakeCanvas();
+      let width = 0;
+      let height = 0;
+      Object.defineProperties(canvas, {
+        width: {
+          get: () => width,
+          set(value: number) {
+            width = value;
+            sample();
+          },
+        },
+        height: {
+          get: () => height,
+          set(value: number) {
+            height = value;
+            sample();
+          },
+        },
+      });
+      canvases.add(canvas);
+      return canvas;
+    };
+    const platform = installTestPlatform(() => createCanvas() as unknown as Element);
+    try {
+      const surfaces = new Surfaces();
+      const canvas = createCanvas();
+      surfaces.register(1, canvas);
+      const renders = { value: 0 };
+      const replacement = deferred<void>();
+      const renderer = new DocumentRenderer(surfaces, "test", {
+        ...settings,
+        memoryLimitMiB,
+        maxCanvasPixels: 750_000,
+        maxCanvasDimension: 1024,
+        minRenderDpr: 1,
+        allowVisibleDirectRendering: false,
+      });
+      renderer.beginDocument(
+        pdf(
+          page(renders, () => (renders.value === 2 ? replacement : null), {
+            width: 612,
+            height: 792,
+          }),
+          { value: 0 },
+        ),
+      );
+      const largeView = (scale: number): RenderViewSnapshot => ({
+        ...view(devicePixelRatio, scale),
+        rowBounds: [{ top: 0, bottom: 792 * scale }],
+        viewport: { top: 0, height: 480 },
+        pageBaseSizes: new Map([[1, { width: 612, height: 792 }]]),
+        fallbackPageSize: { width: 612, height: 792 },
+      });
+      renderer.reconcile(largeView(0.5));
+      await settle();
+      assert.equal(renderer.ready, true);
+      const before = { width: canvas.width, height: canvas.height };
+      assert.ok(peak <= memoryLimitMiB * 1024 * 1024, `initial commit peak ${peak}`);
+
+      renderer.invalidateView({ retainPlaceholders: true, graceMs: 10_000 });
+      renderer.reconcile(largeView(12.375));
+      await settle();
+      assert.equal(renders.value, 2);
+      assert.deepEqual({ width: canvas.width, height: canvas.height }, before);
+      assert.equal(canvas.context.drawCount, 1, "fallback is untouched during replacement");
+      assert.ok(peak <= memoryLimitMiB * 1024 * 1024, `pending replacement peak ${peak}`);
+      replacement.resolve();
+      for (let pass = 0; pass < 8; pass++) await settle();
+      assert.ok(peak <= memoryLimitMiB * 1024 * 1024, `commit-copy peak ${peak}`);
+      assert.equal(renderer.snapshot().renderedPageCount, 1);
+      assert.equal(renderer.snapshot().placeholderPageCount, 0);
+      // Releasing the old-scale fallback permits one higher-quality same-scale
+      // replacement. That upgrade must fit too and then remain reusable.
+      for (let pass = 0; pass < 3; pass++) {
+        renderer.reconcile(largeView(12.375));
+        await settle();
+      }
+      assert.ok(peak <= memoryLimitMiB * 1024 * 1024, `quality-upgrade peak ${peak}`);
+      assert.ok(renders.value <= 3);
+      const settledRenders = renders.value;
+      renderer.reconcile(largeView(12.375));
+      await settle();
+      assert.equal(renders.value, settledRenders, "unchanged demand does not churn upgrades");
+      await Promise.all(renderer.resetDocument());
+      assert.ok([...canvases].every(canvas => canvas.width === 0 && canvas.height === 0));
+    } finally {
+      platform.restore();
+    }
+  });
+}
 
 test("initial readiness is exactly once per renderer document", async () => {
   await withFakeDocument(async () => {
@@ -2768,6 +3608,65 @@ test("permanent raster failure is bounded and diagnosed without readiness", asyn
   });
 });
 
+test("suspended initial mounting pins readiness only after navigation and preserves prefetch", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    const rows = Array.from({ length: 8 }, (_, index) => [index + 1]);
+    for (const [pageNo] of rows) surfaces.register(pageNo);
+    const visible = deferred<void>();
+    const buffered = deferred<void>();
+    const starts: number[] = [];
+    let ready = 0;
+    const renderer = new DocumentRenderer(
+      surfaces,
+      "test",
+      { ...settings, maxBufferViewportHeights: 1, maxBufferPages: 2 },
+      {
+        ready: () => ready++,
+        diagnostic: entry => {
+          if (entry.event === "page-render-started") starts.push(Number(entry.details.pageNo));
+        },
+      },
+    );
+    renderer.beginDocument({
+      getPage: async (pageNo: number) =>
+        page({ value: 0 }, () => (pageNo === 6 ? visible : buffered)),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    const suspension = renderer.suspendAdmission();
+    const initialView = {
+      ...view(),
+      rows,
+      rowBounds: rows.map((_, index) => ({ top: index * 120, bottom: (index + 1) * 120 })),
+    };
+    renderer.beginSurfaceReflow({ preserveCommittedOutput: false });
+    renderer.endSurfaceReflow(initialView);
+    await settle();
+    assert.deepEqual(starts, []);
+    assert.equal(ready, 0);
+
+    renderer.reconcile({
+      ...initialView,
+      viewport: { top: 600, height: 120 },
+      visibleRange: { first: 5, last: 5, center: 5 },
+    });
+    renderer.resumeAdmission(suspension.token);
+    await settle();
+    assert.equal(starts[0], 6);
+    assert.ok(
+      starts.some(pageNo => pageNo === 5 || pageNo === 7),
+      "nearby prefetch is retained",
+    );
+    assert.ok(!starts.some(pageNo => pageNo <= 3), "provisional first rows are not rendered");
+    assert.equal(ready, 0, "initial page must commit before readiness");
+
+    visible.resolve();
+    await settle();
+    assert.equal(ready, 1, "readiness does not wait for buffered pages");
+    assert.ok(renderer.snapshot().inFlightRenderCount > 0);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
 test("initial readiness excludes speculative buffered pages", async () => {
   await withFakeDocument(async () => {
     const surfaces = new Surfaces();
@@ -2877,6 +3776,109 @@ test("fast navigation preempts admitted speculative work for the new visible pag
     await Promise.all(settlements);
   });
 });
+
+for (const motion of ["forward", "stationary"] as const) {
+  test(`visible ${motion} demand starts before a stale geometric operator list settles`, async t => {
+    await withFakeDocument(async () => {
+      let clock = 0;
+      t.mock.method(performance, "now", () => clock);
+      Object.defineProperty(globalThis.document, "fonts", { value: {} });
+      const surfaces = new Surfaces();
+      surfaces.register(1);
+      surfaces.register(2);
+      const operators =
+        deferred<Awaited<ReturnType<import("pdfjs-dist").PDFPageProxy["getOperatorList"]>>>();
+      const preparing = deferred<void>();
+      const completed = deferred<void>();
+      const events: Array<{ event: string; details: Readonly<Record<string, unknown>> }> = [];
+      const renders = [1, 2].map(() => ({ value: 0 }));
+      const renderer = new DocumentRenderer(
+        surfaces,
+        "test",
+        { ...settings, maxConcurrentRenders: 1 },
+        {
+          diagnostic: entry => {
+            if (entry.event.startsWith("page-render-")) events.push(entry);
+            if (entry.event === "page-render-completed" && entry.details.pageNo === 2)
+              completed.resolve();
+          },
+        },
+        {
+          document: globalThis.document,
+          setTimeout: globalThis.window.setTimeout,
+          clearTimeout: globalThis.window.clearTimeout,
+        } as unknown as Window,
+      );
+      renderer.setFontRendering("geometric");
+      renderer.beginDocument({
+        getPage: async (pageNo: number) => ({
+          ...page(renders[pageNo - 1]),
+          getOperatorList: () => {
+            if (pageNo === 1) {
+              preparing.resolve();
+              return operators.promise;
+            }
+            return Promise.resolve({ fnArray: [], argsArray: [], lastChunk: true });
+          },
+        }),
+      } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+      const base: RenderViewSnapshot = {
+        ...view(),
+        rows: [[1], [2]],
+        rowBounds: [
+          { top: 0, bottom: 120 },
+          { top: 120, bottom: 240 },
+        ],
+        pageBaseSizes: new Map([1, 2].map(pageNo => [pageNo, { width: 100, height: 120 }])),
+      };
+      renderer.reconcile(base);
+      await preparing.promise;
+      assert.equal(renderer.snapshot().admittedRenderCount, 1);
+      assert.equal(renderer.snapshot().inFlightRenderCount, 0);
+      assert.equal(events[0].event, "page-render-admitted");
+      assert.equal(events[0].details.stage, "page-acquisition");
+      clock = 25;
+      renderer.reconcile({
+        ...base,
+        motion,
+        viewport: { top: 120, height: 120 },
+        visibleRange: { first: 1, last: 1, center: 1 },
+      });
+      await settle();
+      await settle();
+      assert.deepEqual(
+        renders.map(count => count.value),
+        [0, 1],
+      );
+      await completed.promise;
+      await settle();
+      assert.equal(surfaces.leaseFor(2)!.canvas.width, 100);
+      assert.equal(renderer.snapshot().settlingRenderCount, 0);
+      const cancellation = events.find(entry => entry.event === "page-render-cancel-requested")!;
+      const settlement = events.find(entry => entry.event === "page-render-settled")!;
+      assert.deepEqual(cancellation.details, {
+        operationId: events[0].details.operationId,
+        pageNo: 1,
+        stage: "font-preparation",
+        elapsedMs: 25,
+      });
+      assert.deepEqual(settlement.details, { ...cancellation.details, outcome: "cancelled" });
+      const nextAdmission = events.findIndex(
+        entry => entry.event === "page-render-admitted" && entry.details.pageNo === 2,
+      );
+      assert.ok(nextAdmission > events.indexOf(settlement));
+      assert.ok(events.indexOf(cancellation) < events.indexOf(settlement));
+      // Initial readiness can legitimately readmit page 1 after visible work.
+      await Promise.all(renderer.resetDocument());
+      operators.reject(new Error("late stale operator-list rejection"));
+      await settle();
+      assert.deepEqual(
+        renders.map(count => count.value),
+        [0, 1],
+      );
+    });
+  });
+}
 
 test("settling temporary memory delays canonical work instead of lowering its DPR", async () => {
   await withFakeDocument(async () => {

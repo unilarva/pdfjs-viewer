@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DocumentView } from "../../src/document-view.js";
 import type { DetailRegion } from "../../src/detail-render-planner.js";
+import type { DocumentPageOverlayViewport } from "../../src/document-page-overlays.js";
 import { installTestPlatform } from "./test-platform.js";
 
 class FakeStyle {
@@ -23,7 +24,7 @@ class FakeStyle {
   }
 }
 
-class FakeElement {
+class FakeElement extends EventTarget {
   get ownerDocument(): Document {
     return globalThis.document;
   }
@@ -32,6 +33,9 @@ class FakeElement {
   style = new FakeStyle() as unknown as CSSStyleDeclaration;
   children: FakeElement[] = [];
   parentElement: FakeElement | null = null;
+  contains(other: FakeElement): boolean {
+    return this === other || this.children.some(child => child.contains(other));
+  }
   isConnected = true;
   offsetTop = 0;
   offsetHeight = 100;
@@ -123,6 +127,7 @@ function withFakeDocument(run: () => void): void {
 
 function setup(options: { pageLayout?: "auto" | "single" | "double" | "book" } = {}) {
   const calls: string[] = [];
+  const invalidations: Array<Readonly<{ retainPlaceholders: boolean; graceMs: number }>> = [];
   const views: Array<{
     scale: number;
     rows: readonly (readonly number[])[];
@@ -138,7 +143,10 @@ function setup(options: { pageLayout?: "auto" | "single" | "double" | "book" } =
       calls.push("renderer-end");
       views.push(view);
     },
-    invalidateView: () => calls.push("renderer-invalidate"),
+    invalidateView: (options: Readonly<{ retainPlaceholders: boolean; graceMs: number }>) => {
+      calls.push("renderer-invalidate");
+      invalidations.push(options);
+    },
     reconcile: (view: { scale: number; rows: readonly (readonly number[])[] }) => {
       calls.push("renderer-reconcile");
       views.push(view);
@@ -172,8 +180,74 @@ function setup(options: { pageLayout?: "auto" | "single" | "double" | "book" } =
     },
     cancelFrame: () => {},
   });
-  return { view, container, calls, views };
+  return { view, container, calls, views, invalidations };
 }
+
+test("consumer overlays follow canonical geometry and survive topology changes until reset", () => {
+  withFakeDocument(() => {
+    const { view } = setup();
+    view.beginDocument({
+      pageCount: 2,
+      basePageSize: { width: 200, height: 300 },
+      preferredLayout: null,
+    });
+    const viewport: DocumentPageOverlayViewport = {
+      rotation: 0,
+      width: 200,
+      height: 300,
+      clone({ scale, rotation }) {
+        const swapped = rotation === 90 || rotation === 270;
+        return {
+          ...this,
+          width: (swapped ? 300 : 200) * scale,
+          height: (swapped ? 200 : 300) * scale,
+          convertToViewportPoint: (x, y) => [x * scale, y * scale],
+        };
+      },
+      convertToViewportPoint: (x, y) => [x, y],
+    };
+    const control = document.createElement("button");
+    const geometries: Array<{ width: number }> = [];
+    const dispose = view.registerPageOverlay(
+      {
+        page: 2,
+        anchor: { x: 20, y: 30 },
+        element: control,
+        onGeometry: geometry => geometries.push(geometry),
+      },
+      viewport,
+    );
+    const slot = control.parentElement;
+    view.setPageOverlaysActive(false);
+    view.setExplicitScale(1);
+    assert.equal(geometries.at(-1)?.width, 200);
+    view.commitView({ pageLayout: "double", refit: false });
+    assert.equal(control.parentElement, slot);
+    view.commitView({ rotation: 90, refit: false });
+    assert.equal(control.parentElement, slot);
+    const host = slot!.parentElement!;
+    assert.equal(host.hidden, true);
+    assert.equal(host.inert, true);
+    assert.equal(host.parentElement, view.pageWrapFor(2));
+    view.setPresentationViewport(true);
+    view.reconcile();
+    assert.equal(control.parentElement, slot);
+    view.clearPageOverlays();
+    assert.equal(control.parentElement, null);
+    dispose();
+    view.registerPageOverlay({ page: 1, anchor: { x: 0, y: 0 }, element: control }, viewport);
+    assert.equal(control.parentElement!.parentElement!.hidden, true);
+    view.setPageOverlaysActive(true);
+    assert.equal(control.parentElement!.parentElement!.hidden, false);
+    view.resetDocument();
+    assert.equal(control.parentElement, null);
+    assert.throws(
+      () =>
+        view.registerPageOverlay({ page: 1, anchor: { x: 0, y: 0 }, element: control }, viewport),
+      /Invalid/,
+    );
+  });
+});
 
 test("owns initial topology, surfaces, canonical sizing, and render snapshot", () => {
   withFakeDocument(() => {
@@ -658,6 +732,57 @@ test("canonical scale transaction suspends text and reconciles only final geomet
     assert.equal(view.setExplicitScale(1.2345674).kind, "unchanged");
   });
 });
+
+for (const pageLayout of ["single", "auto"] as const) {
+  for (const anchored of [false, true]) {
+    test(`explicit ${anchored ? "anchored" : "unanchored"} zoom retains old bitmaps in ${pageLayout} layout`, () => {
+      withFakeDocument(() => {
+        const { view, calls, views, invalidations } = setup({ pageLayout });
+        view.beginDocument({
+          pageCount: 6,
+          basePageSize: { width: 400, height: 800 },
+          preferredLayout: null,
+        });
+        const lease = view.leaseFor(6)!;
+        lease.canvas.width = 400;
+        lease.canvas.height = 800;
+        calls.length = 0;
+        views.length = 0;
+        invalidations.length = 0;
+        const nextScale = view.scale * 1.5;
+        const result = view.setExplicitScale(nextScale, anchored ? { x: 400, y: 300 } : undefined);
+
+        assert.equal(result.kind, "committed");
+        assert.deepEqual(invalidations, [{ retainPlaceholders: true, graceMs: 1200 }]);
+        const currentLease = view.leaseFor(6)!;
+        assert.equal(currentLease.canvas, lease.canvas, "scale-only zoom keeps the old canvas");
+        assert.equal(currentLease.wrapper, lease.wrapper);
+        assert.equal(currentLease.registrationEpoch, lease.registrationEpoch);
+        assert.equal(lease.canvas.width, 400, "layout leaves renderer-owned old pixels intact");
+        assert.equal(lease.canvas.height, 800);
+        assert.equal(lease.wrapper.style.width, `${400 * view.scale}px`);
+        assert.equal(lease.wrapper.style.height, `${800 * view.scale}px`);
+        assert.equal(view.scale, view.normalizeScale(nextScale));
+        assert.equal(view.rotation, 0);
+        assert.deepEqual(calls, [
+          "text-suspend",
+          "renderer-invalidate",
+          "renderer-reconcile",
+          "text-resume",
+        ]);
+        assert.equal(views.length, 1);
+        assert.equal(views[0].scale, view.scale);
+
+        assert.equal(view.setExplicitScale(nextScale).kind, "unchanged");
+        assert.equal(
+          invalidations.length,
+          1,
+          "unchanged scale does not invalidate retained pixels",
+        );
+      });
+    });
+  }
+}
 
 test("transient commit restores a source-scale offset against target page geometry", () => {
   withFakeDocument(() => {
