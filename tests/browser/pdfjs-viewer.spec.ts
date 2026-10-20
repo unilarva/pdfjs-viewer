@@ -7110,16 +7110,20 @@ test("maximum zoom keeps each canvas within backing-store safety limits", async 
   await page.evaluate(() => window.fixture.primary.zoomTo(100));
   await expect.poll(() => page.evaluate(() => window.fixture.primary.state.scale)).toBe(32);
   const canvases = page.locator("#primary .pdf-page canvas");
+  // Nonzero canvases may still contain old-scale placeholders until the new render commits.
   await expect
     .poll(() =>
-      canvases.evaluateAll(elements =>
-        elements
-          .map(element => element as HTMLCanvasElement)
-          .filter(canvas => canvas.width > 0 && canvas.height > 0)
-          .map(canvas => ({ width: canvas.width, height: canvas.height })),
+      page.evaluate(() =>
+        window.fixture.logs.some(
+          entry =>
+            entry.viewerId === "primary" &&
+            entry.event === "page-render-completed" &&
+            entry.details?.pageNo === 1 &&
+            entry.details?.scale === 32,
+        ),
       ),
     )
-    .not.toEqual([]);
+    .toBe(true);
 
   const dimensions = await canvases.evaluateAll(elements =>
     elements
