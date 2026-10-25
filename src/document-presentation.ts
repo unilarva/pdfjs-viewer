@@ -127,6 +127,8 @@ type DocumentPresentationAnnotationLayer = typeof PDFJS.AnnotationLayer;
 type DocumentPresentationXfaLayer = typeof PDFJS.XfaLayer;
 interface DocumentPresentationDestinationIntent {
   readonly destination: PdfDestinationInput;
+  readonly pageNo?: number;
+  readonly sourceId?: string | null;
 }
 
 interface DocumentPresentationDiagnostic {
@@ -172,6 +174,8 @@ interface DocumentPresentationOptions {
 
 interface PresentedLayer {
   readonly documentId: number;
+  readonly sourceId: string | null;
+  readonly sourceRevision: number | undefined;
   readonly page: PDFJS.PDFPageProxy;
   lease: Readonly<RenderSurfaceLease>;
   readonly element: HTMLDivElement;
@@ -187,6 +191,7 @@ interface PresentedLayer {
   published: boolean;
   destroyed: boolean;
   evictionPending: boolean;
+  writing: boolean;
 }
 
 interface PresentedXfaLayer {
@@ -248,6 +253,7 @@ export class DocumentPresentation {
   #resourceUrls = new Set<string>();
   #resourceTimers = new Map<string, number>();
   #generation = 0;
+  #pageRevisions = new Map<number, number>();
   #namespace = `pdf-form-${++DocumentPresentation.#nextNamespace}-`;
   #pdf: PDFJS.PDFDocumentProxy | null = null;
   #formState: DocumentFormState;
@@ -449,6 +455,7 @@ export class DocumentPresentation {
   reset(): readonly Promise<unknown>[] {
     const settlements = [...this.#formState.reset()];
     this.#generation++;
+    this.#pageRevisions.clear();
     for (const layer of this.#pending) this.#destroyLayer(layer);
     for (const layer of this.#layers.values()) this.#destroyLayer(layer);
     for (const layer of this.#pendingXfa) this.#destroyXfaLayer(layer);
@@ -503,21 +510,55 @@ export class DocumentPresentation {
     }
   }
 
+  /** Synchronously revokes replaced mappings without cancelling unrelated writers. */
+  invalidatePages(pages: ReadonlySet<number>): void {
+    for (const page of pages) {
+      this.#pageRevisions.set(page, (this.#pageRevisions.get(page) ?? 0) + 1);
+      for (const layer of this.#pending) {
+        if (layer.lease.pageNo === page) this.#destroyLayer(layer);
+      }
+      for (const layer of this.#pendingXfa) {
+        if (layer.lease.pageNo === page) this.#destroyXfaLayer(layer);
+      }
+      const layer = this.#layers.get(page);
+      if (layer) this.#destroyLayer(layer);
+      this.#layers.delete(page);
+      const xfa = this.#xfaLayers.get(page);
+      if (xfa) this.#destroyXfaLayer(xfa);
+      this.#xfaLayers.delete(page);
+      this.#retainedControlState.delete(page);
+    }
+  }
+
   async present(context: Readonly<RenderPresentationContext>): Promise<void> {
+    const admitted = context;
+    const revision = this.#pageRevisions.get(context.pageNo) ?? 0;
+    const sourceRevision = context.source?.revision;
+    context = {
+      ...context,
+      isCurrent: layer =>
+        admitted.isCurrent(layer) &&
+        revision === (this.#pageRevisions.get(admitted.pageNo) ?? 0) &&
+        sourceRevision === admitted.source?.revision,
+    };
     this.#document ??= context.lease.wrapper.ownerDocument;
     if (
       !this.annotationsEnabled ||
       !context.capabilities.annotations ||
-      !context.isCurrent("annotations")
+      !context.isCurrent("annotations") ||
+      !(context.source?.isCurrent() ?? true)
     )
       return;
-    if (this.#formState.presentation === "pure-xfa") {
+    if (context.source?.id == null && this.#formState.presentation === "pure-xfa") {
       await this.#presentXfa(context);
       return;
     }
     const generation = this.#generation;
     try {
-      const optionalContentConfigPromise = context.rasterState.optionalContentConfigPromise;
+      const optionalContentConfigPromise =
+        context.source?.id != null
+          ? context.source.optionalContentConfigPromise
+          : context.rasterState.optionalContentConfigPromise;
       const [annotations, optionalContentConfig] = await Promise.all([
         context.page.getAnnotations({ intent: "display" }),
         optionalContentConfigPromise ?? Promise.resolve(undefined),
@@ -709,22 +750,29 @@ export class DocumentPresentation {
     generation: number,
   ): Promise<void> {
     const previous = this.#layers.get(context.pageNo);
-    const controlState = previous
-      ? this.#captureFormLayer(previous.element, this.#retainedControlState.get(context.pageNo))
-      : (this.#retainedControlState.get(context.pageNo) ?? null);
+    const auxiliary = context.source?.id != null;
+    const controlState = auxiliary
+      ? null
+      : previous
+        ? this.#captureFormLayer(previous.element, this.#retainedControlState.get(context.pageNo))
+        : (this.#retainedControlState.get(context.pageNo) ?? null);
     if (previous) {
       this.#layers.delete(context.pageNo);
       this.#destroyLayer(previous);
     }
     const filtered = this.#namespaceAnnotations(
       this.#filterAnnotations(annotations, context, generation),
+      this.#sourceNamespace(context),
     );
     if (!this.#isCurrent(context, generation)) return;
     const element = this.#ownerDocument().createElement("div");
     element.className = "annotationLayer pdf-annotation-layer pdf-annotation-link-layer";
     const state = {} as PresentedLayer;
-    const linkService = this.#createLinkService(context.pageNo, state);
-    const annotationCanvasMap = this.#namespaceCanvasMap(context.annotationCanvasMap);
+    const linkService = this.#createLinkService(context.pageNo, state, context);
+    const annotationCanvasMap = this.#namespaceCanvasMap(
+      context.annotationCanvasMap,
+      this.#sourceNamespace(context),
+    );
     const instance = createPdfjsAnnotationLayer(this.#AnnotationLayer, {
       div: element,
       page: context.page,
@@ -735,10 +783,12 @@ export class DocumentPresentation {
       annotationEditorUIManager: null,
       structTreeLayer: null,
       commentManager: null,
-      annotationStorage: this.#storageAdapter,
+      annotationStorage: auxiliary ? null : this.#storageAdapter,
     });
     Object.assign(state, {
       documentId: context.documentId,
+      sourceId: context.source?.id ?? null,
+      sourceRevision: context.source?.revision,
       page: context.page,
       lease: context.lease,
       element,
@@ -754,6 +804,7 @@ export class DocumentPresentation {
       published: false,
       destroyed: false,
       evictionPending: false,
+      writing: true,
     } satisfies PresentedLayer);
     this.#pending.add(state);
     try {
@@ -765,16 +816,16 @@ export class DocumentPresentation {
         linkService,
         downloadManager: this.#createDownloadManager(context.pageNo, state),
         imageResourcesPath: SAFE_ANNOTATION_ICON_PATH,
-        renderForms: this.formsEnabled,
+        renderForms: !auxiliary && this.formsEnabled,
         enableScripting: false,
         hasJSActions: false,
-        annotationStorage: this.#storageAdapter ?? undefined,
-        fieldObjects: this.#namespacedFieldObjects(),
+        annotationStorage: auxiliary ? undefined : (this.#storageAdapter ?? undefined),
+        fieldObjects: auxiliary ? null : this.#namespacedFieldObjects(),
         annotationCanvasMap,
         ...(optionalContentConfig ? { optionalContentConfig } : {}),
       });
       if (state.destroyed || !this.#isCurrent(context, generation)) return;
-      this.#decorate(element, context.pageNo);
+      this.#decorate(element, context.pageNo, !auxiliary);
       if (!this.#isCurrent(context, generation)) return;
       state.published = true;
       this.#layers.set(context.pageNo, state);
@@ -782,8 +833,14 @@ export class DocumentPresentation {
       if (controlState) this.#restoreFormLayer(element, controlState);
       if (controlState?.focusedOrder != null)
         this.#retainedControlState.set(context.pageNo, controlState);
-      this.#restorePendingFocus(element);
+      if (!auxiliary) this.#restorePendingFocus(element);
     } finally {
+      state.writing = false;
+      if (state.destroyed) {
+        try {
+          state.instance.destroy();
+        } catch {}
+      }
       this.#pending.delete(state);
       if (!state.published) this.#destroyLayer(state);
     }
@@ -800,6 +857,18 @@ export class DocumentPresentation {
       if (!value || typeof value !== "object") continue;
       const annotation = value as AnnotationLike;
       const type = this.#annotationType(annotation);
+      if (
+        context.source?.id != null &&
+        (type !== ANNOTATION_TYPE.LINK ||
+          annotation.hasAppearance ||
+          annotation.appearance ||
+          annotation.actions ||
+          annotation.setOCGState ||
+          annotation.attachment ||
+          annotation.attachmentId ||
+          annotation.resetForm)
+      )
+        continue;
       if (type === ANNOTATION_TYPE.POPUP) {
         if (
           this.#options.markup.enabled &&
@@ -907,10 +976,16 @@ export class DocumentPresentation {
       return Object.freeze({ ...safe, action: annotation.action });
     }
     const ocg = this.#parseOCGAction(annotation.setOCGState);
-    if (ocg && this.#options.optionalContentActions && this.#callbacks.setOptionalContent) {
+    if (
+      context.source?.id == null &&
+      ocg &&
+      this.#options.optionalContentActions &&
+      this.#callbacks.setOptionalContent
+    ) {
       return Object.freeze({ ...safe, setOCGState: ocg });
     }
     if (
+      context.source?.id == null &&
       this.#options.markup.enabled &&
       this.#options.markup.fileAttachments &&
       typeof annotation.attachmentId === "string" &&
@@ -989,15 +1064,21 @@ export class DocumentPresentation {
   #createLinkService(
     pageNo: number,
     layer: PresentedLayer | PresentedXfaLayer,
+    context?: Readonly<RenderPresentationContext>,
   ): DocumentPresentationLinkService {
+    const revision = this.#pageRevisions.get(pageNo) ?? 0;
+    const sourceRevision = context?.source?.revision;
     const current = () =>
-      this.#isPresentedLayer(pageNo, layer) ||
-      (this.#pending.has(layer as PresentedLayer) && !layer.destroyed) ||
-      (this.#pendingXfa.has(layer as PresentedXfaLayer) && !layer.destroyed);
+      (context?.source?.isCurrent() ?? true) &&
+      sourceRevision === context?.source?.revision &&
+      revision === (this.#pageRevisions.get(pageNo) ?? 0) &&
+      (this.#isPresentedLayer(pageNo, layer) ||
+        (this.#pending.has(layer as PresentedLayer) && !layer.destroyed) ||
+        (this.#pendingXfa.has(layer as PresentedXfaLayer) && !layer.destroyed));
     return Object.freeze({
       eventBus: null,
       addLinkAttributes: (link: HTMLAnchorElement, url: string) => {
-        if (!this.#options.links.externalUrls) return;
+        if (!current() || !this.#options.links.externalUrls) return;
         const safeUrl = safeAnnotationUrl(url, this.#baseUrl());
         if (!safeUrl) return;
         link.href = safeUrl;
@@ -1008,29 +1089,43 @@ export class DocumentPresentation {
       getAnchorUrl: (anchor: string) => `#${anchor}`,
       goToDestination: (destination: PdfDestinationInput) => {
         if (!current()) return;
-        this.#invoke(layer, "annotation-navigation-failed", () =>
-          this.#callbacks.internalDestination?.({ destination }),
+        this.#invoke(
+          layer,
+          "annotation-navigation-failed",
+          () =>
+            this.#callbacks.internalDestination?.({
+              destination,
+              ...(context?.source?.id != null ? { pageNo, sourceId: context.source.id } : {}),
+            }),
+          current,
         );
       },
       executeNamedAction: (action: string) => {
         if (!current() || !NAMED_NAVIGATION_ACTIONS.has(action)) return;
-        this.#invoke(layer, "annotation-navigation-failed", () =>
-          this.#callbacks.namedNavigation?.(action),
+        this.#invoke(
+          layer,
+          "annotation-navigation-failed",
+          () => this.#callbacks.namedNavigation?.(action),
+          current,
         );
       },
       executeSetOCGState: (value: unknown) => {
         const action = this.#parseOCGAction(value);
-        if (!current() || !action) return;
-        this.#invoke(layer, "annotation-ocg-action-failed", () =>
-          this.#callbacks.setOptionalContent?.(action),
+        if (!current() || !action || context?.source?.id != null) return;
+        this.#invoke(
+          layer,
+          "annotation-ocg-action-failed",
+          () => this.#callbacks.setOptionalContent?.(action),
+          current,
         );
       },
       getAttachmentContent: async (id: string) => {
-        if (!current() || typeof id !== "string" || !id) return null;
+        if (!current() || context?.source?.id != null || typeof id !== "string" || !id) return null;
         try {
           const content = (await this.#callbacks.attachmentContent?.(id)) ?? null;
           return current() && content instanceof Uint8Array ? content : null;
         } catch (error) {
+          if (!current()) return null;
           this.#diagnostic(
             "annotation-attachment-read-failed",
             this.#options.annotationAttachmentErrorLabel,
@@ -1074,7 +1169,7 @@ export class DocumentPresentation {
     });
   }
 
-  #decorate(element: HTMLDivElement, pageNo: number): void {
+  #decorate(element: HTMLDivElement, pageNo: number, forms = true): void {
     for (const link of element.querySelectorAll<HTMLAnchorElement>(".linkAnnotation > a")) {
       link.classList.add("pdf-annotation-link");
       if (!link.hasAttribute("aria-label")) {
@@ -1112,7 +1207,7 @@ export class DocumentPresentation {
         attachment.dataset.pdfjsUiOwnedAriaLabel = "annotationAttachment";
       }
     }
-    if (this.formsEnabled) {
+    if (forms && this.formsEnabled) {
       const unused = new Set(
         this.#formState.bindings
           .filter(binding => binding.pageNo === pageNo)
@@ -1537,19 +1632,36 @@ export class DocumentPresentation {
     );
   }
 
-  #namespaceAnnotations(annotations: readonly AnnotationLike[]): AnnotationLike[] {
-    if (!this.formsEnabled) return annotations as AnnotationLike[];
+  /** Keeps auxiliary local annotation references independent of base form IDs. */
+  #sourceNamespace(context: Readonly<RenderPresentationContext>): string | undefined {
+    return context.source?.id != null
+      ? `${this.#namespace}source-${context.pageNo}-${encodeURIComponent(context.source.id)}-${context.source.revision}-`
+      : undefined;
+  }
+
+  #namespaceAnnotations(
+    annotations: readonly AnnotationLike[],
+    sourceNamespace?: string,
+  ): AnnotationLike[] {
+    if (!sourceNamespace && !this.formsEnabled) return annotations as AnnotationLike[];
+    const namespace = sourceNamespace ?? this.#namespace;
     return annotations.map(annotation => {
       const value: Record<string, unknown> = { ...annotation };
       for (const key of ["id", "popupRef", "parentId"] as const) {
-        if (typeof value[key] === "string") value[key] = this.#namespace + value[key];
+        if (typeof value[key] === "string") value[key] = namespace + value[key];
       }
-      if (typeof value.fieldName === "string") value.fieldName = this.#namespace + value.fieldName;
+      if (!sourceNamespace && typeof value.fieldName === "string")
+        value.fieldName = namespace + value.fieldName;
       return Object.freeze(value) as AnnotationLike;
     });
   }
 
-  #namespaceCanvasMap(source: Map<string, HTMLCanvasElement>): Map<string, HTMLCanvasElement> {
+  #namespaceCanvasMap(
+    source: Map<string, HTMLCanvasElement>,
+    sourceNamespace?: string,
+  ): Map<string, HTMLCanvasElement> {
+    if (sourceNamespace)
+      return new Map([...source].map(([id, canvas]) => [sourceNamespace + id, canvas]));
     if (!this.formsEnabled) return source;
     const map = new Map(source);
     for (const [id, canvas] of source) map.set(this.#namespace + id, canvas);
@@ -1631,6 +1743,8 @@ export class DocumentPresentation {
       !layer.destroyed &&
       layer.generation === generation &&
       layer.documentId === context.documentId &&
+      layer.sourceId === (context.source?.id ?? null) &&
+      layer.sourceRevision === context.source?.revision &&
       layer.page === context.page &&
       this.#sameLease(layer.lease, context.lease) &&
       layer.annotations === annotations &&
@@ -1647,6 +1761,7 @@ export class DocumentPresentation {
     return (
       generation === this.#generation &&
       context.isCurrent("annotations") &&
+      (context.source?.isCurrent() ?? true) &&
       context.lease.wrapper.isConnected
     );
   }
@@ -1674,10 +1789,13 @@ export class DocumentPresentation {
   #destroyLayer(layer: PresentedLayer): void {
     if (layer.destroyed) return;
     layer.destroyed = true;
-    try {
-      layer.instance.destroy();
-    } catch {}
+    layer.element.inert = true;
     layer.element.remove();
+    if (!layer.writing) {
+      try {
+        layer.instance.destroy();
+      } catch {}
+    }
   }
 
   #destroyXfaLayer(layer: PresentedXfaLayer): void {
@@ -1690,13 +1808,14 @@ export class DocumentPresentation {
     layer: PresentedLayer | PresentedXfaLayer,
     event: string,
     action: () => void | Promise<unknown>,
+    current: () => boolean,
   ): void {
     try {
-      void Promise.resolve(action()).catch(error =>
-        this.#interactionDiagnostic(layer, event, error),
-      );
+      void Promise.resolve(action()).catch(error => {
+        if (current()) this.#interactionDiagnostic(layer, event, error);
+      });
     } catch (error) {
-      this.#interactionDiagnostic(layer, event, error);
+      if (current()) this.#interactionDiagnostic(layer, event, error);
     }
   }
 
@@ -1705,6 +1824,7 @@ export class DocumentPresentation {
     event: string,
     error: unknown,
   ): void {
+    if (!this.#isPresentedLayer(layer.lease.pageNo, layer)) return;
     this.#diagnostic(
       event,
       "PDF annotation interaction failed",

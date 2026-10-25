@@ -29,6 +29,7 @@ inventing a second boundary in module prose.
   - [State And Document Teardown](#state-and-document-teardown)
   - [Download](#download)
 - [Core Procedures](#core-procedures)
+  - [Display Page Sources](#display-page-sources)
   - [Rendering](#rendering)
   - [Thumbnail Rendering](#thumbnail-rendering)
   - [Layout Reset](#layout-reset)
@@ -188,6 +189,16 @@ The current owners are:
   output, replacement, and settling presentation; a backing store is zeroed only when its final exact
   owner releases it. Named canvas arrays are flattened to exact backing stores. Output rebinding
   inherits the previous owner's references even after PDF.js presentation consumes the canvas map.
+  After presentation/text eviction, `DocumentView` replaces the exact zero-sized main canvas
+  and advances its surface registration. Resizing alone leaves browser-owned font/shaping caches
+  alive on the retained canvas host. Replacement preserves the wrapper, overlays and geometry;
+  old asynchronous leases become stale, and preserved output is never replaced by this path.
+  Thumbnail pixel eviction likewise replaces its current painted canvas with a shallow
+  zero-sized clone, preserving placeholder attributes/geometry and sibling controls while
+  transferring resize observation on the next viewport-demand frame only for exact-current,
+  active near-visible demand, rather than creating a new target during resize delivery. Stale-item cleanup
+  cannot replace or observe a successor document's canvas; active temporary writers and
+  retained replacement bitmaps keep their existing physical-settlement ownership.
 - `DocumentPageUsage`: the document-scoped page-proxy usage owner. It admits use before
   `getPage()`, coordinates cached proxy identities shared by rendering, text extraction,
   navigation, annotations, and text presentation, and delays cleanup until every admitted
@@ -633,7 +644,12 @@ Replacement and teardown follow this order:
 3. Start required loading-task destruction, then settle cancelled rendering/preparation, including
    uncancellable metadata and optional form reads, on-demand document-data reads, and PDF.js
    `PDFDocumentProxy.saveDocument()`. Final proxy cleanup waits for both loading-task destruction
-   and every captured settlement.
+   and every captured settlement, including canonical page-use and auxiliary source closure.
+   Both close and synchronous `destroy()` detach the canonical task and runtime document-worker
+   use immediately. After those dependencies drain, they await canonical proxy cleanup, destroy
+   the loaded canonical task, and release its worker use in `finally`, even if cleanup fails.
+   A task destroyed while still loading is not destroyed again by `destroy()`'s loaded-task lane.
+   Runtime detachment alone cannot release a worker while a physical document use remains.
 4. Do not block a successor on old render, preparation, or proxy cleanup when ownership
    has already been invalidated. Await loading-task destruction only where PDF.js load
    replacement requires it.
@@ -678,6 +694,68 @@ before Blob creation and activation, and the URL is revoked in the next task. Th
 previews embedded HTML, SVG, PDFs, executables, or other arbitrary content.
 
 ## Core Procedures
+
+### Display Page Sources
+
+The read-only display-source boundary is a document-scoped `DocumentPageSources`
+beside, not instead of, the canonical
+base `DocumentPageUsage`. Only display-derived owners acquire through the resolver:
+main/detail rasters, thumbnails, text/index/search and annotation presentation. Base
+layout/page identity, destinations, outline, information, bytes, downloads and printing
+continue using the canonical document and base page owner. No conversion engine or
+application-specific schema belongs in the package.
+
+Source preparation snapshots mutable in-memory bytes or retains a native immutable Blob
+slice and validates a bounded auxiliary PDF without
+publishing any page. Opaque handles carry caller ownership; releasing a handle does not
+revoke installed mappings or physical readers. Mapping batches validate all logical/source
+page numbers, identities, crop coordinates, intrinsic rotation and UserUnit before one
+authoritative commit. Unmentioned slots remain unchanged. Logical pages and source pages
+are independently 1-based. Mapping publication is not an eager render of every replacement.
+
+An acquisition captures an immutable source identity/revision before awaiting PDF.js.
+Revoking that identity prevents stale output publication but does not release its page,
+fonts, temporary buffers or annotation writers. Each auxiliary document has its own
+`DocumentPageUsage`. Retained snapshots are limited to 64 MiB; native Blob backing has a
+separate 256 MiB logical-byte budget, not a disk-residency guarantee. The pool retains no
+JavaScript byte snapshot for Blob-backed entries. Native slicing bypasses consumer Blob
+overrides while accepting native cross-realm Blobs and Files and rejecting lookalikes.
+Each opening reserves a live document slot and input-byte budget before materializing a
+fresh transferable buffer; all open/opening/retiring documents share four slots and 64 MiB
+of input bytes. These reservations survive physical disposal, independently of font-face
+settlement and raster budgets. A cold reopen reads backing again, never calls a consumer
+loader or storage API, and cannot run after cancellation/close during a Blob read settles.
+Handle limits are `max(128, 2 * canonical page count)` to admit candidates beside installed
+sources; batch limits are `max(128, canonical page count)` and source page count remains 128.
+Large mapping/reset batches validate geometries serially without opening cold
+sources, then publish atomically. Blob reads and pending preparations are tracked close
+settlements. Eviction waits for actual page users before destroying a loading task.
+The serialized opening tail retains only void settlement, never a retired document result
+or rejection reason; physical document ownership remains in the entry and admitted users.
+The public `PDFWorker` is explicitly shared, so destroying an auxiliary loading task cannot
+destroy the base task's worker. Runtime worker release waits for the last auxiliary
+physical user as well as the last compatible runtime.
+
+Auxiliary font owners are source-generation scoped. Native face copies required by mounted
+text are retained separately from a live PDF proxy; geometric aliases cannot collide across
+unrelated PDFs or source reopen generations. This permits PDF-document LRU eviction without
+leaving mounted text dependent on a destroyed PDF.js font loader. Readiness and invalidation
+must use the same exact source revision across raster, text/index and annotations. Source
+changes must not remount canonical page surfaces or remove consumer page overlays.
+Font preparation tracks underlying PDF reads and native face loads separately from its
+prompt cancellation-facing promise. Each admitted font read retains the exact physical
+document's page owner until those operations settle; base geometric fonts bind the canonical
+owner, never the mutable display resolver. Closing cannot report a drained font owner while
+its reads, loads, copied-byte reservations or mounted-text pins remain live.
+
+The initial admission scope is deliberately read-only and fixed-geometry. Editable forms,
+XFA, signatures, permission-bearing sources, appearance-bearing links and unsupported annotation actions must fail
+explicitly, not be merged into base annotation storage. Internal links either resolve in
+the source and map to one unambiguous installed logical slot, or explicitly attest numeric/
+named base-document destinations. Foreign indirect references are not portable base links.
+Source link clicks capture navigation intent and originating slot authority before any
+destination translation. Both survive through canonical resolution and must still be current
+immediately before navigation; asynchronous older links cannot override newer user navigation.
 
 ### Rendering
 

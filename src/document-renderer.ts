@@ -38,7 +38,12 @@
  */
 
 import type * as PDFJS from "pdfjs-dist";
-import { DocumentPageUsage, type DocumentPageUse } from "./document-page-usage.js";
+import {
+  DocumentPageUsage,
+  type DocumentPageUse,
+  type DocumentPageAcquirer,
+  type DocumentPageSourceContext,
+} from "./document-page-usage.js";
 import { DocumentFonts } from "./document-fonts.js";
 import {
   createRenderPlan,
@@ -135,6 +140,7 @@ export interface RenderPresentationDemand {
 
 /** Validated post-commit presentation context. */
 export interface RenderPresentationContext {
+  readonly source?: Readonly<DocumentPageSourceContext>;
   readonly documentId: number;
   readonly pageNo: number;
   readonly lease: Readonly<RenderSurfaceLease>;
@@ -163,6 +169,8 @@ interface DocumentRendererDiagnostic {
 
 /** Reentrant cross-owner effects. All callbacks are optional and non-fatal. */
 interface DocumentRendererCallbacks {
+  readonly sourceRendered?: (pageNo: number, revision: number) => void;
+  readonly sourceFailed?: (pageNo: number, revision: number, error: unknown) => void;
   /** Uses the injected PDF.js module's operation IDs without a second runtime import. */
   readonly annotationOperatorIds?: () => Readonly<{
     beginAnnotation: number;
@@ -212,6 +220,8 @@ interface DocumentRendererSnapshot {
 type OutputState = "committed" | "placeholder" | "direct-mutating";
 
 interface RenderOutput {
+  readonly sourceRevision: number;
+  readonly source?: Readonly<DocumentPageSourceContext>;
   readonly contentGeneration: number;
   readonly documentId: number;
   readonly pageNo: number;
@@ -227,6 +237,7 @@ interface RenderOutput {
 }
 
 interface OperationContext {
+  readonly sourceRevision: number;
   readonly contentGeneration: number;
   readonly documentId: number;
   readonly lease: Readonly<RenderSurfaceLease>;
@@ -244,6 +255,7 @@ interface DetailOutput extends DetailTarget {
 }
 
 interface PresentationRequest {
+  readonly sourceRevision: number;
   readonly documentId: number;
   readonly pdf: PDFJS.PDFDocumentProxy;
   readonly pageNo: number;
@@ -271,6 +283,19 @@ function finitePositive(value: number): boolean {
   return Number.isFinite(value) && value > 0;
 }
 
+/** Lease snapshots share a surface only when their exact registration identity agrees. */
+function isSameSurfaceLease(
+  a: Readonly<RenderSurfaceLease>,
+  b: Readonly<RenderSurfaceLease>,
+): boolean {
+  return (
+    a.pageNo === b.pageNo &&
+    a.registrationEpoch === b.registrationEpoch &&
+    a.canvas === b.canvas &&
+    a.wrapper === b.wrapper
+  );
+}
+
 function safely(action: (() => void) | null | undefined): void {
   if (!action) return;
   try {
@@ -296,7 +321,7 @@ export class DocumentRenderer {
   #settings: PdfjsViewerRenderingProfileSettings;
   #profile: string;
   #pdf: PDFJS.PDFDocumentProxy | null = null;
-  #pages: DocumentPageUsage | null = null;
+  #pages: DocumentPageAcquirer | null = null;
   #ownsPages = false;
   #fonts: DocumentFonts | null = null;
   #geometricFonts = false;
@@ -320,6 +345,7 @@ export class DocumentRenderer {
   #detailTimer: number | null = null;
   #detailDiagnostics = new Map<number, string>();
   #operationContexts = new WeakMap<RenderOperation, OperationContext>();
+  #operationSources = new WeakMap<RenderOperation, Readonly<DocumentPageSourceContext>>();
   #activeAnnotationCanvasMaps = new Map<RenderOperation, Map<string, HTMLCanvasElement>>();
   #annotationCanvasOwners = new Map<object, Set<HTMLCanvasElement>>();
   #annotationCanvasRefCounts = new Map<HTMLCanvasElement, number>();
@@ -390,8 +416,12 @@ export class DocumentRenderer {
     this.#geometricFonts = mode === "geometric";
   }
 
-  /** Starts a fresh renderer document lifetime, even when the proxy is reused. */
-  beginDocument(pdf: PDFJS.PDFDocumentProxy, pages?: DocumentPageUsage): number {
+  /** Starts a fresh lifetime; basePages pins canonical font reads without following display mappings. */
+  beginDocument(
+    pdf: PDFJS.PDFDocumentProxy,
+    pages?: DocumentPageAcquirer,
+    basePages?: DocumentPageAcquirer,
+  ): number {
     this.resetDocument();
     this.#pdf = pdf;
     this.#pages = pages ?? new DocumentPageUsage(pdf);
@@ -399,6 +429,8 @@ export class DocumentRenderer {
     const ownerDocument = this.#ownerWindow?.document;
     this.#fonts =
       this.#geometricFonts && ownerDocument?.fonts ? new DocumentFonts(ownerDocument) : null;
+    const fontPages = basePages ?? (this.#pages instanceof DocumentPageUsage ? this.#pages : null);
+    if (fontPages) this.#fonts?.bindPageUsage(fontPages);
     this.#documentId++;
     this.#initialReady = false;
     this.#initialReadinessPages = null;
@@ -490,6 +522,42 @@ export class DocumentRenderer {
     return true;
   }
 
+  /** Revokes only changed display slots, retaining their old pixels until replacement. */
+  invalidatePageSources(pages: ReadonlySet<number>): void {
+    if (!pages.size) return;
+    const generation = ++this.#contentGeneration;
+    for (const pageNo of pages) {
+      this.#pageContentGenerations.set(pageNo, generation);
+      this.#pageRenderDprLimits.delete(pageNo);
+      const lane = this.#presentationLanes.get(pageNo);
+      if (lane) {
+        lane.revision++;
+        lane.pending = null;
+      }
+    }
+    const documentId = this.#documentId;
+    this.#scheduler.cancelIncompatible(
+      operation => !pages.has(operation.pageNo),
+      task => safely(() => task.cancel()),
+    );
+    if (documentId !== this.#documentId) return;
+    for (const pageNo of pages) {
+      this.#detailTargets.delete(pageNo);
+      this.#dropDetail(pageNo, "source-changed");
+      if (documentId !== this.#documentId) return;
+      const output = this.#outputs.get(pageNo);
+      if (output?.state === "committed")
+        this.#replaceOutputRecord(
+          pageNo,
+          output,
+          Object.freeze({ ...output, state: "placeholder" }),
+        );
+    }
+    this.#lastPlanSignature = "";
+    if (this.#view && !this.#admissionSuspensions.size) this.#reconcileCurrent(true, false);
+    this.#enqueueDemandedPresentations();
+  }
+
   /** Revokes current work and blocks admission until the exact token is resumed. */
   suspendAdmission(): Readonly<RasterAdmissionSuspension> {
     const token = Symbol("document-renderer-admission");
@@ -574,7 +642,7 @@ export class DocumentRenderer {
     const ownsPages = this.#ownsPages;
     this.#pages = null;
     this.#ownsPages = false;
-    if (pages && ownsPages) void pages.close();
+    if (pages && ownsPages) settlements.push((pages as DocumentPageUsage).close());
     this.#view = null;
     this.#pageContentGenerations.clear();
     this.#globalContentGeneration = ++this.#contentGeneration;
@@ -1238,6 +1306,27 @@ export class DocumentRenderer {
         const lease = this.#surfaces.leaseFor(pageNo);
         if (!lease || !this.#surfaces.isCurrent(lease)) return null;
         capturedLease = lease;
+        const previous = this.#outputs.get(pageNo);
+        const replacingSource =
+          previous &&
+          previous.state !== "direct-mutating" &&
+          previous.sourceRevision !== (this.#pages?.revision?.(pageNo) ?? 0);
+        // A different source must never destroy readable pixels to make room for itself.
+        if (replacingSource) {
+          const memory = this.snapshot();
+          const occupied =
+            memory.committedBytes +
+            memory.placeholderBytes +
+            memory.directMutatingBytes +
+            memory.detailBytes;
+          const transient = Math.max(memory.reservationBytes, memory.activeTemporaryBytes);
+          if (
+            requiresDirectCanvas ||
+            occupied + transient + this.#rasterBytes(pageNo, renderDpr, view) * 2 >
+              this.#settings.memoryLimitMiB * BYTES_PER_MIB
+          )
+            return null;
+        }
         const direct = requiresDirectCanvas;
         return {
           pdf,
@@ -1263,6 +1352,7 @@ export class DocumentRenderer {
         operation,
         Object.freeze({
           documentId: this.#documentId,
+          sourceRevision: this.#pages?.revision?.(operation.pageNo) ?? 0,
           lease: capturedLease,
           contentGeneration: this.#contentGenerationFor(operation.pageNo),
           rasterState: operation.requirement.rasterState,
@@ -1584,11 +1674,25 @@ export class DocumentRenderer {
     const started = Date.now();
     try {
       use = (await this.#pages?.acquire(operation.pageNo)) ?? null;
-      if (!use || !this.#detailIsCurrent(operation)) return;
-      const fonts = this.#fonts;
-      if (fonts)
-        await fonts.prepare(use.page, target.base.rasterState.annotationMode, operation.signal);
-      if (!this.#detailIsCurrent(operation)) return;
+      if (
+        !use ||
+        !this.#sourceUseMatches(operation.pageNo, target.base.sourceRevision, use) ||
+        !this.#detailIsCurrent(operation)
+      )
+        return;
+      const source = use.source;
+      const fonts = source?.fonts ?? (source?.id != null ? null : this.#fonts);
+      const annotationMode = source?.id != null ? 1 : target.base.rasterState.annotationMode;
+      const optionalContentConfigPromise =
+        source?.id != null
+          ? source.optionalContentConfigPromise
+          : operation.requirement.rasterState.optionalContentConfigPromise;
+      if (fonts) await fonts.prepare(use.page, annotationMode, operation.signal);
+      if (
+        !this.#sourceUseMatches(operation.pageNo, target.base.sourceRevision, use) ||
+        !this.#detailIsCurrent(operation)
+      )
+        return;
       const { raster, base } = target;
       let operationsFilter: Parameters<PDFJS.PDFPageProxy["render"]>[0]["operationsFilter"];
       if (base.annotationCanvasIds.size > 0) {
@@ -1627,14 +1731,9 @@ export class DocumentRenderer {
           viewport: base.viewport,
           transform: [raster.dpr, 0, 0, raster.dpr, -raster.x * raster.dpr, -raster.y * raster.dpr],
           intent: "display",
-          annotationMode: base.rasterState.annotationMode,
+          annotationMode,
           ...(operationsFilter ? { operationsFilter } : {}),
-          ...(operation.requirement.rasterState.optionalContentConfigPromise
-            ? {
-                optionalContentConfigPromise:
-                  operation.requirement.rasterState.optionalContentConfigPromise,
-              }
-            : {}),
+          ...(optionalContentConfigPromise ? { optionalContentConfigPromise } : {}),
         },
         undefined,
         canvasContext !== drawing && fonts
@@ -1659,7 +1758,11 @@ export class DocumentRenderer {
         },
       );
       await render.promise;
-      if (!this.#detailIsCurrent(operation)) return;
+      if (
+        !this.#sourceUseMatches(operation.pageNo, target.base.sourceRevision, use) ||
+        !this.#detailIsCurrent(operation)
+      )
+        return;
       if (drawing.isContextLost?.()) throw new Error("Detail canvas context was lost");
       const style = canvas.style;
       canvas.className = "pdf-detail-canvas";
@@ -1719,6 +1822,10 @@ export class DocumentRenderer {
             errorMessage: error instanceof Error ? error.message : String(error),
           },
         );
+        if (this.#detailIsCurrent(operation))
+          this.#callback(() =>
+            this.#callbacks.sourceFailed?.(operation.pageNo, target.base.sourceRevision, error),
+          );
       }
     } finally {
       if (!committed && canvas) {
@@ -1813,18 +1920,23 @@ export class DocumentRenderer {
       if (!pages) throw new Error("Renderer page usage is unavailable");
       const acquisitionStarted = measure ? performance.now() : 0;
       pageUse = await pages.acquire(operation.pageNo);
+      if (!this.#sourceUseMatches(operation.pageNo, context.sourceRevision, pageUse)) return;
+      if (pageUse.source) this.#operationSources.set(operation, pageUse.source);
       if (measure) pageAcquisitionMs = performance.now() - acquisitionStarted;
       const page = pageUse.page;
       if (!this.#operationIsCurrent(operation, context)) return;
-      const fonts = this.#fonts;
+      const source = pageUse.source;
+      const fonts = source?.fonts ?? (source?.id != null ? null : this.#fonts);
+      const annotationMode =
+        source?.id != null ? 1 : operation.requirement.rasterState.annotationMode;
+      const optionalContentConfigPromise =
+        source?.id != null
+          ? source.optionalContentConfigPromise
+          : operation.requirement.rasterState.optionalContentConfigPromise;
       if (fonts) {
         stage = "font-preparation";
         const fontsStarted = measure ? performance.now() : 0;
-        await fonts.prepare(
-          page,
-          operation.requirement.rasterState.annotationMode,
-          operation.signal,
-        );
+        await fonts.prepare(page, annotationMode, operation.signal);
         if (measure) fontPreparationMs = performance.now() - fontsStarted;
       }
       if (!this.#operationIsCurrent(operation, context)) return;
@@ -1870,6 +1982,8 @@ export class DocumentRenderer {
           documentId: context.documentId,
           pageNo: operation.pageNo,
           contentGeneration: context.contentGeneration,
+          sourceRevision: context.sourceRevision,
+          source,
           lease: context.lease,
           state: "direct-mutating",
           budget: Object.freeze({ ...budget }),
@@ -1887,10 +2001,10 @@ export class DocumentRenderer {
         const canvas = context.lease.canvas;
         const drawing = this.#allocateCanvas(canvas, budget.bufferWidth, budget.bufferHeight);
         drawing.setTransform(
-          this.#fonts ? 1 : budget.renderDpr,
+          fonts ? 1 : budget.renderDpr,
           0,
           0,
-          this.#fonts ? 1 : budget.renderDpr,
+          fonts ? 1 : budget.renderDpr,
           0,
           0,
         );
@@ -1904,14 +2018,9 @@ export class DocumentRenderer {
             viewport,
             ...(fonts ? { transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0] } : {}),
             intent: "display",
-            annotationMode: operation.requirement.rasterState.annotationMode,
+            annotationMode,
             annotationCanvasMap,
-            ...(operation.requirement.rasterState.optionalContentConfigPromise
-              ? {
-                  optionalContentConfigPromise:
-                    operation.requirement.rasterState.optionalContentConfigPromise,
-                }
-              : {}),
+            ...(optionalContentConfigPromise ? { optionalContentConfigPromise } : {}),
           },
           undefined,
           canvasContext !== drawing && fonts
@@ -1951,10 +2060,10 @@ export class DocumentRenderer {
         const drawing = this.#allocateCanvas(temporary, budget.bufferWidth, budget.bufferHeight);
         if (!this.#scheduler.recordOffscreenAllocation(operation, budget.pixelCount)) return;
         drawing.setTransform(
-          this.#fonts ? 1 : budget.renderDpr,
+          fonts ? 1 : budget.renderDpr,
           0,
           0,
-          this.#fonts ? 1 : budget.renderDpr,
+          fonts ? 1 : budget.renderDpr,
           0,
           0,
         );
@@ -1968,14 +2077,9 @@ export class DocumentRenderer {
             viewport,
             ...(fonts ? { transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0] } : {}),
             intent: "display",
-            annotationMode: operation.requirement.rasterState.annotationMode,
+            annotationMode,
             annotationCanvasMap,
-            ...(operation.requirement.rasterState.optionalContentConfigPromise
-              ? {
-                  optionalContentConfigPromise:
-                    operation.requirement.rasterState.optionalContentConfigPromise,
-                }
-              : {}),
+            ...(optionalContentConfigPromise ? { optionalContentConfigPromise } : {}),
           },
           undefined,
           canvasContext !== drawing && fonts
@@ -2022,8 +2126,15 @@ export class DocumentRenderer {
       }
 
       const output = this.#outputs.get(operation.pageNo);
-      if (output?.state === "committed" && this.#outputIsCurrent(output)) {
+      if (
+        output?.operation === operation &&
+        output.state === "committed" &&
+        this.#outputIsCurrent(output)
+      ) {
         presentationOutput = output;
+        this.#callback(() =>
+          this.#callbacks.sourceRendered?.(operation.pageNo, context.sourceRevision),
+        );
       }
       // End before diagnostics, cleanup, and independent overlay presentation.
       const completed = measure ? performance.now() : 0;
@@ -2063,9 +2174,8 @@ export class DocumentRenderer {
       this.#releaseAnnotationOwner(operation);
       if (!committed && !directMutating)
         this.#releaseUnownedAnnotationCanvases(annotationCanvasMap);
-      if (directMutating) this.#clearDirectMutation(operation, context);
       const failedCurrent =
-        !committed && failure != null && this.#scheduler.ownsOperation(operation);
+        !committed && failure != null && this.#operationIsCurrent(operation, context);
       if (committed) {
         const key = this.#requirementKey(operation.pageNo);
         this.#rasterFailureAttempts.delete(key);
@@ -2073,7 +2183,22 @@ export class DocumentRenderer {
       } else if (failedCurrent) {
         this.#recordRasterFailure(operation, failure);
       }
+      // Eviction can retire the canvas registration; classify failures on the original lease first.
+      if (directMutating) this.#clearDirectMutation(operation, context);
       const settledKnown = this.#scheduler.settleOperation(operation);
+      if (
+        failedCurrent &&
+        context.documentId === this.#documentId &&
+        context.contentGeneration === this.#contentGenerationFor(operation.pageNo) &&
+        this.#sourceIsCurrent(
+          operation.pageNo,
+          context.sourceRevision,
+          this.#operationSources.get(operation),
+        )
+      )
+        this.#callback(() =>
+          this.#callbacks.sourceFailed?.(operation.pageNo, context.sourceRevision, failure),
+        );
       if (measure && !committed && (operation.signal.aborted || failure != null)) {
         this.#diagnostic(
           "debug",
@@ -2203,6 +2328,8 @@ export class DocumentRenderer {
       documentId: context.documentId,
       pageNo: operation.pageNo,
       contentGeneration: context.contentGeneration,
+      sourceRevision: context.sourceRevision,
+      source: this.#operationSources.get(operation),
       lease: context.lease,
       state: "committed",
       budget,
@@ -2301,6 +2428,11 @@ export class DocumentRenderer {
       operation.pdf === this.#pdf &&
       operation.documentGeneration === this.#documentId &&
       context.contentGeneration === this.#contentGenerationFor(operation.pageNo) &&
+      this.#sourceIsCurrent(
+        operation.pageNo,
+        context.sourceRevision,
+        this.#operationSources.get(operation),
+      ) &&
       operation.requirement.rasterState.annotationMode === this.#rasterState.annotationMode &&
       this.#scheduler.ownsOperation(operation) &&
       this.#operationSatisfiesCurrent(operation, resultDpr) &&
@@ -2315,6 +2447,11 @@ export class DocumentRenderer {
     return (
       requirement != null &&
       context?.contentGeneration === this.#contentGenerationFor(operation.pageNo) &&
+      this.#sourceIsCurrent(
+        operation.pageNo,
+        context.sourceRevision,
+        this.#operationSources.get(operation),
+      ) &&
       renderOperationSatisfies(
         operation,
         {
@@ -2358,7 +2495,7 @@ export class DocumentRenderer {
 
   #requirementKey(pageNo: number): string {
     const requirement = this.#scheduler.currentRequirementFor(pageNo);
-    return `${pageNo}|${requirement?.scale ?? this.#view?.scale ?? 0}|${requirement?.renderDpr ?? 0}|${this.#view?.rotation ?? 0}|${this.#contentGenerationFor(pageNo)}|${this.#rasterState.annotationMode}`;
+    return `${pageNo}|${requirement?.scale ?? this.#view?.scale ?? 0}|${requirement?.renderDpr ?? 0}|${this.#view?.rotation ?? 0}|${this.#contentGenerationFor(pageNo)}|${this.#rasterState.annotationMode}|${this.#pages?.revision?.(pageNo) ?? 0}`;
   }
 
   #pageHasTerminalFailure(pageNo: number): boolean {
@@ -2442,11 +2579,33 @@ export class DocumentRenderer {
   #outputIsCurrent(output: RenderOutput): boolean {
     return (
       output.documentId === this.#documentId &&
+      this.#sourceIsCurrent(output.pageNo, output.sourceRevision, output.source) &&
       output.contentGeneration === this.#contentGenerationFor(output.pageNo) &&
       output.rasterState.annotationMode === this.#rasterState.annotationMode &&
       this.#surfaces.isCurrent(output.lease) &&
       output.lease.canvas.width === output.budget.bufferWidth &&
       output.lease.canvas.height === output.budget.bufferHeight
+    );
+  }
+
+  /** Slot revision and acquired authority are independent of physical page lifetime. */
+  #sourceIsCurrent(
+    pageNo: number,
+    revision: number,
+    source?: Readonly<DocumentPageSourceContext>,
+  ): boolean {
+    return (
+      revision === (this.#pages?.revision?.(pageNo) ?? 0) &&
+      (!source ||
+        (source.revision === revision && source.logicalPage === pageNo && source.isCurrent()))
+    );
+  }
+
+  /** A late acquisition cannot supply a newer source to an older admitted request. */
+  #sourceUseMatches(pageNo: number, revision: number, use: DocumentPageUse): boolean {
+    return (
+      (use.source?.revision ?? 0) === revision &&
+      this.#sourceIsCurrent(pageNo, revision, use.source)
     );
   }
 
@@ -2551,9 +2710,10 @@ export class DocumentRenderer {
       !latest ||
       (latest.documentId === this.#documentId &&
         latest.pdf === pdf &&
-        latest.lease === lease &&
+        isSameSurfaceLease(latest.lease, lease) &&
         latest.scale === scale &&
         latest.rotation === this.#view?.rotation &&
+        latest.sourceRevision === (this.#pages?.revision?.(pageNo) ?? 0) &&
         (!latest.output || !output || latest.output === output));
     if (currentLane && !compatible) {
       currentLane.revision++;
@@ -2568,9 +2728,10 @@ export class DocumentRenderer {
       candidate.capabilities[capability] &&
       candidate.documentId === this.#documentId &&
       candidate.pdf === pdf &&
-      candidate.lease === lease &&
+      isSameSurfaceLease(candidate.lease, lease) &&
       candidate.scale === scale &&
       candidate.rotation === this.#view?.rotation &&
+      candidate.sourceRevision === (this.#pages?.revision?.(pageNo) ?? 0) &&
       (capability !== "text" ||
         candidate.textRevision === (this.#presentationTextRevisions.get(pageNo) ?? 0)) &&
       (!candidate.output || !output || candidate.output === output);
@@ -2592,6 +2753,7 @@ export class DocumentRenderer {
       documentId: this.#documentId,
       pdf,
       pageNo,
+      sourceRevision: this.#pages?.revision?.(pageNo) ?? 0,
       lease,
       scale,
       output,
@@ -2643,7 +2805,11 @@ export class DocumentRenderer {
         lane.active = request;
         try {
           if (!this.#presentationRequestIsCurrent(request)) continue;
-          if (lane.use && lane.useDocumentId !== request.documentId) {
+          if (
+            lane.use &&
+            (lane.useDocumentId !== request.documentId ||
+              !this.#sourceUseMatches(pageNo, request.sourceRevision, lane.use))
+          ) {
             lane.use.release();
             lane.use = null;
             lane.useDocumentId = null;
@@ -2652,7 +2818,13 @@ export class DocumentRenderer {
             lane.use = (await this.#pages?.acquire(pageNo)) ?? null;
             lane.useDocumentId = lane.use ? request.documentId : null;
           }
-          if (!lane.use || !this.#presentationRequestIsCurrent(request)) continue;
+          if (
+            !lane.use ||
+            !this.#sourceUseMatches(pageNo, request.sourceRevision, lane.use) ||
+            !this.#presentationRequestIsCurrent(request)
+          )
+            continue;
+          const use = lane.use;
           const viewport =
             request.output?.viewport ??
             lane.use.page.getViewport({
@@ -2663,6 +2835,7 @@ export class DocumentRenderer {
           this.#publishPageGeometry(request.lease, viewport);
           if (!this.#presentationRequestIsCurrent(request)) continue;
           const isCurrent = (capability: keyof RenderPresentationCapabilities) =>
+            this.#sourceUseMatches(pageNo, request.sourceRevision, use) &&
             this.#presentationCapabilityIsCurrent(request, capability);
           if (request.output)
             this.#retainAnnotationOwner(request, request.output.annotationCanvasMap);
@@ -2673,6 +2846,7 @@ export class DocumentRenderer {
               lease: request.lease,
               viewport,
               page: lane.use.page,
+              source: lane.use.source,
               generation: request.generation,
               capabilities: request.capabilities,
               isCurrent,
@@ -2700,6 +2874,7 @@ export class DocumentRenderer {
   #presentationRequestIsCurrent(request: PresentationRequest): boolean {
     return (
       request.documentId === this.#documentId &&
+      request.sourceRevision === (this.#pages?.revision?.(request.pageNo) ?? 0) &&
       request.pdf === this.#pdf &&
       this.#presentationLanes.get(request.pageNo)?.revision === request.revision &&
       this.#surfaces.isCurrent(request.lease) &&

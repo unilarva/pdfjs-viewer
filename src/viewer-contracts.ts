@@ -1793,6 +1793,140 @@ export type PdfjsViewerLayerPageDependenciesResult =
       /** Invalid IDs, pages, or duplicates, or a document token from another load. */
       readonly reason: "invalid-dependencies" | "stale-document";
     };
+/** Exactly one immutable PDF backing input for a read-only display source. */
+export type PdfjsViewerPageSourceInput =
+  | {
+      /** Snapshotted on admission; never transferred or retained as caller-mutable storage. */
+      readonly data: Uint8Array;
+      /** A descriptor cannot contain both byte and Blob backing. */
+      readonly blob?: never;
+    }
+  | {
+      /** Immutable native Blob backing; read into fresh bytes only when opening the PDF. */
+      readonly blob: Blob;
+      /** A descriptor cannot contain both byte and Blob backing. */
+      readonly data?: never;
+    };
+/** Source ownership belongs to one exact viewer and admitted base-document lifetime. */
+export interface PdfjsViewerPageSource {
+  /** Opaque source identity; its spelling has no consumer-defined meaning. */
+  readonly id: string;
+  /** Number of 1-based physical pages available within this source. */
+  readonly pageCount: number;
+  /** Backing byte length charged to the viewer's immutable auxiliary-source cache. */
+  readonly byteLength: number;
+  /** Idempotently releases caller ownership, not installed mappings or admitted readers. */
+  release(): void;
+}
+/** Loading cancellation and explicit internal-link interpretation for display sources. */
+export interface PdfjsViewerPageSourcePreparationOptions {
+  /** Cancels only this preparation, not an earlier installed source. */
+  readonly signal?: AbortSignal;
+  /**
+   * Defaults to "source": source-local destinations must map to one installed logical slot.
+   * "base" attests that named/numeric destinations already address the canonical base PDF;
+   * foreign indirect page references are rejected in that mode.
+   */
+  readonly linkContext?: "source" | "base";
+}
+/** A display-source request rejected without publishing a partial mapping. */
+export interface PdfjsViewerPageSourceFailure {
+  /** Indicates that preparation or mapping publication did not succeed. */
+  readonly ok: false;
+  /** Stable failure category; opaque handles are never accepted by structural resemblance alone. */
+  readonly reason:
+    | "destroyed"
+    | "not-ready"
+    | "stale-document"
+    | "cancelled"
+    | "superseded"
+    | "invalid-source"
+    | "invalid-page"
+    | "geometry-mismatch"
+    | "unsupported"
+    | "resource-limit"
+    | "error";
+  /** Invalid logical pages, when the failure can identify them. */
+  readonly pages?: readonly number[];
+  /** Original load/validation failure when available. */
+  readonly error?: unknown;
+}
+/** Preparation validates a source but does not change any displayed logical page. */
+export type PdfjsViewerPageSourcePreparationResult =
+  | {
+      /** The source is validated and available for mapping publication. */
+      readonly ok: true;
+      /** Caller-owned prepared source; release when no longer needed for new assignments. */
+      readonly source: PdfjsViewerPageSource;
+    }
+  | PdfjsViewerPageSourceFailure;
+/** One 1-based logical slot assignment; unmentioned slots are untouched. */
+export type PdfjsViewerPageSourceOverride =
+  | {
+      /** Logical page within the canonical base document. */
+      readonly page: number;
+      /** Null restores the canonical base page at this slot. */
+      readonly source: null;
+    }
+  | {
+      /** Logical page within the canonical base document. */
+      readonly page: number;
+      /** Exact live caller-owned handle returned by this viewer's preparation API. */
+      readonly source: PdfjsViewerPageSource;
+      /** Physical page within the prepared source, independently 1-based. */
+      readonly sourcePage: number;
+    };
+/** Cancellation for one pending batch, before its authoritative publication point. */
+export interface PdfjsViewerPageSourceMutationOptions {
+  /** Cancels pending validation, without undoing an already published mapping. */
+  readonly signal?: AbortSignal;
+}
+/** One atomically committed display mapping; raster replacement is a separate lazy phase. */
+export interface PdfjsViewerPageSourceState {
+  /** Monotonic display-mapping revision; no-op batches retain the current revision. */
+  readonly revision: number;
+  /** Logical pages changed by this batch, not every previously overridden page. */
+  readonly pages: readonly number[];
+}
+/** Success attests mapping publication, not source preparation or eager rasterization. */
+export type PdfjsViewerPageSourceMutationResult =
+  | ({
+      /** The entire batch is authoritative, including successful no-op batches. */
+      readonly ok: true;
+    } & PdfjsViewerPageSourceState)
+  | PdfjsViewerPageSourceFailure;
+/** Fired after all display-derived owners accept an authoritative mapping change. */
+export interface PdfjsViewerPageSourcesChangeEvent extends CustomEvent<
+  PdfjsViewerPageSourceState & { readonly documentId: number }
+> {
+  type: "pdf:pagesourceschange";
+}
+/** Lazy pixel completion is separate from atomic mapping publication. */
+export type PdfjsViewerPageContentDetail = {
+  /** Exact base-document token that owns the logical slot. */
+  readonly documentId: number;
+  /** 1-based canonical page number, never the auxiliary PDF's page number. */
+  readonly page: number;
+  /** Revision of this slot, including a restoration to its base source. */
+  readonly revision: number;
+  /** Opaque auxiliary identity, or null when the logical slot uses its base page. */
+  readonly sourceId: string | null;
+} & (
+  | {
+      /** Current replacement pixels committed successfully. */
+      readonly status: "ready";
+    }
+  | {
+      /** The current replacement failed without attesting pixel completion. */
+      readonly status: "error";
+      /** Original current-revision rendering failure. */
+      readonly error: unknown;
+    }
+);
+/** Fired only for current display-source revisions after replacement pixels commit or fail. */
+export interface PdfjsViewerPageContentEvent extends CustomEvent<PdfjsViewerPageContentDetail> {
+  type: "pdf:pagecontent";
+}
 /** Geometry of a page-anchored overlay in page-local CSS pixels, independent of DPR. */
 export interface PdfjsViewerPageOverlayGeometry {
   /** Transformed anchor measured from the page's left edge. */

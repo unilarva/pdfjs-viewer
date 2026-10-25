@@ -25,7 +25,11 @@
  */
 
 import type * as DefaultPdfjs from "pdfjs-dist";
-import { readPdfjsWorkerPort, writePdfjsWorkerPort } from "./pdfjs-compatibility.js";
+import {
+  constructPdfjsWorker,
+  readPdfjsWorkerPort,
+  writePdfjsWorkerPort,
+} from "./pdfjs-compatibility.js";
 import {
   PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS,
   type PdfjsViewerPdfjsVersionPolicy,
@@ -138,6 +142,12 @@ export interface RuntimeViewerRegistration {
   handleKeyboardEvent(event: KeyboardEvent): void;
 }
 
+/** Keeps a shared public PDFWorker alive until one auxiliary loading task physically settles. */
+export interface RuntimeDocumentWorkerUse {
+  readonly worker: DefaultPdfjs.PDFWorker;
+  release(): void;
+}
+
 interface PdfjsWorkerLease {
   pdfjs: PdfjsViewerPdfjsModule;
   workerSrc: string | null;
@@ -151,6 +161,9 @@ interface PdfjsWorkerLease {
   previousWorkerPort: Worker | null | undefined;
   installedWorkerPort: Worker | null;
   runtimes: Set<PdfjsViewerRuntime>;
+  documentWorker: DefaultPdfjs.PDFWorker | null;
+  ownsDocumentWorker: boolean;
+  documentWorkerUses: number;
 }
 
 interface PdfjsGlobalWorkerOptionsCompat {
@@ -169,6 +182,7 @@ export interface PdfjsViewerRuntimeAccess {
   deactivateViewer(viewerId: string, ownerWindow: Window): void;
   attachViewer(): void;
   detachViewer(): void;
+  acquireDocumentWorker(): RuntimeDocumentWorkerUse;
   isActiveViewer(viewerId: string, ownerWindow: Window): boolean;
 }
 
@@ -311,6 +325,7 @@ export class PdfjsViewerRuntime {
       deactivateViewer: (viewerId, ownerWindow) => this.#deactivateViewer(viewerId, ownerWindow),
       attachViewer: () => this.#attachViewer(),
       detachViewer: () => this.#detachViewer(),
+      acquireDocumentWorker: () => this.#acquireDocumentWorker(),
       isActiveViewer: (viewerId, ownerWindow) => this.#isActiveViewer(viewerId, ownerWindow),
     });
   }
@@ -407,6 +422,48 @@ export class PdfjsViewerRuntime {
     return !active || active === viewerId;
   }
 
+  /** Explicit worker injection prevents auxiliary task destruction from destroying a shared worker. */
+  #acquireDocumentWorker(): RuntimeDocumentWorkerUse {
+    this.#assertAlive();
+    this.#claimPdfjsGlobals();
+    const lease = pdfjsWorkerLease!;
+    if (!lease.documentWorker) {
+      const PDFWorker = this.#pdfjs.PDFWorker;
+      if (typeof PDFWorker !== "function" || typeof PDFWorker.create !== "function") {
+        throw new Error(
+          "PdfjsViewerRuntime: document loading requires the qualified public PDFWorker.create API",
+        );
+      }
+      const options = { ...(lease.boundWorker ? { port: lease.boundWorker } : {}) };
+      try {
+        // The factory can silently return a host-owned wrapper. The constructor
+        // proves ownership, or reports the qualified release's cached-port collision.
+        lease.documentWorker = constructPdfjsWorker(this.#pdfjs, options);
+        lease.ownsDocumentWorker = true;
+      } catch (error) {
+        if (
+          !lease.boundWorker ||
+          Object.prototype.toString.call(error) !== "[object Error]" ||
+          (error as Error).message !== "Cannot use more than one PDFWorker per port."
+        )
+          throw error;
+        lease.documentWorker = PDFWorker.create(options);
+        lease.ownsDocumentWorker = false;
+      }
+    }
+    lease.documentWorkerUses++;
+    let released = false;
+    return {
+      worker: lease.documentWorker,
+      release: () => {
+        if (released) return;
+        released = true;
+        lease.documentWorkerUses--;
+        this.#finishPdfjsWorkerLease(lease);
+      },
+    };
+  }
+
   #claimPdfjsGlobals(): void {
     this.#assertWorkerCompatible();
     if (!pdfjsWorkerLease) {
@@ -426,6 +483,9 @@ export class PdfjsViewerRuntime {
         previousWorkerPort: workerPort.value,
         installedWorkerPort: boundWorker,
         runtimes: new Set(),
+        documentWorker: null,
+        ownsDocumentWorker: false,
+        documentWorkerUses: 0,
       };
       try {
         if (lease.workerSrc) globals.workerSrc = lease.workerSrc;
@@ -461,7 +521,19 @@ export class PdfjsViewerRuntime {
 
   #releasePdfjsGlobals(): void {
     const lease = pdfjsWorkerLease;
-    if (!lease || !lease.runtimes.delete(this) || lease.runtimes.size) return;
+    if (!lease || !lease.runtimes.delete(this)) return;
+    this.#finishPdfjsWorkerLease(lease);
+  }
+
+  /** Restores globals only after all runtimes and auxiliary physical users release them. */
+  #finishPdfjsWorkerLease(lease: PdfjsWorkerLease): void {
+    if (pdfjsWorkerLease !== lease || lease.runtimes.size || lease.documentWorkerUses) return;
+    pdfjsWorkerLease = null;
+    try {
+      if (lease.ownsDocumentWorker) lease.documentWorker?.destroy();
+    } catch {
+      /* The public facade may already have been destroyed by a base loading task. */
+    }
     if (lease.ownsBoundWorker)
       try {
         lease.boundWorker?.terminate();
@@ -477,7 +549,6 @@ export class PdfjsViewerRuntime {
     } catch {
       /* PDF.js worker globals may be unavailable during teardown. */
     }
-    pdfjsWorkerLease = null;
   }
 
   #isCompatibleWith(lease: PdfjsWorkerLease): boolean {

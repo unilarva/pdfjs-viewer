@@ -247,6 +247,301 @@ function context(
   } as unknown as RenderPresentationContext;
 }
 
+function sourceContext(
+  wrapper: FakeElement,
+  annotations: unknown[] | Promise<unknown[]>,
+  source: Partial<NonNullable<RenderPresentationContext["source"]>> = {},
+  pageNo = 7,
+): RenderPresentationContext {
+  const base = context(wrapper, annotations);
+  return {
+    ...base,
+    pageNo,
+    lease: { ...base.lease, pageNo },
+    source: {
+      id: "auxiliary",
+      revision: 1,
+      logicalPage: pageNo,
+      sourcePage: 1,
+      pdf: {} as never,
+      linkContext: "source",
+      isCurrent: () => true,
+      ...source,
+    },
+  };
+}
+
+test("auxiliary links use their page/config without base forms, storage, fields or rich annotations", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const presentation = owner(
+      {},
+      undefined,
+      { enabled: true, popups: true, fileAttachments: true },
+      { interactive: true, xfa: true },
+    );
+    await presentation.beginDocument(formPdf(new FakeAnnotationStorage()));
+    assert.equal(presentation.formsEnabled, true);
+    const config = { auxiliary: true };
+    const wrapper = new FakeElement();
+    const ctx = sourceContext(
+      wrapper,
+      [
+        { annotationType: 2, id: "1R", dest: [0, { name: "Fit" }] },
+        { annotationType: 2, id: "uri", url: "/local" },
+        { annotationType: 2, id: "unsafe", url: "javascript:alert(1)" },
+        { annotationType: 2, id: "ocg", setOCGState: { state: ["ON", "1R"] } },
+        { annotationType: 2, id: "js", actions: { U: ["alert(1)"] }, dest: "named" },
+        { annotationType: 2, id: "ap", hasAppearance: true, dest: "named" },
+        { annotationType: 2, id: "attachment", attachmentId: "file", attachment: {} },
+        { annotationType: 20, id: "field-1", fieldType: "Tx" },
+        { annotationType: 9, id: "markup" },
+      ],
+      { optionalContentConfigPromise: Promise.resolve(config) as never },
+    );
+    await presentation.present(ctx);
+    const layer = FakeAnnotationLayer.instances[0];
+    const render = layer.renders[0];
+    assert.equal(layer.params.page, ctx.page);
+    assert.equal(render.optionalContentConfig, config);
+    assert.equal(render.renderForms, false);
+    assert.equal(render.annotationStorage, undefined);
+    assert.equal(render.fieldObjects, null);
+    assert.equal(
+      (layer.params as unknown as { annotationStorage: unknown }).annotationStorage,
+      null,
+    );
+    const filtered = render.annotations as Array<Record<string, unknown>>;
+    assert.equal(filtered.length, 2);
+    assert.match(String(filtered[0].id), /source-7-auxiliary-1-1R$/);
+    assert.equal(filtered[1].url, "https://viewer.example/local");
+    assert.equal(FakeXfaLayer.renders.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("auxiliary annotation IDs are isolated by viewer, logical page, source ID and revision with forms off", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const presentation = owner();
+    const annotations = [{ annotationType: 2, id: "1R", dest: "named" }];
+    await presentation.present(sourceContext(new FakeElement(), annotations));
+    await presentation.present(sourceContext(new FakeElement(), annotations, {}, 8));
+    await presentation.present(sourceContext(new FakeElement(), annotations, { id: "other" }));
+    await presentation.present(
+      sourceContext(new FakeElement(), annotations, { id: "other", revision: 2 }),
+    );
+    await owner().present(sourceContext(new FakeElement(), annotations));
+    const ids = FakeAnnotationLayer.instances.map(
+      layer => (layer.renders[0].annotations as Array<{ id: string }>)[0].id,
+    );
+    assert.equal(new Set(ids).size, 5);
+    await presentation.present(context(new FakeElement(), annotations));
+    assert.equal(
+      (FakeAnnotationLayer.instances.at(-1)!.renders[0].annotations as Array<{ id: string }>)[0].id,
+      "1R",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("durable auxiliary destinations carry logical/source identity and reject revoked mappings without proxy RPC", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const intents: unknown[] = [];
+    let current = true;
+    let ocgCalls = 0;
+    const presentation = owner({
+      internalDestination: intent => {
+        intents.push(intent);
+      },
+      setOptionalContent: () => {
+        ocgCalls++;
+      },
+    });
+    const ctx = sourceContext(new FakeElement(), [{ annotationType: 2, id: "1R", dest: "named" }], {
+      isCurrent: () => current,
+      pdf: new Proxy(
+        {},
+        {
+          get: () => {
+            throw new Error("expired PDF RPC");
+          },
+        },
+      ) as never,
+    });
+    await presentation.present(ctx);
+    const service = FakeAnnotationLayer.instances[0].params.linkService;
+    service.goToDestination("named");
+    assert.deepEqual(intents, [{ destination: "named", pageNo: 7, sourceId: "auxiliary" }]);
+    service.executeSetOCGState({ state: ["ON", "1R"] });
+    assert.equal(ocgCalls, 0);
+    assert.equal(await service.getAttachmentContent("base-file"), null);
+    current = false;
+    service.goToDestination("stale");
+    assert.equal(intents.length, 1);
+    await presentation.present(sourceContext(new FakeElement(), [], { isCurrent: () => false }));
+    assert.equal(FakeAnnotationLayer.instances.length, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("targeted annotation invalidation revokes pending reads and writers but preserves unrelated layers", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const presentation = owner();
+    const unrelated = new FakeElement();
+    await presentation.present(
+      context(unrelated, [{ annotationType: 2, id: "base", dest: "base" }]),
+    );
+    const unrelatedLayer = FakeAnnotationLayer.instances[0];
+    const gate = deferred<void>();
+    FakeAnnotationLayer.renderGate = gate.promise;
+    const affected = new FakeElement();
+    const pending = presentation.present(
+      sourceContext(affected, [{ annotationType: 2, id: "1R", dest: "named" }]),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    const writer = FakeAnnotationLayer.instances[1];
+    assert.ok(writer);
+    presentation.invalidatePages(new Set([7]));
+    assert.equal((writer.params.div as unknown as HTMLElement).inert, true);
+    assert.equal(writer.destroyCount, 0);
+    assert.equal(unrelatedLayer.destroyCount, 0);
+    assert.equal(unrelated.children.length, 1);
+    gate.resolve();
+    await pending;
+    assert.equal(writer.destroyCount, 1);
+    assert.equal(affected.children.length, 0);
+    FakeAnnotationLayer.renderGate = null;
+    const read = deferred<unknown[]>();
+    const reading = presentation.present(sourceContext(affected, read.promise));
+    presentation.invalidatePages(new Set([7]));
+    read.resolve([{ annotationType: 2, id: "1R", dest: "named" }]);
+    await reading;
+    assert.equal(FakeAnnotationLayer.instances.length, 2);
+    await presentation.present(
+      sourceContext(affected, [{ annotationType: 2, id: "1R", dest: "new" }]),
+    );
+    assert.equal(affected.children.length, 1);
+    const service = FakeAnnotationLayer.instances[2].params.linkService;
+    presentation.invalidatePages(new Set([7]));
+    assert.equal(affected.children.length, 0);
+    service.goToDestination("stale");
+    assert.equal(unrelated.children.length, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("source currentness is checked after annotation reads independently of the renderer guard", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const gate = deferred<unknown[]>();
+    let current = true;
+    const presentation = owner();
+    const wrapper = new FakeElement();
+    const pending = presentation.present(
+      sourceContext(wrapper, gate.promise, { isCurrent: () => current }),
+    );
+    current = false;
+    gate.resolve([{ annotationType: 2, id: "1R", dest: "named" }]);
+    await pending;
+    assert.equal(FakeAnnotationLayer.instances.length, 0);
+    assert.equal(wrapper.children.length, 0);
+  } finally {
+    restore();
+  }
+});
+
+test("source revisions rebuild readonly annotation namespaces even when page, annotations and surface are unchanged", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const presentation = owner();
+    const ctx = sourceContext(new FakeElement(), [{ annotationType: 2, id: "1R", dest: "named" }]);
+    await presentation.present(ctx);
+    await presentation.present({ ...ctx, source: { ...ctx.source!, revision: 2 } });
+    assert.equal(FakeAnnotationLayer.instances.length, 2);
+    assert.equal(FakeAnnotationLayer.instances[0].destroyCount, 1);
+    const ids = FakeAnnotationLayer.instances.map(
+      layer => (layer.renders[0].annotations as Array<{ id: string }>)[0].id,
+    );
+    assert.notEqual(ids[0], ids[1]);
+    const layer = FakeAnnotationLayer.instances[1];
+    await presentation.present({ ...ctx, source: { ...ctx.source!, revision: 2 } });
+    assert.equal(layer.updates.length, 1);
+    assert.equal(FakeAnnotationLayer.instances.length, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("revoked auxiliary callbacks cannot publish asynchronous failure diagnostics", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const gate = deferred<void>();
+    let current = true;
+    const diagnostics: unknown[] = [];
+    const presentation = owner({
+      internalDestination: () => gate.promise,
+      diagnostic: entry => {
+        diagnostics.push(entry);
+      },
+    });
+    await presentation.present(
+      sourceContext(new FakeElement(), [{ annotationType: 2, id: "1R", dest: "named" }], {
+        isCurrent: () => current,
+      }),
+    );
+    FakeAnnotationLayer.instances[0].params.linkService.goToDestination("named");
+    current = false;
+    gate.reject(new Error("stale navigation failure"));
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(diagnostics, []);
+  } finally {
+    restore();
+  }
+});
+
+test("auxiliary readonly links do not inherit the base document's pure-XFA presentation path", async () => {
+  const restore = installFakeDocument();
+  resetFakeLayer();
+  try {
+    const presentation = owner({}, undefined, undefined, { interactive: true, xfa: true });
+    await presentation.beginDocument({
+      ...formPdf(new FakeAnnotationStorage()),
+      isPureXfa: true,
+      numPages: 1,
+      allXfaHtml: { name: "div", attributes: {}, children: [] },
+      getMetadata: async () => ({ info: { IsXFAPresent: true }, metadata: null }),
+      getFieldObjects: async () => null,
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    assert.equal(presentation.formPresentation, "pure-xfa");
+    const wrapper = new FakeElement();
+    await presentation.present(
+      sourceContext(wrapper, [{ annotationType: 2, id: "1R", dest: "named" }]),
+    );
+    assert.equal(FakeAnnotationLayer.instances.length, 1);
+    assert.equal(FakeAnnotationLayer.instances[0].renders[0].renderForms, false);
+    assert.equal(FakeXfaLayer.renders.length, 0);
+    assert.equal(wrapper.children.length, 1);
+  } finally {
+    restore();
+  }
+});
+
 test("runtime AnnotationLayer receives only policy-filtered links and stable package classes", async () => {
   const restoreDocument = installFakeDocument();
   resetFakeLayer();
@@ -600,7 +895,7 @@ test("focused annotation DOM never relaxes annotation-array or canvas-map identi
   }
 });
 
-test("reset synchronously destroys an in-flight layer and prevents stale render publication", async () => {
+test("reset synchronously revokes an in-flight layer and destroys after its writer settles", async () => {
   const restoreDocument = installFakeDocument();
   resetFakeLayer();
   try {
@@ -615,7 +910,11 @@ test("reset synchronously destroys an in-flight layer and prevents stale render 
     await Promise.resolve();
     assert.equal(FakeAnnotationLayer.instances.length, 1);
     presentation.reset();
-    assert.equal(FakeAnnotationLayer.instances[0].destroyCount, 1);
+    assert.equal(FakeAnnotationLayer.instances[0].destroyCount, 0);
+    assert.equal(
+      (FakeAnnotationLayer.instances[0].params.div as unknown as HTMLElement).inert,
+      true,
+    );
     gate.resolve();
     await pending;
     assert.equal(wrapper.children.length, 0);

@@ -32,7 +32,7 @@
  */
 
 import type * as PDFJS from "pdfjs-dist";
-import type { DocumentPageUse } from "./document-page-usage.js";
+import type { DocumentPageUse, DocumentPageSourceContext } from "./document-page-usage.js";
 import { compileTextQuery, findCompiledTextMatches } from "./text-matching.js";
 import { PDFJS_TEXT_CONTENT_PARAMS } from "./text-content-policy.js";
 import type { NormalizedTextQueryOptions } from "./viewer-options.js";
@@ -69,6 +69,8 @@ export interface DocumentTextMatch {
 interface DocumentSearchPage {
   readonly text: string;
   readonly items: readonly DocumentSearchTextItem[];
+  readonly source?: Readonly<DocumentPageSourceContext>;
+  readonly sourceRevision?: number;
 }
 
 /** Projects one page-stream range to the smallest ordered set of source items. */
@@ -168,7 +170,8 @@ export class DocumentSearch {
    * empty frozen array means the page was indexed but had no valid text items.
    */
   public itemsForPage(pageNo: number): readonly DocumentSearchTextItem[] | undefined {
-    return this.#pages.get(pageNo)?.items;
+    const page = this.#pages.get(pageNo);
+    return page && this.#sourceIsCurrent(page) ? page.items : undefined;
   }
 
   /** Discards all active-document state after close, replacement, or destruction. */
@@ -178,6 +181,18 @@ export class DocumentSearch {
     this.#ready = false;
     this.#error = null;
     this.#pages = new Map();
+  }
+
+  /** Drops replaced page text and revokes publication, retaining unaffected cached pages. */
+  public invalidatePages(pageNos: ReadonlySet<number>): void {
+    if (!pageNos.size) return;
+    this.#lifecycleGeneration++;
+    this.#indexPromise = null;
+    this.#ready = false;
+    this.#error = null;
+    const pages = new Map(this.#pages);
+    for (const page of pageNos) pages.delete(page);
+    this.#pages = pages;
   }
 
   /**
@@ -241,11 +256,11 @@ export class DocumentSearch {
 
   /** Returns canonical rich matches for an already-normalized current query. */
   public findMatches(query: string, options: NormalizedTextQueryOptions): DocumentTextMatch[] {
+    if (!this.#ready) return [];
     const compiled = compileTextQuery(query, options);
     const matches: DocumentTextMatch[] = [];
-    for (let page = 1; page <= this.#pages.size; page++) {
-      const indexedPage = this.#pages.get(page);
-      if (!indexedPage) continue;
+    for (const [page, indexedPage] of this.#pages) {
+      if (!this.#sourceIsCurrent(indexedPage)) continue;
       for (const match of findCompiledTextMatches(indexedPage.text, compiled)) {
         const segments = sourceSegments(indexedPage.items, match.index, match.length);
         if (segments.reduce((length, segment) => length + segment.length, 0) === match.length) {
@@ -271,11 +286,22 @@ export class DocumentSearch {
       const candidate = new Map<number, DocumentSearchPage>();
       for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
         if (!this.#isCurrent(host, pdf, generation, lifecycleGeneration)) return false;
+        const cached = this.#pages.get(pageNumber);
+        if (cached && this.#sourceIsCurrent(cached)) {
+          candidate.set(pageNumber, cached);
+          continue;
+        }
         const pageUse = await host.acquirePage(pageNumber);
         try {
-          if (!this.#isCurrent(host, pdf, generation, lifecycleGeneration)) return false;
+          const source = pageUse.source;
+          const sourceRevision = source?.revision;
+          const sourceCurrent = () =>
+            !source || (source.isCurrent() && source.revision === sourceRevision);
+          if (!this.#isCurrent(host, pdf, generation, lifecycleGeneration) || !sourceCurrent())
+            return false;
           const text = await pageUse.page.getTextContent(PDFJS_TEXT_CONTENT_PARAMS);
-          if (!this.#isCurrent(host, pdf, generation, lifecycleGeneration)) return false;
+          if (!this.#isCurrent(host, pdf, generation, lifecycleGeneration) || !sourceCurrent())
+            return false;
           if (!text || typeof text !== "object" || !Array.isArray(text.items)) {
             throw new TypeError(`DocumentSearch: page ${pageNumber} returned invalid text content`);
           }
@@ -299,6 +325,8 @@ export class DocumentSearch {
             Object.freeze({
               text: pageText,
               items: Object.freeze(items),
+              source,
+              sourceRevision,
             }),
           );
         } finally {
@@ -306,6 +334,7 @@ export class DocumentSearch {
         }
       }
       if (!this.#isCurrent(host, pdf, generation, lifecycleGeneration)) return false;
+      if ([...candidate.values()].some(page => !this.#sourceIsCurrent(page))) return false;
       if (candidate.size !== pageCount) {
         throw new Error("DocumentSearch: incomplete candidate index");
       }
@@ -315,11 +344,17 @@ export class DocumentSearch {
       return true;
     } catch (error) {
       if (!this.#isCurrent(host, pdf, generation, lifecycleGeneration)) return false;
-      this.#pages = new Map();
       this.#ready = false;
       this.#error = error;
       return false;
     }
+  }
+
+  /** Rechecks the immutable acquisition snapshot before indexing or publishing its text. */
+  #sourceIsCurrent(page: DocumentSearchPage): boolean {
+    return (
+      !page.source || (page.source.isCurrent() && page.source.revision === page.sourceRevision)
+    );
   }
 
   /** Copies one structurally valid item; malformed individual items are omitted. */

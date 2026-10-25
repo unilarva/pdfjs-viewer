@@ -122,6 +122,18 @@ import { DocumentLayers } from "./document-layers.js";
 import { LayerPageDependencies } from "./layer-page-dependencies.js";
 import { DocumentLayersPresentation } from "./document-layers-presentation.js";
 import { DocumentPageUsage, type DocumentPageUse } from "./document-page-usage.js";
+import { DocumentPageSources } from "./document-page-sources.js";
+import { DocumentFonts } from "./document-fonts.js";
+import type {
+  PdfjsViewerPageSourceInput,
+  PdfjsViewerPageSourcePreparationOptions,
+  PdfjsViewerPageSourcePreparationResult,
+  PdfjsViewerPageSourceOverride,
+  PdfjsViewerPageSourceMutationOptions,
+  PdfjsViewerPageSourceMutationResult,
+  PdfjsViewerPageContentDetail,
+} from "./viewer-contracts.js";
+import type { RuntimeDocumentWorkerUse } from "./pdfjs-viewer-runtime.js";
 import { DocumentTextPresentation } from "./document-text-presentation.js";
 import { DocumentPresentation } from "./document-presentation.js";
 import {
@@ -322,6 +334,10 @@ export class PdfjsViewer {
 
   #pdf: PDFJS.PDFDocumentProxy | null = null;
   #documentPageUsage: DocumentPageUsage | null = null;
+  #documentPageSources: DocumentPageSources | null = null;
+  #documentWorkerUse: RuntimeDocumentWorkerUse | null = null;
+  #documentTask: PDFJS.PDFDocumentLoadingTask | null = null;
+  #pageSourceBatchRevision = 0;
   #printGeometryPreparations = new Map<string, Promise<Readonly<PrintPageSize> | null>>();
   #pdfUrl: string | null = null;
   #pdfFilename: string | null = null;
@@ -433,6 +449,7 @@ export class PdfjsViewer {
   #previousBoundaryControlPress: BoundaryControlPress | null = null;
   #nextBoundaryControlPress: BoundaryControlPress | null = null;
   #pageNumEl: HTMLInputElement | null = null;
+  #pageNumberEditing = false;
   #pageCountEl: HTMLElement | null = null;
   #navigationHistoryBackBtnEl: HTMLButtonElement | null = null;
   #navigationHistoryForwardBtnEl: HTMLButtonElement | null = null;
@@ -551,6 +568,7 @@ export class PdfjsViewer {
       evicted: (_pageNo, lease) => {
         this.#documentPresentation?.evict(_pageNo, lease);
         this.#documentTextPresentation?.evict(_pageNo, lease);
+        this.#documentView.releaseRasterSurface(lease);
       },
       progress: (complete, total, done) => {
         if (!this.#showInitialRenderProgress) return;
@@ -594,6 +612,8 @@ export class PdfjsViewer {
       },
       annotationOperatorIds: () => this.#pdfjs.OPS,
       diagnostic: entry => this.#log(entry.level, entry.event, entry.message, entry.details),
+      sourceRendered: (page, revision) => this.#publishPageContent(page, revision),
+      sourceFailed: (page, revision, error) => this.#publishPageContent(page, revision, error),
       diagnosticsEnabled: () => this.#logger != null,
       primaryPressureChanged: pressure =>
         this.#rasterWorkCoordinator.setPrimaryPressure(
@@ -870,7 +890,13 @@ export class PdfjsViewer {
           forms: this.#features.forms,
         },
         {
-          internalDestination: intent => this.#followAnnotationDestination(intent.destination),
+          internalDestination: intent =>
+            this.#followAnnotationDestination(
+              intent.destination,
+              intent.sourceId != null && intent.pageNo != null
+                ? { pageNo: intent.pageNo, sourceId: intent.sourceId }
+                : undefined,
+            ),
           namedNavigation: action => this.#followAnnotationNamedAction(action),
           setOptionalContent: action => this.#documentLayers.executeSetOCGState(action),
           attachmentContent: id =>
@@ -1525,6 +1551,10 @@ export class PdfjsViewer {
     this.#setTextSelectionMode(false, false);
     const cancelled = this.#cancelDocumentWork();
 
+    const documentWorkerUse = this.#documentWorkerUse;
+    this.#documentWorkerUse = null;
+    const documentTask = this.#documentTask;
+    this.#documentTask = null;
     const loadingTask = this.#loadingTask;
     this.#loadingTask = null;
     const loadingSettlement = loadingTask
@@ -1577,8 +1607,19 @@ export class PdfjsViewer {
       loadingSettlement,
       ...cancelled.renderSettlements,
       ...cancelled.preparationSettlements,
-    ]).then(() => {
-      runCleanup(() => pdf?.cleanup());
+    ]).then(async () => {
+      try {
+        await pdf?.cleanup();
+      } catch {
+      } finally {
+        try {
+          // A task still loading was already destroyed by loadingSettlement.
+          if (documentTask !== loadingTask) await documentTask?.destroy();
+        } catch {
+        } finally {
+          documentWorkerUse?.release();
+        }
+      }
     });
 
     // Remove only UI created by this package. Caller-owned roots and custom UI stay intact.
@@ -2785,6 +2826,64 @@ export class PdfjsViewer {
     return this.#documentLayers.setVisibility(detached);
   }
 
+  /**
+   * Prepares a read-only display source without publishing any page mapping.
+   * Mutable bytes are snapshotted, immutable Blobs retained. The captured base-document token is required.
+   */
+  public async preparePageSource(
+    input: PdfjsViewerPageSourceInput,
+    documentId: number,
+    options: PdfjsViewerPageSourcePreparationOptions = {},
+  ): Promise<PdfjsViewerPageSourcePreparationResult> {
+    if (this.#destroyed) return { ok: false, reason: "destroyed" };
+    if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+    const sources = this.#documentPageSources;
+    if (this.#status !== "ready" || !sources) return { ok: false, reason: "not-ready" };
+    if (!input || typeof input !== "object") return { ok: false, reason: "invalid-source" };
+    if ("data" in input === "blob" in input) return { ok: false, reason: "invalid-source" };
+    const result = await sources.prepare("blob" in input ? input.blob! : input.data!, options);
+    if (
+      this.#destroyed ||
+      documentId !== this.#documentId ||
+      sources !== this.#documentPageSources
+    ) {
+      if (result.ok) result.source.release();
+      return { ok: false, reason: this.#destroyed ? "destroyed" : "stale-document" };
+    }
+    return result;
+  }
+
+  /**
+   * Atomically publishes fixed-geometry display substitutions. Completion attests mapping
+   * publication; `pdf:pagecontent` separately reports lazy current-pixel completion/failure.
+   * Base information, navigation identity, bytes, downloads and printing remain unchanged.
+   */
+  public async setPageSourceOverrides(
+    changes: readonly PdfjsViewerPageSourceOverride[],
+    documentId: number,
+    options: PdfjsViewerPageSourceMutationOptions = {},
+  ): Promise<PdfjsViewerPageSourceMutationResult> {
+    if (this.#destroyed) return { ok: false, reason: "destroyed" };
+    if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+    const sources = this.#documentPageSources;
+    if (this.#status !== "ready" || !sources) return { ok: false, reason: "not-ready" };
+    const result = await sources.setOverrides(changes, options);
+    if (this.#destroyed || documentId !== this.#documentId || sources !== this.#documentPageSources)
+      return { ok: false, reason: this.#destroyed ? "destroyed" : "stale-document" };
+    if (result.ok && result.pages.length) {
+      this.#pdfRootEl.dispatchEvent(
+        new this.#ownerWindow.CustomEvent("pdf:pagesourceschange", {
+          detail: Object.freeze({
+            documentId,
+            revision: result.revision,
+            pages: Object.freeze([...result.pages]),
+          }),
+        }),
+      );
+    }
+    return result;
+  }
+
   /** Restores optional-content visibility loaded from the PDF display intent. */
   public resetLayers(): Promise<PdfjsViewerLayerMutationResult> {
     this.#assertAlive("resetLayers");
@@ -3120,7 +3219,7 @@ export class PdfjsViewer {
         this.#handleRotationChange(restored);
         if (presentationPage !== this.#lastEmittedPage) {
           this.#lastEmittedPage = presentationPage;
-          if (this.#pageNumEl) this.#pageNumEl.value = String(presentationPage);
+          this.#syncPageNumber(presentationPage);
           this.#pdfRootEl.dispatchEvent(
             new this.#ownerWindow.CustomEvent("pdf:pagechange", {
               detail: { page: presentationPage },
@@ -4077,6 +4176,10 @@ export class PdfjsViewer {
     preparationSettlements: readonly Promise<unknown>[];
   } {
     this.#documentId = null;
+    const pageSources = this.#documentPageSources;
+    this.#documentPageSources = null;
+    const sourceSettlement = pageSources?.close();
+    this.#pageSourceBatchRevision = 0;
     this.#layerPageDependencies.clear();
     this.#documentView.clearPageOverlays();
     this.#cancelPresentationMode(true);
@@ -4100,6 +4203,7 @@ export class PdfjsViewer {
       ...this.#documentRenderer.resetDocument(),
       ...this.#documentThumbnails.resetDocument(),
     ];
+    if (sourceSettlement) renderSettlements.push(sourceSettlement);
     const pageUsage = this.#documentPageUsage;
     this.#documentPageUsage = null;
     if (pageUsage) renderSettlements.push(pageUsage.close());
@@ -4164,6 +4268,10 @@ export class PdfjsViewer {
    */
   async #closeDocument(): Promise<void> {
     const cancelled = this.#cancelDocumentWork();
+    const documentWorkerUse = this.#documentWorkerUse;
+    this.#documentWorkerUse = null;
+    const documentTask = this.#documentTask;
+    this.#documentTask = null;
     const loadingTask = this.#loadingTask;
     this.#loadingTask = null;
     const pdf = this.#pdf;
@@ -4187,7 +4295,7 @@ export class PdfjsViewer {
     this.#syncDownloadControl();
     this.#lastEmittedPage = 1;
     if (this.#pageCountEl) this.#pageCountEl.textContent = "?";
-    if (this.#pageNumEl) this.#pageNumEl.value = "1";
+    this.#syncPageNumber(1);
     this.#documentView.resetDocument();
     this.#searchQuery = "";
     this.#searchMatches = [];
@@ -4212,7 +4320,15 @@ export class PdfjsViewer {
     ]).then(async () => {
       try {
         await pdf?.cleanup();
-      } catch {}
+      } catch {
+      } finally {
+        try {
+          await documentTask?.destroy();
+        } catch {
+        } finally {
+          documentWorkerUse?.release();
+        }
+      }
     });
     if (loadingTask) await loadingSettlement;
   }
@@ -4507,9 +4623,9 @@ export class PdfjsViewer {
       normalizeQueryOptions: options =>
         normalizeTextQueryOptions(options, this.#behavior.searchQueryOptions, "search options"),
       acquirePage: pageNo => {
-        if (!this.#documentPageUsage)
+        if (!this.#documentPageSources)
           throw new Error("PdfjsViewer: document page usage is unavailable");
-        return this.#documentPageUsage.acquire(pageNo);
+        return this.#documentPageSources.acquire(pageNo);
       },
     };
   }
@@ -5301,13 +5417,17 @@ export class PdfjsViewer {
         this.#features.forms.xfa,
         this.#fontRendering === "geometric",
       );
+      const documentWorkerUse = getPdfjsViewerRuntimeAccess(this.#runtime).acquireDocumentWorker();
+      this.#documentWorkerUse = documentWorkerUse;
       const task = this.#pdfjs.getDocument({
         ...pdfjsOptions,
+        worker: documentWorkerUse.worker,
         ownerDocument: this.#ownerDocument,
         ...(source.type === "url" ? { url: source.url } : { data: source.data }),
       });
       taskForCleanup = task;
       this.#loadingTask = task;
+      this.#documentTask = task;
       task.onProgress = ({ loaded, total }: { loaded: number; total: number }) => {
         if (
           !networkProgressActive ||
@@ -5401,7 +5521,8 @@ export class PdfjsViewer {
           this.#documentLayersPresentation.error(layers.error);
       }
       this.#documentPageUsage = new DocumentPageUsage(pdf);
-      this.#documentRenderer.beginDocument(pdf, this.#documentPageUsage);
+      this.#documentPageSources = this.#createPageSources(pdf, this.#documentPageUsage);
+      this.#documentRenderer.beginDocument(pdf, this.#documentPageSources, this.#documentPageUsage);
       this.#layersAvailable = this.#documentLayers.hasLayers;
       this.#viewerPanels.setAvailableViews(
         this.#availableSidebarViews(),
@@ -5561,7 +5682,11 @@ export class PdfjsViewer {
       for (const use of firstUses) use.release();
     }
     if (!this.#isCurrentDocument(pdf, generation) || this.#documentPageUsage !== pageUsage) return;
-    this.#documentThumbnails.beginDocument(pageUsage, pdf.numPages, fallback);
+    this.#documentThumbnails.beginDocument(
+      this.#documentPageSources ?? pageUsage,
+      pdf.numPages,
+      fallback,
+    );
     const referenceRow = this.#documentView.initialReferenceRow({
       pageNo: initialReferencePage,
       pageCount: pdf.numPages,
@@ -6259,6 +6384,12 @@ export class PdfjsViewer {
 
     if (this.#pageNumEl) {
       const pageNumberInput = this.#pageNumEl;
+      this.#on(pageNumberInput, "input", () => {
+        this.#pageNumberEditing = true;
+      });
+      this.#on(pageNumberInput, "blur", () => {
+        this.#syncPageNumber(this.#pendingNavTargetPage ?? this.#lastEmittedPage);
+      });
       this.#on(pageNumberInput, "beforeinput", (e: InputEvent) => {
         if (e.data && !/^\d+$/.test(e.data)) {
           e.preventDefault();
@@ -6268,11 +6399,12 @@ export class PdfjsViewer {
       this.#on(pageNumberInput, "keydown", e => {
         // Jump to typed page number
         if (e.key === "Enter") {
+          this.#pageNumberEditing = false;
           const desired = parseInt(pageNumberInput.value, 10);
           if (!isNaN(desired) && desired >= 1 && desired <= this.#documentView.pageCount) {
             this.#scrollToPageWithHistory(desired, true);
           } else {
-            pageNumberInput.value = String(this.#lastEmittedPage);
+            this.#syncPageNumber(this.#lastEmittedPage);
           }
         }
         // Change pages with some keys in the input field
@@ -6597,6 +6729,126 @@ export class PdfjsViewer {
 
   // --- Page overlays ---
 
+  /** Creates the bounded display resolver without changing the canonical base-page owner. */
+  #createPageSources(
+    pdf: PDFJS.PDFDocumentProxy,
+    basePages: DocumentPageUsage,
+  ): DocumentPageSources {
+    const options = { ...this.#activeDocumentOptions };
+    const fontBudget = { bytes: 0 };
+    let sources!: DocumentPageSources;
+    sources = new DocumentPageSources(pdf, basePages, {
+      load: async (data, signal) => {
+        const workerUse = getPdfjsViewerRuntimeAccess(this.#runtime).acquireDocumentWorker();
+        let task: PDFJS.PDFDocumentLoadingTask | undefined;
+        try {
+          const { pdfjsOptions } = pdfjsDocumentLoadOptions(options, false, true);
+          task = this.#pdfjs.getDocument({
+            ...pdfjsOptions,
+            data,
+            worker: workerUse.worker,
+            ownerDocument: this.#ownerDocument,
+          });
+          const abort = () => {
+            void task!.destroy().catch(() => {});
+          };
+          signal?.addEventListener("abort", abort, { once: true });
+          let sourcePdf: PDFJS.PDFDocumentProxy;
+          try {
+            if (signal?.aborted) abort();
+            sourcePdf = await task.promise;
+          } finally {
+            signal?.removeEventListener("abort", abort);
+          }
+          const fonts = new DocumentFonts(this.#ownerDocument, {
+            geometric: this.#fontRendering === "geometric",
+            retainNativeFaces: true,
+            reserveBytes: bytes => {
+              if (bytes > 64 * 1024 * 1024 - fontBudget.bytes) return null;
+              fontBudget.bytes += bytes;
+              let released = false;
+              return () => {
+                if (released) return;
+                released = true;
+                fontBudget.bytes -= bytes;
+              };
+            },
+          });
+          const loadedTask = task;
+          return {
+            pdf: sourcePdf,
+            fonts,
+            dispose: async () => {
+              try {
+                await loadedTask.destroy();
+              } finally {
+                workerUse.release();
+              }
+            },
+          };
+        } catch (error) {
+          try {
+            await task?.destroy();
+          } finally {
+            workerUse.release();
+          }
+          throw error;
+        }
+      },
+      changed: (pages, revision) => {
+        if (this.#documentPageSources !== sources || this.#pdf !== pdf) return;
+        this.#pageSourceBatchRevision = revision;
+        this.#installingTargetedRasterState = true;
+        try {
+          this.#documentRenderer.invalidatePageSources(pages);
+          this.#documentThumbnails.invalidatePageSources(pages);
+          this.#documentPresentation.invalidatePages(pages);
+          this.#documentTextPresentation.invalidatePages(pages);
+          const wasPreparing =
+            this.#documentSearch.ready || this.#documentSearch.preparation != null;
+          this.#documentSearch.invalidatePages(pages);
+          const active = this.#searchMatches[this.#searchPos];
+          this.#searchMatches = this.#searchMatches.filter(match => !pages.has(match.page));
+          this.#searchPos = active ? this.#searchMatches.indexOf(active) : -1;
+          this.#syncTextSearchMatches();
+          this.#setPreparationState("search", "idle");
+          if (wasPreparing) void this.#prepareSearchIndex(this.#searchPreparationUpdatesUi, false);
+        } finally {
+          this.#installingTargetedRasterState = false;
+        }
+        this.#reconcileRendering();
+      },
+    });
+    return sources;
+  }
+
+  /** Publishes only authoritative current pixels, never stale source work or thumbnail completion. */
+  #publishPageContent(page: number, revision: number, error?: unknown): void {
+    const sources = this.#documentPageSources;
+    const documentId = this.#documentId;
+    if (
+      this.#destroyed ||
+      this.#status !== "ready" ||
+      documentId == null ||
+      !sources ||
+      revision === 0 ||
+      sources.revision(page) !== revision
+    )
+      return;
+    const detail: PdfjsViewerPageContentDetail = {
+      documentId,
+      page,
+      revision,
+      sourceId: sources.currentSource(page)?.source.id ?? null,
+      ...(error === undefined ? { status: "ready" } : { status: "error", error }),
+    };
+    this.#pdfRootEl.dispatchEvent(
+      new this.#ownerWindow.CustomEvent("pdf:pagecontent", {
+        detail: Object.freeze(detail),
+      }),
+    );
+  }
+
   /** Applies admitted load navigation before the first render reconciliation. */
   #applyPendingInitialNavigation(): void {
     if (this.#pendingInitialResolvedDestination != null && this.#documentView.pageCount > 0) {
@@ -6612,7 +6864,7 @@ export class PdfjsViewer {
 
       const idx = this.#documentView.rowIndexForPage(targetPage) ?? 0;
       const firstPageInRow = this.#documentView.rows[idx]?.[0] ?? targetPage;
-      if (this.#pageNumEl) this.#pageNumEl.value = String(firstPageInRow);
+      this.#syncPageNumber(firstPageInRow);
       this.#updatePageNavDisabled(idx);
     } else if (this.#pendingInitialPage != null && this.#documentView.pageCount > 0) {
       const target = this.#clamp(this.#pendingInitialPage, 1, this.#documentView.pageCount);
@@ -6624,7 +6876,7 @@ export class PdfjsViewer {
       // Best-effort UI sync (scroll handler will also run).
       const idx = this.#documentView.rowIndexForPage(target) ?? 0;
       const firstPageInRow = this.#documentView.rows[idx]?.[0] ?? target;
-      if (this.#pageNumEl) this.#pageNumEl.value = String(firstPageInRow);
+      this.#syncPageNumber(firstPageInRow);
       this.#updatePageNavDisabled(idx);
     }
 
@@ -6699,19 +6951,47 @@ export class PdfjsViewer {
     }
   }
 
-  /** Resolves one owner-emitted annotation intent through canonical navigation policy. */
-  async #followAnnotationDestination(destination: PdfDestinationInput): Promise<void> {
+  /** Keeps click-admitted navigation and source authority through every destination read. */
+  async #followAnnotationDestination(
+    destination: PdfDestinationInput,
+    origin?: Readonly<{ pageNo: number; sourceId: string }>,
+  ): Promise<void> {
     const pdf = this.#pdf;
     const pageUsage = this.#documentPageUsage;
     if (!pdf || !pageUsage || this.#status !== "ready") return;
+    const sources = this.#documentPageSources;
+    const sourceRevision = origin ? sources?.revision(origin.pageNo) : undefined;
+    const sourceIsCurrent = () =>
+      !origin ||
+      (sources != null &&
+        sources === this.#documentPageSources &&
+        sources.revision(origin.pageNo) === sourceRevision &&
+        sources.currentSource(origin.pageNo)?.source.id === origin.sourceId);
+    if (!sourceIsCurrent()) return;
     const navigation = this.#beginNavigationIntent(true);
+    if (origin) {
+      const translated = await sources!.resolveDestination(
+        origin.pageNo,
+        origin.sourceId,
+        destination,
+      );
+      if (translated == null || !this.#isCurrentNavigationIntent(navigation) || !sourceIsCurrent())
+        return;
+      destination = translated;
+    }
     const resolved = await resolvePdfDestinationValue(
       pdf,
       destination,
       pageUsage,
       this.#documentView.rotation,
     );
-    if (!this.#isCurrentNavigationIntent(navigation) || this.#pdf !== pdf || !resolved) return;
+    if (
+      !this.#isCurrentNavigationIntent(navigation) ||
+      this.#pdf !== pdf ||
+      !sourceIsCurrent() ||
+      !resolved
+    )
+      return;
     const targetPage = resolved.pageIndex + 1;
     this.#documentNavigation.selectResolvedDestination(
       this.#navigationHost(),
@@ -6821,7 +7101,7 @@ export class PdfjsViewer {
         const targetTop = this.#documentView.pageRowScrollTop(targetPage) ?? 0;
         this.#startSmoothNavigation(targetTop);
       }
-      if (this.#pageNumEl) this.#pageNumEl.value = String(targetPage);
+      this.#syncPageNumber(targetPage);
       this.#updatePageNavDisabled(index);
       if (targetPage !== this.#lastEmittedPage) {
         this.#lastEmittedPage = targetPage;
@@ -6864,6 +7144,13 @@ export class PdfjsViewer {
     });
   }
 
+  /** Passive scroll updates must not replace an uncommitted page-number draft. */
+  #syncPageNumber(page: number, preserveDraft = false): void {
+    if (preserveDraft && this.#pageNumberEditing) return;
+    this.#pageNumberEditing = false;
+    if (this.#pageNumEl) this.#pageNumEl.value = String(page);
+  }
+
   /** Coalesces scroll-derived facade state and defers it across touch pinch ownership. */
   #scheduleScrollDerivedState(): void {
     if (this.#scrollRaf != null) return;
@@ -6890,7 +7177,7 @@ export class PdfjsViewer {
       const currentPage = presentationPage ?? position.pageNo;
       const pendingIndex =
         pendingPage == null ? null : this.#documentView.rowIndexForPage(pendingPage);
-      if (this.#pageNumEl) this.#pageNumEl.value = String(pendingPage ?? currentPage);
+      this.#syncPageNumber(pendingPage ?? currentPage, true);
       this.#updatePageNavDisabled(pendingIndex ?? idx);
       this.#documentThumbnails.setActivePages(
         this.#documentView.rows[pendingIndex ?? idx] ?? [currentPage],
@@ -7598,7 +7885,7 @@ export class PdfjsViewer {
   // --- Document search indexing and result navigation ---
 
   /** Starts full-document search indexing once for the active document. */
-  #prepareSearchIndex(updateUi = true): Promise<boolean> {
+  #prepareSearchIndex(updateUi = true, navigateResults = true): Promise<boolean> {
     const uiWasRequested = this.#searchPreparationUpdatesUi;
     this.#searchPreparationUpdatesUi ||= updateUi;
     if (!this.#features.search || this.#documentSearch.ready)
@@ -7615,6 +7902,7 @@ export class PdfjsViewer {
     if (!pdf) return Promise.resolve(false);
 
     const generation = this.#documentGeneration;
+    const sourceRevision = this.#pageSourceBatchRevision;
     this.#setPreparationState("search", "loading");
     if (this.#searchPreparationUpdatesUi) {
       this.#searchPanelEl?.setAttribute("aria-busy", "true");
@@ -7623,7 +7911,11 @@ export class PdfjsViewer {
     const preparation = this.#documentSearch.prepare(this.#searchHost());
     if (this.#documentSearch.preparation === existingPreparation) return preparation;
     void preparation.then(ready => {
-      if (!this.#isCurrentDocument(pdf, generation)) return;
+      if (
+        !this.#isCurrentDocument(pdf, generation) ||
+        sourceRevision !== this.#pageSourceBatchRevision
+      )
+        return;
       this.#setPreparationState("search", ready ? "ready" : "error");
       if (this.#searchPreparationUpdatesUi) this.#searchPanelEl?.removeAttribute("aria-busy");
       if (ready && this.#searchPreparationUpdatesUi) {
@@ -7631,7 +7923,7 @@ export class PdfjsViewer {
           this.#recomputeMatches();
           if (this.#searchMatches.length) {
             this.#searchPos = 0;
-            this.#jumpToSearchPos(this.#searchQueryForced);
+            if (navigateResults) this.#jumpToSearchPos(this.#searchQueryForced);
           }
         } else {
           this.#updateSearchCount();

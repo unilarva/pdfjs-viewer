@@ -21,6 +21,7 @@
 
 import type * as PDFJS from "pdfjs-dist";
 import type { RenderPresentationContext, RenderSurfaceLease } from "./document-renderer.js";
+import type { DocumentFonts } from "./document-fonts.js";
 import {
   changedSelectionPages,
   compareTextEndpoints,
@@ -77,6 +78,12 @@ interface LogicalSelection {
 
 interface PageTextPresentation {
   readonly pageNo: number;
+  readonly sourceId: string | null;
+  readonly sourceRevision: number | undefined;
+  readonly fontOwner: DocumentFonts | undefined;
+  fontLease: { release(): void } | undefined;
+  pendingCalls: number;
+  released: boolean;
   lease: Readonly<RenderSurfaceLease>;
   viewport: PDFJS.PageViewport;
   readonly builder: DocumentTextLayerBuilder;
@@ -204,14 +211,42 @@ export class DocumentTextPresentation {
         // module evaluation and cannot follow the runtime's standard/legacy API.
         const ownerDocument = this.#document;
         const div = ownerDocument.createElement("div");
-        let task: InstanceType<typeof options.TextLayer> | null = null;
+        const tasks = new Set<InstanceType<typeof options.TextLayer>>();
         return {
           div,
           async render({ viewport, images, textContentParams }) {
-            const textContentSource = builderOptions.pdfPage.streamTextContent(textContentParams);
-            task = new options.TextLayer({ textContentSource, images, container: div, viewport });
-            builderOptions.highlighter.setTextMapping(task.textDivs, task.textContentItemsStr);
-            await task.render();
+            const reader = builderOptions.pdfPage.streamTextContent(textContentParams).getReader();
+            const pending = new Set<Promise<unknown>>();
+            // TextLayer.cancel rejects render immediately. Keep its upstream stream
+            // cancellation/read promises admitted until the PDF.js worker settles them.
+            const track = <T>(promise: Promise<T>): Promise<T> => {
+              pending.add(promise);
+              void promise.then(
+                () => pending.delete(promise),
+                () => pending.delete(promise),
+              );
+              return promise;
+            };
+            const textContentSource = new ReadableStream({
+              async pull(controller) {
+                const chunk = await track(reader.read());
+                if (chunk.done) controller.close();
+                else controller.enqueue(chunk.value);
+              },
+              cancel: reason => track(reader.cancel(reason)),
+            });
+            let task: InstanceType<typeof options.TextLayer> | undefined;
+            try {
+              task = new options.TextLayer({ textContentSource, images, container: div, viewport });
+              tasks.add(task);
+              builderOptions.highlighter.setTextMapping(task.textDivs, task.textContentItemsStr);
+              await task.render();
+            } finally {
+              await track(reader.cancel()).catch(() => {});
+              while (pending.size) await Promise.allSettled([...pending]);
+              reader.releaseLock();
+              if (task) tasks.delete(task);
+            }
             const endOfContent = ownerDocument.createElement("div");
             endOfContent.className = "endOfContent";
             div.append(endOfContent);
@@ -228,7 +263,7 @@ export class DocumentTextPresentation {
             builderOptions.highlighter.enable();
           },
           cancel() {
-            task?.cancel();
+            for (const task of tasks) task.cancel();
           },
         };
       });
@@ -294,11 +329,21 @@ export class DocumentTextPresentation {
   }
 
   public async present(context: Readonly<RenderPresentationContext>): Promise<void> {
-    if (this.#destroyed || !context.isCurrent("text") || !this.#pageIsDemanded(context.pageNo))
-      return;
+    const sourceRevision = context.source?.revision;
+    const sourceCurrent = () =>
+      !context.source || (context.source.isCurrent() && context.source.revision === sourceRevision);
+    const isCurrent = () => context.isCurrent("text") && sourceCurrent();
+    if (this.#destroyed || !isCurrent() || !this.#pageIsDemanded(context.pageNo)) return;
     const existing = this.#records.get(context.pageNo);
     let record = existing;
-    if (record && record.lease.wrapper !== context.lease.wrapper) {
+    if (
+      record &&
+      (record.lease.wrapper !== context.lease.wrapper ||
+        record.sourceId !== (context.source?.id ?? null) ||
+        record.sourceRevision !== context.source?.revision ||
+        ((!record.builderRendered || record.layoutRotation !== context.viewport.rotation) &&
+          record.fontOwner !== context.source?.fonts))
+    ) {
       this.#releaseRecord(record);
       record = undefined;
     }
@@ -315,21 +360,29 @@ export class DocumentTextPresentation {
         enable: () => {},
         disable: () => {},
       };
-      const builder = this.#createTextLayerBuilder({
-        pdfPage: context.page,
-        highlighter: mappingSink,
-        enablePermissions: false,
-        onAppend: (layer: HTMLDivElement) => {
-          const current = this.#records.get(context.pageNo);
-          if (
-            current?.builder === builder &&
-            current.generation === context.generation &&
-            !layer.isConnected
-          ) {
-            context.lease.wrapper.append(layer);
-          }
-        },
-      });
+      const fontLease = context.source?.fonts?.retain();
+      let builder: DocumentTextLayerBuilder;
+      try {
+        builder = this.#createTextLayerBuilder({
+          pdfPage: context.page,
+          highlighter: mappingSink,
+          enablePermissions: false,
+          onAppend: (layer: HTMLDivElement) => {
+            const current = this.#records.get(context.pageNo);
+            if (
+              current?.builder === builder &&
+              current.generation === context.generation &&
+              isCurrent() &&
+              !layer.isConnected
+            ) {
+              context.lease.wrapper.append(layer);
+            }
+          },
+        });
+      } catch (error) {
+        fontLease?.release();
+        throw error;
+      }
       builder.div.classList.add("pdf-text-layer", "selectionRendering");
       const highlights = this.#document.createElement("div");
       highlights.className = "pdf-highlight-layer";
@@ -340,6 +393,12 @@ export class DocumentTextPresentation {
       highlights.append(searchHighlights, selectionHighlights);
       record = {
         pageNo: context.pageNo,
+        sourceId: context.source?.id ?? null,
+        sourceRevision: context.source?.revision,
+        fontOwner: context.source?.fonts,
+        fontLease,
+        pendingCalls: 0,
+        released: false,
         lease: context.lease,
         viewport: context.viewport,
         builder,
@@ -381,16 +440,26 @@ export class DocumentTextPresentation {
 
     try {
       if (!record.builderRendered) {
-        await record.builder.render({
-          viewport: context.viewport,
-          textContentParams: PDFJS_TEXT_CONTENT_PARAMS,
-        });
+        record.pendingCalls++;
+        try {
+          await record.builder.render({
+            viewport: context.viewport,
+            textContentParams: PDFJS_TEXT_CONTENT_PARAMS,
+          });
+        } finally {
+          record.pendingCalls--;
+          this.#releaseSettledFonts(record);
+        }
         record.builderRendered = true;
+      }
+      if (!sourceCurrent()) {
+        this.#releaseRecord(record);
+        return;
       }
       if (
         this.#records.get(context.pageNo) !== record ||
         record.generation !== context.generation ||
-        !context.isCurrent("text") ||
+        !isCurrent() ||
         !this.#pageIsDemanded(context.pageNo)
       )
         return;
@@ -433,10 +502,11 @@ export class DocumentTextPresentation {
       this.#finishPendingZoomIfReady();
       this.#tryRestoreSelection();
     } catch (error) {
+      if (!sourceCurrent()) this.#releaseRecord(record);
       const failureIsCurrent =
         this.#records.get(context.pageNo) === record &&
         record.generation === context.generation &&
-        context.isCurrent("text") &&
+        isCurrent() &&
         this.#pageIsDemanded(context.pageNo);
       const usedFallback =
         failureIsCurrent &&
@@ -460,6 +530,24 @@ export class DocumentTextPresentation {
     if (!record || record.lease.wrapper !== lease.wrapper || this.#pageIsDemanded(pageNo)) return;
     if (this.#selectionTouchesPage(pageNo)) return;
     this.#releaseRecord(record);
+  }
+
+  /** Revokes only replaced page mappings, including selection-pinned text DOM. */
+  public invalidatePages(pages: ReadonlySet<number>): void {
+    if (!pages.size) return;
+    if ([...pages].some(page => this.#selectionTouchesPage(page))) this.#clearSelection(false);
+    for (const page of pages) {
+      const record = this.#records.get(page);
+      if (record) this.#releaseRecord(record);
+      this.#matchesByPage.delete(page);
+      this.#zoomFallbackPages.delete(page);
+      this.#zoomFallbackGeometry.delete(page);
+      if (this.#activeMatchPage === page) {
+        this.#activeMatchPage = null;
+        this.#activeMatchKey = null;
+      }
+    }
+    this.#notifyDemandChanged();
   }
 
   public setSearchMatches(matches: readonly DocumentTextMatch[]): void {
@@ -564,6 +652,11 @@ export class DocumentTextPresentation {
   }
 
   public clearSelection(): void {
+    this.#clearSelection(true);
+  }
+
+  /** Mapping invalidation clears selection without evicting unrelated records or writers. */
+  #clearSelection(releaseUnowned: boolean): void {
     const previousPages = this.#selectionPages(this.#selection);
     this.#selection = null;
     this.#lastAnchor = null;
@@ -580,7 +673,7 @@ export class DocumentTextPresentation {
     this.#syncNativeSelectionPaint();
     for (const page of previousPages)
       this.#records.get(page)?.selectionHighlights.replaceChildren();
-    this.#releaseUnownedRecords();
+    if (releaseUnowned) this.#releaseUnownedRecords();
     if (previousPages.length) this.#scheduleDemandChanged();
   }
 
@@ -700,6 +793,8 @@ export class DocumentTextPresentation {
   }
 
   #releaseRecord(record: PageTextPresentation): void {
+    if (record.released) return;
+    record.released = true;
     if (this.#records.get(record.pageNo) === record) this.#records.delete(record.pageNo);
     if (record.searchGeometryRaf != null)
       this.#window.cancelAnimationFrame(record.searchGeometryRaf);
@@ -707,6 +802,19 @@ export class DocumentTextPresentation {
     safely(() => record.builder.cancel());
     record.layer.remove();
     record.highlights.remove();
+    record.searchHighlightNodes.clear();
+    for (const span of record.spans) {
+      this.#nodeMappings.delete(span);
+      for (const child of span.childNodes) this.#nodeMappings.delete(child);
+    }
+    this.#releaseSettledFonts(record);
+  }
+
+  /** Font faces outlive detached DOM until all admitted builder calls settle. */
+  #releaseSettledFonts(record: PageTextPresentation): void {
+    if (!record.released || record.pendingCalls) return;
+    record.fontLease?.release();
+    record.fontLease = undefined;
   }
 
   #renderSearch(record: PageTextPresentation, duringZoomCommit = false): void {
@@ -1328,7 +1436,12 @@ export class DocumentTextPresentation {
     const direct =
       this.#nodeMappings.get(node) ??
       (node.parentNode ? this.#nodeMappings.get(node.parentNode) : undefined);
-    if (direct) return direct;
+    if (
+      direct &&
+      this.#records.get(direct.record.pageNo) === direct.record &&
+      direct.record.spans[direct.textItemIndex] === direct.span
+    )
+      return direct;
     const span =
       node instanceof HTMLSpanElement
         ? node

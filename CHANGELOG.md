@@ -4,17 +4,32 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Added read-only display page replacements through `preparePageSource()` and
+  `setPageSourceOverrides()`, accepting PDF bytes or Blobs. Replace or restore pages in
+  atomic batches while keeping layout, text, search, thumbnails, and links consistent.
+  Downloads and all print routes still use the original PDF. See the
+  [usage guide](./USAGE.md#read-only-display-page-sources) for geometry, supported-PDF,
+  resource, and lifecycle constraints.
+- Added `pdf:pagesourceschange` and `pdf:pagecontent` events to distinguish installed page
+  mappings from rendering completion or failure.
 - Added `setLayerPageDependencies()` and document-scoped `documentId` tokens so
   consumers can preserve unaffected page and thumbnail renders during layer changes.
   Unmapped groups retain conservative document-wide invalidation.
 - Added `registerPageOverlay()` for PDF-anchored consumer DOM with geometry callbacks,
   automatic cleanup, and inactivity handling. Overlays are excluded from PDF exports
   and controlled printing.
+- Added opt-in page and thumbnail render timings, admission, and cancellation diagnostics.
 - Improved layer-sidebar responsiveness and focus preservation during visibility changes.
 - Kept visible pages onscreen during slow or repeated zoom changes and improved
   replacement-render memory budgeting.
+- Reduced memory retained after page and thumbnail eviction, including browser-owned
+  font and text-shaping caches, without closing the document or removing consumer overlays.
 - Fixed initial-page rendering and readiness when opening a document at a later page.
-- Added opt-in page and thumbnail render timings, admission, and cancellation diagnostics.
+- Fixed page-number input drafts being overwritten by scrolling or delayed layout updates,
+  including on mobile browsers.
+- Fixed delayed annotations failing to appear after a later text request.
+- Fixed loaded PDF.js documents and worker resources remaining retained after `destroy()`;
+  host-owned workers remain usable after viewer runtime teardown.
 
 ## 0.8.1
 

@@ -20,6 +20,17 @@ type RecordLike = Record<PropertyKey, unknown>;
 export type AnnotationStorage = PDFJS.PDFDocumentProxy["annotationStorage"];
 export type PdfjsMarkInfo = ReadonlyMap<"Marked" | "UserProperties" | "Suspects", boolean>;
 
+/** The qualified release accepts a Worker port publicly but its constructor infers only null. */
+export function constructPdfjsWorker(
+  pdfjs: Pick<typeof PDFJS, "PDFWorker">,
+  options: Readonly<{ port?: Worker }>,
+): PDFJS.PDFWorker {
+  const Constructor = pdfjs.PDFWorker as unknown as new (
+    options: Readonly<{ port?: Worker }>,
+  ) => PDFJS.PDFWorker;
+  return new Constructor(options);
+}
+
 /** Detached retained font facts from the qualified PDF.js display object pool. */
 export interface PdfPageFont {
   readonly family: string;

@@ -407,6 +407,16 @@ export class DocumentView {
   isCurrent(lease: Readonly<PageSurfaceLease>): boolean {
     return this.#layout.isCurrent(lease);
   }
+  /** Retires an evicted canvas's native caches without replacing its page or overlays. */
+  releaseRasterSurface(lease: Readonly<PageSurfaceLease>): void {
+    if (!this.#layout.isCurrent(lease) || lease.canvas.width || lease.canvas.height) return;
+    const rowIndex = this.#layout.rowIndexForPage(lease.pageNo);
+    if (rowIndex == null) return;
+    // Resizing frees pixels, but Chromium keeps font/shaping caches on the canvas host.
+    const canvas = lease.canvas.cloneNode(false) as HTMLCanvasElement;
+    lease.canvas.replaceWith(canvas);
+    this.#layout.registerPageSurface(lease.pageNo, rowIndex, lease.wrapper, canvas);
+  }
   /** Returns a page's CSS-space top, or `null` when not registered. */
   pageTopFor(pageNo: number): number | null {
     return this.#layout.pageTopFor(pageNo);

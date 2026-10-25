@@ -1156,6 +1156,24 @@ test("destroyed viewer rejects fit commands without mutating state", async ({ pa
   });
 });
 
+test("@mobile passive scroll reconciliation preserves a page-number draft until submit or blur", async ({
+  page,
+}) => {
+  const input = page.locator("#primary .pdf-page-number-input");
+  await input.fill("2");
+  await page.locator("#primary .pdf-container").evaluate(container => {
+    container.scrollTop = container.scrollHeight;
+    container.dispatchEvent(new Event("scroll"));
+  });
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(3);
+  await expect(input).toHaveValue("2");
+  await input.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(2);
+  await input.fill("999");
+  await input.blur();
+  await expect(input).toHaveValue("2");
+});
+
 test("page navigation chains rapid button and keyboard requests from the pending destination", async ({
   page,
 }) => {
@@ -2557,13 +2575,39 @@ test("rich read-only annotations enforce action policy, popup a11y, OCG, zoom, a
     .toBe(ocgRevision + 1);
   await expect(layer.locator(".highlightAnnotation")).toBeHidden();
 
-  await page.evaluate(() => window.fixture.primary.zoomTo(1.25));
+  const preZoomLayer = await page.evaluateHandle(async () => {
+    const previous = document.querySelector("#primary .pdf-annotation-layer");
+    await window.fixture.primary.zoomTo(1.25);
+    return previous;
+  });
+  // zoomTo updates demand before raster and annotation publication; attached old DOM is not ready.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          [...window.fixture.logs]
+            .reverse()
+            .find(
+              entry =>
+                entry.viewerId === "primary" &&
+                entry.event === "page-render-completed" &&
+                entry.details?.pageNo === 1,
+            )?.details?.scale,
+      ),
+    )
+    .toBe(1.25);
+  await expect.poll(() => preZoomLayer.evaluate(previous => !previous?.isConnected)).toBe(true);
+  await preZoomLayer.dispose();
   await expect(page.locator("#primary .pdf-annotation-layer .freeTextAnnotation")).toBeAttached();
 
   const resources = await page.evaluate(async () => {
     const created: string[] = [];
     const revoked: string[] = [];
     const clicked: string[] = [];
+    let cleanupCompleted!: () => void;
+    const cleanup = new Promise<void>(resolve => {
+      cleanupCompleted = resolve;
+    });
     const create = URL.createObjectURL;
     const revoke = URL.revokeObjectURL;
     const click = HTMLAnchorElement.prototype.click;
@@ -2574,15 +2618,16 @@ test("rich read-only annotations enforce action policy, popup a11y, OCG, zoom, a
     };
     URL.revokeObjectURL = value => {
       revoked.push(String(value));
+      cleanupCompleted();
     };
     HTMLAnchorElement.prototype.click = function () {
       clicked.push(this.download);
     };
     try {
       document
-        .querySelector<HTMLElement>("#primary .fileAttachmentAnnotation .popupTriggerArea")
-        ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-      await new Promise(resolve => setTimeout(resolve, 25));
+        .querySelector<HTMLElement>("#primary .fileAttachmentAnnotation .popupTriggerArea")!
+        .dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      await cleanup;
       return { created, revoked, clicked };
     } finally {
       URL.createObjectURL = create;
@@ -3184,6 +3229,8 @@ test("viewer rotation invalidates and reorients thumbnail output", async ({ page
 test("CSS thumbnail width changes retain usable output while replacement is pending", async ({
   page,
 }) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
   await page.getByRole("button", { name: "Document navigation" }).click();
   await page.getByRole("button", { name: "Thumbnails" }).click();
   const panel = page.locator("#primary .pdf-thumbnails");
@@ -3200,6 +3247,7 @@ test("CSS thumbnail width changes retain usable output while replacement is pend
   await expect
     .poll(() => canvas.evaluate((element: HTMLCanvasElement) => element.width), { timeout: 15_000 })
     .toBeGreaterThanOrEqual(220);
+  expect(errors).toEqual([]);
 });
 
 test("thumbnail reveal scrolls smoothly and inactive viewers hide managed canvases", async ({

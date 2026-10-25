@@ -31,10 +31,20 @@ import { PDFJS_VIEWER_DEFAULT_FORMATTERS, PDFJS_VIEWER_DEFAULT_LABELS } from "..
 import { discoverViewerUi } from "../../src/viewer-ui-discovery";
 import { PDFJS_VIEWER_UI_HOOKS } from "../../src/viewer-contracts";
 import type { RenderPresentationContext, RenderSurfaceLease } from "../../src/document-renderer";
+import { makeSyntheticPdf } from "./synthetic-pdf";
 
 declare global {
   interface Window {
     fixture: {
+      pageSources: {
+        makePdf: typeof makeSyntheticPdf;
+        createViewer(
+          options: Omit<ConstructorParameters<typeof PdfjsViewer>[0], "runtime">,
+        ): PdfjsViewer;
+        gateNextPageAcquisition(): PageAcquisitionGate;
+        gateNextNamedDestination(destination: unknown[]): PageAcquisitionGate;
+        loadingStats(resetPeak?: boolean): { live: number; peak: number; admissions: number };
+      };
       primary: PdfjsViewer;
       detailViewer: PdfjsViewer | null;
       detailAllocationPeakBytes: number;
@@ -231,9 +241,15 @@ const documentDataReadGates: Array<{
   cleanupCalled(): void;
 }> = [];
 const loadingTaskDestroyGates: Array<{ entered(): void; settlement: Promise<void> }> = [];
-const namedDestinationGates: Array<{ entered(): void; settlement: Promise<void> }> = [];
+const namedDestinationGates: Array<{
+  entered(): void;
+  settlement: Promise<void>;
+  destination?: unknown[];
+}> = [];
 let documentDataReadCount = 0;
 let documentLoadAdmissionCount = 0;
+const liveLoadingTasks = new Set<PDFJS.PDFDocumentLoadingTask>();
+let peakLoadingTasks = 0;
 let documentCleanupCount = 0;
 let printPermissions: "runtime" | "denied" | "ordinary" | "high" | "unrestricted" = "runtime";
 let nextPrintPermissionRead: (() => void | Promise<void>) | null = null;
@@ -293,7 +309,7 @@ const gateNextLoadingTaskDestroy = (): PageAcquisitionGate => {
   loadingTaskDestroyGates.push({ entered: markEntered, settlement });
   return { entered, release: () => resolve() };
 };
-const gateNextNamedDestination = (): PageAcquisitionGate => {
+const gateNextNamedDestination = (destination?: unknown[]): PageAcquisitionGate => {
   let markEntered!: () => void;
   let resolve!: () => void;
   const entered = new Promise<void>(settle => {
@@ -302,7 +318,7 @@ const gateNextNamedDestination = (): PageAcquisitionGate => {
   const settlement = new Promise<void>(settle => {
     resolve = settle;
   });
-  namedDestinationGates.push({ entered: markEntered, settlement });
+  namedDestinationGates.push({ entered: markEntered, settlement, destination });
   return { entered, release: () => resolve() };
 };
 let instrumentDetailPage: ((page: PDFJS.PDFPageProxy) => void) | null = null;
@@ -325,6 +341,8 @@ const fixturePdfjs = {
       });
     }
     const loadingTask = PDFJS.getDocument(...args);
+    liveLoadingTasks.add(loadingTask);
+    peakLoadingTasks = Math.max(peakLoadingTasks, liveLoadingTasks.size);
     const challengePassword = challengeNextPassword;
     challengeNextPassword = false;
     let activeDocumentDataGate: (typeof documentDataReadGates)[number] | null = null;
@@ -357,6 +375,7 @@ const fixturePdfjs = {
               if (gate) {
                 gate.entered();
                 await gate.settlement;
+                if (gate.destination) return gate.destination;
               }
               if (name === "test:same-page-position") {
                 return [1, { name: "XYZ" }, 120, 520, null];
@@ -423,7 +442,11 @@ const fixturePdfjs = {
         if (property === "destroy" && challengePassword) {
           return async () => {
             rejectPasswordChallenge?.(new DOMException("Password request cancelled", "AbortError"));
-            return target.destroy();
+            try {
+              return await target.destroy();
+            } finally {
+              liveLoadingTasks.delete(loadingTask);
+            }
           };
         }
         if (property === "destroy") {
@@ -433,7 +456,11 @@ const fixturePdfjs = {
               gate.entered();
               await gate.settlement;
             }
-            return target.destroy();
+            try {
+              return await target.destroy();
+            } finally {
+              liveLoadingTasks.delete(loadingTask);
+            }
           };
         }
         const value = Reflect.get(target, property, target);
@@ -584,6 +611,20 @@ document.addEventListener("securitypolicyviolation", event => {
 });
 
 window.fixture = {
+  pageSources: {
+    makePdf: makeSyntheticPdf,
+    createViewer: options => new PdfjsViewer({ ...options, runtime }),
+    gateNextPageAcquisition,
+    gateNextNamedDestination,
+    loadingStats(resetPeak = false) {
+      if (resetPeak) peakLoadingTasks = liveLoadingTasks.size;
+      return {
+        live: liveLoadingTasks.size,
+        peak: peakLoadingTasks,
+        admissions: documentLoadAdmissionCount,
+      };
+    },
+  },
   fontPeer: null,
   fontSource: "/hinted-font.pdf",
   primary,

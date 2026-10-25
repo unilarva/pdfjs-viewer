@@ -11,7 +11,11 @@
  * @module document-thumbnails
  */
 
-import type { DocumentPageAcquirer, DocumentPageUse } from "./document-page-usage.js";
+import type {
+  DocumentPageAcquirer,
+  DocumentPageUse,
+  DocumentPageSourceContext,
+} from "./document-page-usage.js";
 import { startPdfPageRenderTask } from "./pdfjs-compatibility.js";
 import type { BackgroundRasterLease, RasterWorkCoordinator } from "./raster-work-coordinator.js";
 import type { PdfjsViewerRenderingProfileSettings } from "./viewer-contracts.js";
@@ -54,6 +58,8 @@ interface ThumbnailAdmissionSuspension {
 }
 
 interface ThumbnailItem {
+  sourceRevision: number;
+  source?: Readonly<DocumentPageSourceContext>;
   contentGeneration: number;
   readonly pageNo: number;
   readonly item: HTMLLIElement;
@@ -74,12 +80,15 @@ interface ThumbnailItem {
 }
 
 interface ActiveOperation {
+  readonly sourceRevision: number;
+  source?: Readonly<DocumentPageSourceContext>;
+  sourceResolved: boolean;
   readonly contentGeneration: number;
   readonly generation: number;
   readonly item: ThumbnailItem;
   readonly abort: AbortController;
   readonly rasterState: ThumbnailRasterState;
-  readonly formAppearanceRevision: number;
+  formAppearanceRevision: number;
   lease: BackgroundRasterLease | null;
   renderWidth: number;
   renderHeight: number;
@@ -101,6 +110,8 @@ interface DocumentThumbnailsOptions {
 }
 
 interface DocumentThumbnailsCallbacks {
+  readonly sourceRendered?: (pageNo: number, revision: number) => void;
+  readonly sourceFailed?: (pageNo: number, revision: number, error: unknown) => void;
   readonly selectPage: (pageNo: number) => void;
   /** Optional non-sensitive completion timing, installed only when diagnostics are enabled. */
   readonly diagnostic?: (
@@ -144,6 +155,7 @@ export class DocumentThumbnails {
   #nearIntersection: IntersectionObserver | null = null;
   #visibleIntersection: IntersectionObserver | null = null;
   #surfaceResize: ResizeObserver | null = null;
+  #retiredSurfaceResizes = new Map<number, HTMLCanvasElement>();
   #neededClock = 0;
   #viewActive = false;
   #lastScrollTop = 0;
@@ -184,7 +196,7 @@ export class DocumentThumbnails {
               const renewed = !this.#nearVisiblePages.has(pageNo);
               this.#nearVisiblePages.add(pageNo);
               item.lastNeeded = ++this.#neededClock;
-              this.#surfaceResize?.observe(item.canvas);
+              this.#observeSurface(item);
               this.#reconcileMeasurement(item);
               if (renewed && item?.state === "error") {
                 item.attempts = 0;
@@ -217,7 +229,7 @@ export class DocumentThumbnails {
               this.#visibleDemand.add(pageNo);
               this.#nearVisiblePages.add(pageNo);
               item.lastNeeded = ++this.#neededClock;
-              this.#surfaceResize?.observe(item.canvas);
+              this.#observeSurface(item);
               this.#reconcileMeasurement(item);
             } else this.#visibleDemand.delete(pageNo);
           }
@@ -324,6 +336,7 @@ export class DocumentThumbnails {
       itemEl.append(button);
       list.append(itemEl);
       const item: ThumbnailItem = {
+        sourceRevision: -1,
         contentGeneration: -1,
         pageNo,
         item: itemEl,
@@ -360,6 +373,7 @@ export class DocumentThumbnails {
     this.#nearIntersection?.takeRecords();
     this.#visibleIntersection?.takeRecords();
     this.#pages = null;
+    this.#retiredSurfaceResizes.clear();
     this.#nearVisiblePages.clear();
     this.#intersectionPages.clear();
     this.#viewportPages.clear();
@@ -529,6 +543,22 @@ export class DocumentThumbnails {
     return true;
   }
 
+  /** Revokes only changed display slots while retaining their lazy replacement bitmaps. */
+  invalidatePageSources(pages: ReadonlySet<number>): void {
+    if (!pages.size) return;
+    const generation = ++this.#contentGeneration;
+    const documentGeneration = this.#generation;
+    for (const pageNo of pages) this.#pageContentGenerations.set(pageNo, generation);
+    if (this.#activeOperation && !pages.has(this.#activeOperation.item.pageNo))
+      this.#activeOperation.retainForContentChange = true;
+    for (const pageNo of pages) {
+      const item = this.#items.get(pageNo);
+      if (item) this.#invalidate(item, true);
+      if (documentGeneration !== this.#generation) return;
+    }
+    this.#pump();
+  }
+
   /** Invalidates only thumbnails whose interactive form appearance changed. */
   invalidateFormPages(pages: readonly number[]): void {
     for (const pageNo of new Set(pages)) {
@@ -555,6 +585,7 @@ export class DocumentThumbnails {
   setViewActive(active: boolean): void {
     this.#viewActive = active;
     if (!active) {
+      this.#retiredSurfaceResizes.clear();
       if (this.#scrollIdleTimer != null) this.#window?.clearTimeout(this.#scrollIdleTimer);
       this.#scrollIdleTimer = null;
       this.#scrollDirection = 0;
@@ -578,7 +609,7 @@ export class DocumentThumbnails {
       for (const pageNo of this.#activePages) {
         const item = this.#items.get(pageNo);
         if (item) {
-          this.#surfaceResize?.observe(item.canvas);
+          this.#observeSurface(item);
           this.#reconcileMeasurement(item);
         }
       }
@@ -655,7 +686,11 @@ export class DocumentThumbnails {
           !!item &&
           item.width > 0 &&
           item.state !== "rendering" &&
-          !(item.state === "ready" && this.#itemSatisfiesRasterState(item)) &&
+          !(
+            item.state === "ready" &&
+            this.#itemSatisfiesRasterState(item) &&
+            !this.#needsVisibleQualityUpgrade(item)
+          ) &&
           (item.state !== "error" || item.attempts < MAX_ATTEMPTS),
       );
     const viewport = this.#panelGeometry();
@@ -671,13 +706,15 @@ export class DocumentThumbnails {
     const item = pageNo == null ? null : this.#items.get(pageNo);
     if (!item) return;
     const operation: ActiveOperation = {
+      sourceRevision: this.#pages.revision?.(item.pageNo) ?? 0,
+      sourceResolved: false,
       contentGeneration: this.#contentGenerationFor(item.pageNo),
       generation: this.#generation,
       item,
       abort: new AbortController(),
       lease: null,
       rasterState: this.#rasterState,
-      formAppearanceRevision: this.#formRevisionFor(item.pageNo),
+      formAppearanceRevision: this.#pages.revision ? -1 : this.#formRevisionFor(item.pageNo),
       renderWidth: 0,
       renderHeight: 0,
       bufferWidth: 0,
@@ -716,9 +753,23 @@ export class DocumentThumbnails {
     let committed = false;
     try {
       use = await this.#pages!.acquire(operation.item.pageNo);
+      if ((use.source?.revision ?? 0) !== operation.sourceRevision) return;
+      operation.source = use.source;
+      if (use.source?.id == null && operation.formAppearanceRevision < 0)
+        operation.formAppearanceRevision = this.#formRevisionFor(operation.item.pageNo);
+      operation.sourceResolved = true;
       const acquired = measure ? performance.now() : 0;
       if (!this.#current(operation)) return;
       const page = use.page;
+      const source = use.source;
+      const annotationMode = source?.id != null ? 1 : operation.rasterState.annotationMode;
+      const optionalContentConfigPromise =
+        source?.id != null
+          ? source.optionalContentConfigPromise
+          : operation.rasterState.optionalContentConfigPromise;
+      const fonts = source?.fonts;
+      if (fonts) await fonts.prepare(page, annotationMode, operation.abort.signal);
+      if (!this.#current(operation)) return;
       const baseViewport = page.getViewport({ scale: 1, rotation: page.rotate });
       const viewport = page.getViewport({
         scale: 1,
@@ -752,27 +803,32 @@ export class DocumentThumbnails {
       if (!context) throw new Error("Thumbnail canvas 2D context is unavailable");
       operation.renderWidth = operation.item.width;
       operation.renderHeight = operation.item.height;
-      context.setTransform(budget.dpr, 0, 0, budget.dpr, 0, 0);
+      context.setTransform(fonts ? 1 : budget.dpr, 0, 0, fonts ? 1 : budget.dpr, 0, 0);
       context.imageSmoothingEnabled = true;
+      const canvasContext = fonts?.context(context, budget.dpr) ?? context;
       const printAnnotationStorage =
-        operation.rasterState.printAnnotationStorageFor?.(
-          operation.item.pageNo,
-          operation.formAppearanceRevision,
-        ) ?? null;
+        source?.id != null
+          ? null
+          : (operation.rasterState.printAnnotationStorageFor?.(
+              operation.item.pageNo,
+              operation.formAppearanceRevision,
+            ) ?? null);
       const render = startPdfPageRenderTask(
         page,
         {
-          canvas: temporary,
-          canvasContext: context,
+          canvas: canvasContext === context ? temporary : null,
+          canvasContext,
+          ...(fonts ? { transform: [budget.dpr, 0, 0, budget.dpr, 0, 0] } : {}),
           viewport: renderViewport,
           intent: "display",
-          annotationMode: operation.rasterState.annotationMode,
+          annotationMode,
           ...(printAnnotationStorage ? { printAnnotationStorage } : {}),
-          ...(operation.rasterState.optionalContentConfigPromise
-            ? { optionalContentConfigPromise: operation.rasterState.optionalContentConfigPromise }
-            : {}),
+          ...(optionalContentConfigPromise ? { optionalContentConfigPromise } : {}),
         },
         operation.abort.signal,
+        canvasContext !== context && fonts
+          ? context => fonts.context(context, budget.dpr)
+          : undefined,
       );
       const taskStarted = measure ? performance.now() : 0;
       await render.promise;
@@ -790,14 +846,17 @@ export class DocumentThumbnails {
       temporary.style.visibility = "visible";
       placeholder.replaceWith(temporary);
       operation.item.canvas = temporary;
-      if (this.#nearVisiblePages.has(operation.item.pageNo))
-        this.#surfaceResize?.observe(temporary);
+      placeholder.width = 0;
+      placeholder.height = 0;
+      if (this.#nearVisiblePages.has(operation.item.pageNo)) this.#observeSurface(operation.item);
       committed = true;
       operation.item.bufferWidth = operation.bufferWidth;
       operation.item.bufferHeight = operation.bufferHeight;
       operation.item.bytes = operation.bytes;
       operation.item.state = "ready";
       operation.item.contentGeneration = operation.contentGeneration;
+      operation.item.sourceRevision = operation.sourceRevision;
+      operation.item.source = operation.source;
       operation.item.formAppearanceRevision = operation.formAppearanceRevision;
       operation.item.annotationMode = operation.rasterState.annotationMode;
       operation.item.item.setAttribute("data-pdf-thumbnail-ready", "");
@@ -805,6 +864,13 @@ export class DocumentThumbnails {
       operation.item.lastNeeded = ++this.#neededClock;
       this.#evictToBudget(operation.item.pageNo);
       if (this.#activePages.has(operation.item.pageNo)) this.#scheduleRevealActivePages(false);
+      if (this.#current(operation)) {
+        try {
+          this.#callbacks.sourceRendered?.(operation.item.pageNo, operation.sourceRevision);
+        } catch {
+          /* Observers do not own physical settlement. */
+        }
+      }
       if (measure) {
         const completed = performance.now();
         try {
@@ -825,8 +891,7 @@ export class DocumentThumbnails {
         }
       }
     } catch (error) {
-      if (operation.stale || operation.abort.signal.aborted || !this.#currentGeneration(operation))
-        return;
+      if (operation.abort.signal.aborted || !this.#current(operation)) return;
       operation.item.attempts++;
       operation.item.state = operation.item.attempts >= MAX_ATTEMPTS ? "error" : "placeholder";
       if (operation.item.state === "error") {
@@ -838,12 +903,18 @@ export class DocumentThumbnails {
         operation.item.button.title = this.#options.errorLabel;
       }
       if (!operation.item.bytes) this.#clearBackingStore(operation.item);
+      try {
+        this.#callbacks.sourceFailed?.(operation.item.pageNo, operation.sourceRevision, error);
+      } catch {
+        /* Observers do not own physical settlement. */
+      }
     } finally {
       if (temporary && !committed) {
         temporary.width = 0;
         temporary.height = 0;
       }
       use?.release();
+      if (!committed && operation.item.state === "rendering") operation.item.state = "placeholder";
     }
   }
 
@@ -861,7 +932,9 @@ export class DocumentThumbnails {
       Math.floor(cssPixels * canvasLimitedDpr * canvasLimitedDpr * 4),
     );
     this.#evictForAdmission(desiredBytes, item.pageNo);
-    const availableBytes = Math.max(4, this.#limitBytes() - this.#cacheBytes());
+    const availableBytes = this.#limitBytes() - this.#cacheBytes();
+    if (availableBytes < 4)
+      throw new Error("Thumbnail replacement has no offscreen memory headroom");
     return computeThumbnailRasterBudget({
       cssWidth: item.width,
       cssHeight: (item.width * viewportHeight) / viewportWidth,
@@ -874,6 +947,29 @@ export class DocumentThumbnails {
       ),
       availableBytes,
     });
+  }
+
+  /** Promote reduced prefetch pixels only when visible output can improve within its retained budget. */
+  #needsVisibleQualityUpgrade(item: ThumbnailItem): boolean {
+    if (!this.#visibleDemand.has(item.pageNo) || !(item.height > 0)) return false;
+    let retainedVisibleBytes = 0;
+    for (const pageNo of this.#visibleDemand)
+      retainedVisibleBytes += this.#items.get(pageNo)?.bytes ?? 0;
+    const availableBytes = this.#limitBytes() - retainedVisibleBytes;
+    if (availableBytes < 4) return false;
+    const budget = computeThumbnailRasterBudget({
+      cssWidth: item.width,
+      cssHeight: item.height,
+      maxDpr: this.#options.maxDpr,
+      devicePixelRatio: this.#window?.devicePixelRatio || 1,
+      maxCanvasPixels: this.#profile.maxCanvasPixels,
+      maxCanvasDimension: Math.min(
+        this.#profile.maxCanvasDimension,
+        MAX_THUMBNAIL_BACKING_DIMENSION,
+      ),
+      availableBytes,
+    });
+    return budget.width > item.bufferWidth + 1 || budget.height > item.bufferHeight + 1;
   }
 
   #reconcileMeasurement(item: ThumbnailItem, invalidate = true): void {
@@ -988,7 +1084,7 @@ export class DocumentThumbnails {
       nextViewportPages.add(pageNo);
       this.#nearVisiblePages.add(pageNo);
       item.lastNeeded = ++this.#neededClock;
-      this.#surfaceResize?.observe(item.canvas);
+      this.#observeSurface(item);
       this.#reconcileMeasurement(item);
     }
     for (const pageNo of this.#viewportPages) {
@@ -1005,7 +1101,12 @@ export class DocumentThumbnails {
     this.#viewportDemandRaf =
       this.#window?.requestAnimationFrame(() => {
         this.#viewportDemandRaf = null;
+        const retired = [...this.#retiredSurfaceResizes];
+        this.#retiredSurfaceResizes.clear();
         if (!this.#viewActive) return;
+        for (const [pageNo, canvas] of retired)
+          if (this.#items.get(pageNo)?.canvas === canvas && this.#nearVisiblePages.has(pageNo))
+            this.#surfaceResize?.observe(canvas);
         this.#seedViewportDemand();
         this.#refreshVisibleDemandFromGeometry();
         this.#preemptForVisibleDemand();
@@ -1031,7 +1132,7 @@ export class DocumentThumbnails {
       if (bounds.bottom < top || bounds.top > bottom) continue;
       this.#nearVisiblePages.add(item.pageNo);
       item.lastNeeded = ++this.#neededClock;
-      this.#surfaceResize?.observe(item.canvas);
+      this.#observeSurface(item);
       this.#reconcileMeasurement(item);
       if (bounds.bottom >= viewport.top && bounds.top <= viewport.bottom)
         this.#visibleDemand.add(item.pageNo);
@@ -1047,18 +1148,23 @@ export class DocumentThumbnails {
     return (
       this.#activeOperation === operation &&
       !operation.stale &&
+      this.#sourceIsCurrent(operation.item.pageNo, operation.sourceRevision, operation.source) &&
       this.#currentGeneration(operation) &&
       operation.contentGeneration === this.#contentGenerationFor(operation.item.pageNo) &&
-      operation.formAppearanceRevision === this.#formRevisionFor(operation.item.pageNo) &&
-      operation.rasterState.annotationMode === this.#rasterState.annotationMode
+      (!operation.sourceResolved ||
+        operation.source?.id != null ||
+        (operation.formAppearanceRevision === this.#formRevisionFor(operation.item.pageNo) &&
+          operation.rasterState.annotationMode === this.#rasterState.annotationMode))
     );
   }
 
   #itemSatisfiesRasterState(item: ThumbnailItem): boolean {
     return (
       item.contentGeneration === this.#contentGenerationFor(item.pageNo) &&
-      item.formAppearanceRevision === this.#formRevisionFor(item.pageNo) &&
-      item.annotationMode === this.#rasterState.annotationMode
+      this.#sourceIsCurrent(item.pageNo, item.sourceRevision, item.source) &&
+      (item.source?.id != null ||
+        (item.formAppearanceRevision === this.#formRevisionFor(item.pageNo) &&
+          item.annotationMode === this.#rasterState.annotationMode))
     );
   }
 
@@ -1066,6 +1172,19 @@ export class DocumentThumbnails {
     return (
       operation.generation === this.#generation &&
       this.#items.get(operation.item.pageNo) === operation.item
+    );
+  }
+
+  /** Mapping revocation does not release the page use or physical background lease. */
+  #sourceIsCurrent(
+    pageNo: number,
+    revision: number,
+    source?: Readonly<DocumentPageSourceContext>,
+  ): boolean {
+    return (
+      revision === (this.#pages?.revision?.(pageNo) ?? 0) &&
+      (!source ||
+        (source.revision === revision && source.logicalPage === pageNo && source.isCurrent()))
     );
   }
 
@@ -1109,13 +1228,20 @@ export class DocumentThumbnails {
     let retainedBytes = this.#cacheBytes();
     if (retainedBytes <= retainedLimit) return;
     for (const item of this.#evictionCandidates(preservePage)) {
+      // Fit replacements/prefetch around readable visible pixels, not by blanking them.
+      if (this.#visibleDemand.has(item.pageNo)) continue;
       retainedBytes -= item.bytes;
       this.#clearBackingStore(item);
       item.state = "placeholder";
       if (retainedBytes <= retainedLimit) break;
     }
     const preserved = this.#items.get(preservePage);
-    if (retainedBytes > retainedLimit && preserved?.bytes) {
+    if (
+      retainedBytes > retainedLimit &&
+      preserved?.bytes &&
+      !this.#visibleDemand.has(preservePage) &&
+      preserved.sourceRevision === (this.#pages?.revision?.(preservePage) ?? 0)
+    ) {
       this.#clearBackingStore(preserved);
       preserved.state = "placeholder";
     }
@@ -1171,7 +1297,7 @@ export class DocumentThumbnails {
       if (!item) continue;
       this.#nearVisiblePages.add(pageNo);
       item.lastNeeded = ++this.#neededClock;
-      this.#surfaceResize?.observe(item.canvas);
+      this.#observeSurface(item);
       this.#reconcileMeasurement(item);
     }
     this.#seedViewportDemand();
@@ -1245,13 +1371,36 @@ export class DocumentThumbnails {
     this.#expectedScrollTop = null;
   }
 
+  /** Other demand callbacks cannot bypass a retired surface's deferred observation. */
+  #observeSurface(item: ThumbnailItem): void {
+    if (this.#items.get(item.pageNo) !== item) return;
+    if (this.#retiredSurfaceResizes.has(item.pageNo)) {
+      this.#retiredSurfaceResizes.set(item.pageNo, item.canvas);
+      return;
+    }
+    this.#surfaceResize?.observe(item.canvas);
+  }
+
   #clearBackingStore(item: ThumbnailItem): void {
+    const canvas = item.canvas;
+    const hadBacking = canvas.width > 0 || canvas.height > 0;
     item.item.removeAttribute("data-pdf-thumbnail-ready");
-    item.canvas.style.visibility = "visible";
-    item.canvas.width = 0;
-    item.canvas.height = 0;
+    canvas.style.visibility = "visible";
+    canvas.width = 0;
+    canvas.height = 0;
     item.bufferWidth = 0;
     item.bufferHeight = 0;
     item.bytes = 0;
+    if (!hadBacking || this.#items.get(item.pageNo) !== item) return;
+    // Resizing frees pixels, but the painted host can retain browser font/shaping caches.
+    const placeholder = canvas.cloneNode(false) as HTMLCanvasElement;
+    this.#surfaceResize?.unobserve(canvas);
+    canvas.replaceWith(placeholder);
+    item.canvas = placeholder;
+    if (this.#surfaceResize && this.#viewActive && this.#nearVisiblePages.has(item.pageNo)) {
+      // A new observation during resize delivery can produce a browser loop warning.
+      this.#retiredSurfaceResizes.set(item.pageNo, placeholder);
+      this.#scheduleViewportDemandRefresh();
+    }
   }
 }

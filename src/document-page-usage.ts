@@ -18,16 +18,37 @@
  */
 
 import type * as PDFJS from "pdfjs-dist";
+import type { DocumentFonts } from "./document-fonts.js";
+
+/** Immutable identity of the exact source selected for one display-page acquisition. */
+export interface DocumentPageSourceContext {
+  readonly id: string | null;
+  readonly revision: number;
+  readonly logicalPage: number;
+  readonly sourcePage: number;
+  readonly pdf: PDFJS.PDFDocumentProxy;
+  readonly linkContext: "source" | "base";
+  readonly optionalContentConfigPromise?: NonNullable<
+    Parameters<PDFJS.PDFPageProxy["render"]>[0]["optionalContentConfigPromise"]
+  >;
+  readonly fonts?: DocumentFonts;
+  /** Revoked on mapping replacement or document close, independently of physical settlement. */
+  isCurrent(): boolean;
+}
 
 /** One admitted use of a PDF.js page proxy. Release is idempotent. */
 export interface DocumentPageUse {
   readonly page: PDFJS.PDFPageProxy;
+  /** Present for resolved display sources; canonical base-only acquisitions need no extra routing. */
+  readonly source?: Readonly<DocumentPageSourceContext>;
   release(): void;
 }
 
 /** Narrow capability accepted by owners that need temporary page access. */
 export interface DocumentPageAcquirer {
   acquire(pageNo: number): Promise<DocumentPageUse>;
+  /** Display resolvers version slots independently; canonical base-only owners omit this capability. */
+  revision?(pageNo: number): number;
 }
 
 interface PageUsage {

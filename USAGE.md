@@ -38,6 +38,7 @@ and demo commands belong to the
   - [Screen Wake Lock](#screen-wake-lock)
   - [In-document navigation history](#in-document-navigation-history)
 - [Behavior and features](#behavior-and-features)
+  - [Read-only display page sources](#read-only-display-page-sources)
 - [Printing](#printing)
   - [Fallback and adapters](#fallback-and-adapters)
   - [Print events](#print-events)
@@ -585,6 +586,12 @@ direct-render fallback to fit that peak. Existing same-scale output is reused wh
 fit. The configured `minRenderDpr` floor still applies unless canvas safety has already forced a lower
 effective DPR; memory fitting may reduce that constrained output further. Visible old-scale bitmaps
 remain available until their replacements commit, and direct-render policy is not bypassed.
+
+The raster budget is not a total browser-memory limit. PDF.js resources and browser font and graphics
+caches add memory beyond page bitmaps, and releasing resources need not immediately lower process
+memory. Page and thumbnail placeholder counts do not measure bitmap memory: zero-sized canvases have
+no page-sized backing store. Deactivation keeps the document open; use `close()` or `destroy()` to
+release it.
 
 #### Inactive viewers and hidden documents
 
@@ -1265,6 +1272,159 @@ on output dimensions and DPR, not group count; estimates exclude PDF.js internal
 asynchronous metadata work. Replacement, close and destroy revoke it and clear registrations;
 passing an old token returns `stale-document`. Ordinary lifecycle/feature failures use the
 existing query-result reasons. No existing API requires dependency registration.
+
+### Read-Only Display Page Sources
+
+Use `preparePageSource()` and `setPageSourceOverrides()` to replace displayed pages with
+pages from another PDF without reloading the viewer or changing the original document.
+The loaded original is the **base PDF**; each page position in the viewer is a **logical
+page**. Replacement pages must match that position's geometry. Downloads and printing
+still use the base PDF, not the displayed replacements.
+
+Your application supplies the replacement PDF as bytes or a Blob. Any conversion,
+content selection, persistence, or caching is application-owned. Both methods require
+a ready viewer; call them after a successful `load()` or `pdf:ready`.
+
+```ts
+const controller = new AbortController();
+const token = viewer.documentId;
+if (token !== null && viewer.state.status === "ready") {
+  const prepared = await viewer.preparePageSource({ data: replacementBytes }, token, {
+    signal: controller.signal,
+  });
+  if (prepared.ok) {
+    try {
+      const result = await viewer.setPageSourceOverrides(
+        [
+          { page: 12, source: prepared.source, sourcePage: 1 },
+          { page: 13, source: prepared.source, sourcePage: 2 },
+          { page: 14, source: null }, // Restore this slot to its base page.
+        ],
+        token,
+        { signal: controller.signal },
+      );
+      if (!result.ok) console.warn("Page replacement failed", result.reason);
+      // Success installs the mapping; rendering completes separately.
+      // Observe pdf:pagecontent to track visible-page completion.
+    } finally {
+      prepared.source.release();
+    }
+  } else {
+    console.warn("Replacement PDF could not be prepared", prepared.reason);
+  }
+}
+```
+
+Both logical pages and source pages are **1-based** and may have different numbers.
+Preparation accepts exactly one of `{ data: Uint8Array }` or `{ blob: Blob }`. It immediately
+copies a `Uint8Array`, leaving the caller's buffer usable. A native Blob or File avoids
+retaining that extra JavaScript byte copy; Blob-like loader objects are not supported:
+
+```ts
+const prepared = await viewer.preparePageSource({ blob: replacementPdfBlob }, token);
+```
+
+Both forms validate the source without changing any displayed page. Blobs are not persisted
+by the viewer and do not guarantee disk-backed storage or low total browser memory use.
+Use the returned handle only with the viewer and base document that prepared it.
+Call `source.release()` when you no longer need to assign it to more pages, as in the
+`finally` block above. Release is idempotent and does not remove installed replacements;
+a released handle cannot be assigned again. Restore pages with `{ page, source: null }`.
+
+A batch validates every page, handle and geometry before one commit. Unmentioned logical
+slots remain untouched, duplicate logical pages are rejected, and no-op assignments do not
+invalidate work or advance the revision. Replacement crop coordinates must match the base
+page within `0.0001` PDF units, intrinsic rotations must match modulo 360 degrees, and
+UserUnit must match within `0.000001`. There is no stretching, imposition or layout reflow.
+The logical page count, navigation history and consumer page overlays remain unchanged.
+
+Pending mapping calls are latest-wins across the viewer: a newer call supersedes an older
+unpublished batch. Unmentioned changes from an older pending batch are **not** inherited.
+Coalesce a complete desired batch in the application when concurrent requests must combine.
+Cancellation applies before the authoritative commit; it never undoes an already published
+mapping or invalidates an earlier installed source. Capture `documentId` before asynchronous
+processing. Replacement/close/destroy revoke old tokens and handles.
+
+`ok: false` results identify stale documents, cancellation/supersession, invalid sources or
+pages, mismatched geometry, unsupported semantics, resource limits and load errors. A
+failed batch does not install some of its assignments. Preparation success alone is not
+selection/publication success.
+
+#### Completion and Reading Behavior
+
+`pdf:pagesourceschange` reports `{ documentId, revision, pages }` when a batch changes the
+installed mapping; successful no-op batches do not emit it. Rendering remains lazy:
+offscreen replacements render when needed, not all at once. `pdf:pagecontent` separately
+reports when a current logical page finishes rendering or fails:
+
+```ts
+rootEl.addEventListener("pdf:pagecontent", event => {
+  const { documentId, page, revision, sourceId, status } = (
+    event as import("@unilarva/pdfjs-viewer").PdfjsViewerPageContentEvent
+  ).detail;
+  // Match documentId/page/revision to the application's pending visible-page request.
+  // status is "ready" or "error"; error details are present only for failures.
+});
+```
+
+In this event, `page` is the logical slot, not the replacement PDF's page number;
+`revision` identifies that slot's current content, including restoration to the base page.
+
+Page images, thumbnails, search, selectable text, copy, and hyperlinks use the chosen
+source consistently. Source changes invalidate affected text mappings and any selection
+spanning them; unrelated cached and in-flight content remains valid. Old usable pixels
+remain readable during replacement. Applications should retain a visible pending state
+until their current visible pages report completion, rather than claiming a preparation
+result is already displayed.
+
+The base outline, named navigation identity, information, permissions, original/filled PDF
+bytes, downloads and **all print routes** remain canonical to the base document. These
+substitutions are not a PDF editor or a modified-document export. Base optional-content
+controls do not mutate a substitute PDF's independent default layer configuration.
+
+#### Links and Supported PDFs
+
+The default `linkContext: "source"` resolves source-local destinations and maps their source
+page to one uniquely installed logical slot. Unmapped or ambiguous destinations fail safely
+without navigating. `linkContext: "base"` is an explicit consumer attestation that named and
+numeric destinations already address the canonical base PDF. Indirect source-page references
+are rejected in that mode: coincidentally equal PDF object numbers are not portable identities.
+External links retain the viewer's ordinary URL and action policy.
+
+Replacement sources support read-only page content and link annotations without appearance
+streams, not editable AcroForms, XFA, signatures, other annotation types, unsupported
+annotation actions, or permission-bearing documents. Unsupported sources fail preparation
+with `reason: "unsupported"` rather than silently losing interactions.
+Applying overrides also rejects base documents with those unsupported form/permission
+semantics. Ordinary documents without overrides retain their existing capabilities. Source
+preparation does not promise arbitrary PDF sanitization or execute PDF JavaScript.
+
+#### Resource Limits
+
+Prepare only the sources your application needs, release unused handles, and restore pages
+whose replacements are no longer needed. The following per-viewer limits can produce
+`reason: "resource-limit"` results:
+
+| Resource                                                  | Limit                             |
+| --------------------------------------------------------- | --------------------------------- |
+| Pages per replacement PDF                                 | 128                               |
+| Prepared source handles                                   | `max(128, 2 * base page count)`   |
+| Page assignments per batch                                | `max(128, base page count)`       |
+| Retained byte-input copies                                | 64 MiB total                      |
+| Retained Blob sizes                                       | 256 MiB total                     |
+| Simultaneously open, opening, or closing replacement PDFs | 4                                 |
+| Input bytes for those PDFs                                | 64 MiB total; each input must fit |
+| Replacement font-face copies                              | 64 MiB total                      |
+
+The viewer automatically closes idle replacement PDFs and reopens them from retained input
+when needed; your application does not need to fetch or convert them again on zoom or scroll.
+A batch can replace or restore every logical page atomically without keeping every replacement
+PDF open. Installed mappings retain their input even after you release the caller's handle.
+
+These limits are separate from the rendering profile's raster budgets. They do not cap
+PDF.js decoded resources, browser/GPU memory, or total process memory. A Blob's size is a
+logical input-byte count, not a measurement of resident memory. See
+[Display page sources](./ARCHITECTURE.md#display-page-sources) for maintainer ownership details.
 
 ### Page-Anchored DOM Overlays
 

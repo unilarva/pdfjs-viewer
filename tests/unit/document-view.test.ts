@@ -75,6 +75,21 @@ class FakeElement extends EventTarget {
     this.parentElement = null;
     this.isConnected = false;
   }
+  cloneNode(): FakeElement {
+    const clone = new FakeElement();
+    clone.width = this.width;
+    clone.height = this.height;
+    return clone;
+  }
+  replaceWith(replacement: FakeElement): void {
+    const parent = this.parentElement;
+    if (!parent) return;
+    parent.children[parent.children.indexOf(this)] = replacement;
+    replacement.parentElement = parent;
+    replacement.isConnected = this.isConnected;
+    this.parentElement = null;
+    this.isConnected = false;
+  }
   querySelector<T extends FakeElement>(selector: string): T | null {
     const className = selector.startsWith(".") ? selector.slice(1) : "";
     const visit = (node: FakeElement): FakeElement | null => {
@@ -182,6 +197,45 @@ function setup(options: { pageLayout?: "auto" | "single" | "double" | "book" } =
   });
   return { view, container, calls, views, invalidations };
 }
+
+test("evicted raster retirement preserves wrappers and rejects live or stale leases", () => {
+  withFakeDocument(() => {
+    const { view, calls } = setup();
+    view.beginDocument({
+      pageCount: 3,
+      basePageSize: { width: 200, height: 300 },
+      preferredLayout: null,
+    });
+    const old = view.leaseFor(2)!;
+    const sibling = document.createElement("button");
+    old.wrapper.appendChild(sibling);
+    old.canvas.width = 100;
+    view.releaseRasterSurface(old);
+    assert.equal(view.isCurrent(old), true);
+    old.canvas.width = 0;
+    const before = calls.length;
+    view.releaseRasterSurface(old);
+    const next = view.leaseFor(2)!;
+    assert.notEqual(next.canvas, old.canvas);
+    assert.equal(next.wrapper, old.wrapper);
+    assert.equal(sibling.parentElement, next.wrapper);
+    assert.equal(next.canvas.width, 0);
+    assert.equal(next.canvas.height, 0);
+    assert.equal(view.isCurrent(old), false);
+    assert.equal(view.isCurrent(next), true);
+    assert.equal(old.canvas.isConnected, false);
+    assert.equal(calls.length, before);
+    view.releaseRasterSurface(old);
+    assert.equal(view.leaseFor(2)!.canvas, next.canvas);
+    view.commitView({ pageLayout: "double", refit: false });
+    view.releaseRasterSurface(next);
+    assert.equal(view.leaseFor(2)!.canvas, next.canvas);
+    const current = view.leaseFor(2)!;
+    view.releaseRasterSurface(current);
+    assert.equal(view.rowIndexForPage(2), 0);
+    assert.equal(view.isCurrent(view.leaseFor(2)!), true);
+  });
+});
 
 test("consumer overlays follow canonical geometry and survive topology changes until reset", () => {
   withFakeDocument(() => {

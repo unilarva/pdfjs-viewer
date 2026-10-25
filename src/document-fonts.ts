@@ -4,6 +4,7 @@
 import type * as PDFJS from "pdfjs-dist";
 import { readPdfPageFonts, type PdfPageFont } from "./pdfjs-compatibility.js";
 import { inhibitTrueTypeGridFitting } from "./truetype-grid-fitting.js";
+import type { DocumentPageAcquirer, DocumentPageUse } from "./document-page-usage.js";
 
 /**
  * Private document-owned font geometry and lifetime policy.
@@ -20,6 +21,28 @@ const FONT_SIZE_COMPARISON_EPSILON = 1e-4;
 
 let nextOwnerId = 0;
 
+/** Private source-font preparation failure; callers must keep existing usable pixels. */
+export class SourceFontError extends Error {}
+
+/** Private source admission failure when copied font bytes exceed the resource budget. */
+export class DocumentFontBudgetError extends SourceFontError {}
+
+/** Private font-owner policy; ordinary base owners retain their historical defaults. */
+export interface DocumentFontOptions {
+  /** Whether to prepare outline-preserving aliases. Defaults to true. */
+  geometric?: boolean;
+  /** Whether to independently retain native faces for evictable source documents. */
+  retainNativeFaces?: boolean;
+  /** Reserves each copied buffer until its face is deleted; null denies admission. */
+  reserveBytes?: (bytes: number) => (() => void) | null;
+}
+
+/** Pins this owner's faces, without retaining its PDF document. */
+export interface DocumentFontLease {
+  /** Releases the pin once; subsequent calls have no effect. */
+  release(): void;
+}
+
 /** Document-scoped native font aliases preserve outline geometry without browser-global patches. */
 export class DocumentFonts {
   #document: Document;
@@ -27,14 +50,52 @@ export class DocumentFonts {
   #closed = false;
   #abort = new AbortController();
   #pending = new Map<string, Promise<void>>();
+  #physical = new Set<Promise<unknown>>();
+  #pages?: DocumentPageAcquirer;
   #aliases = new Map<string, string>();
   #faces = new Set<FontFace>();
+  #options: DocumentFontOptions;
+  #reservations = new Map<FontFace, () => void>();
+  #byteLength = 0;
+  #retains = 0;
+  #drains = 0;
+  #closing?: Promise<void>;
+  #finishClose?: () => void;
 
-  constructor(ownerDocument: Document) {
+  /** Creates a base alias owner or an independently retained source-generation owner. */
+  constructor(ownerDocument: Document, options: DocumentFontOptions = {}) {
     this.#document = ownerDocument;
+    this.#options = { ...options };
   }
 
-  /** Prepares fonts before any base/detail pixels are written; failures retain the original font. */
+  /** Estimated copied font bytes currently charged, including in-flight loads. */
+  get byteLength(): number {
+    return this.#byteLength;
+  }
+
+  /** Binds the exact physical document's page owner before any font work is admitted. */
+  bindPageUsage(pages: DocumentPageAcquirer): void {
+    if (this.#closed || this.#physical.size || (this.#pages && this.#pages !== pages))
+      throw new SourceFontError("Cannot replace an admitted font page owner");
+    this.#pages = pages;
+  }
+
+  /** Admits a text-layer pin before close; the pin also covers faces prepared later. */
+  retain(): DocumentFontLease {
+    if (this.#closed) throw new SourceFontError("Cannot retain a closed font owner");
+    this.#retains++;
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.#retains--;
+        this.#deleteWhenDrained();
+      },
+    };
+  }
+
+  /** Prepares render fonts; source-copy failures reject instead of permitting unsafe eviction. */
   async prepare(
     page: PDFJS.PDFPageProxy,
     annotationMode: number,
@@ -42,22 +103,44 @@ export class DocumentFonts {
   ): Promise<void> {
     if (this.#closed || signal?.aborted) return;
     try {
-      const fonts = await this.#unlessClosed(readPdfPageFonts(page, annotationMode), signal);
-      if (!fonts || this.#closed || signal?.aborted) return;
-      await this.#unlessClosed(
-        Promise.all(
-          fonts.map(font => {
-            let pending = this.#pending.get(font.family);
-            if (!pending) {
-              pending = this.#load(font).catch(() => undefined);
-              this.#pending.set(font.family, pending);
-            }
-            return pending;
-          }),
-        ),
-        signal,
-      );
-    } catch {
+      // Caller cancellation revokes authority, not the underlying PDF/font operations.
+      const physical = (async () => {
+        let use: DocumentPageUse | undefined;
+        try {
+          if (this.#pages) use = await this.#pages.acquire(page.pageNumber);
+          if (this.#closed || signal?.aborted) return;
+          const fonts = await readPdfPageFonts(use?.page ?? page, annotationMode);
+          if (this.#closed || signal?.aborted) return;
+          const loaded = await Promise.allSettled(
+            fonts.map(font => {
+              let pending = this.#pending.get(font.family);
+              if (!pending) {
+                pending = this.#load(font).catch(error => {
+                  if (this.#options.retainNativeFaces) throw error;
+                });
+                this.#pending.set(font.family, pending);
+              }
+              return pending;
+            }),
+          );
+          for (const result of loaded) if (result.status === "rejected") throw result.reason;
+        } finally {
+          // Font descriptors can still reference PDF-owned bytes between native/alias loads.
+          use?.release();
+        }
+      })();
+      this.#physical.add(physical);
+      const settled = () => {
+        this.#physical.delete(physical);
+        this.#deleteWhenDrained();
+      };
+      void physical.then(settled, settled);
+      await this.#unlessClosed(physical, signal);
+    } catch (error) {
+      if (this.#options.retainNativeFaces && !this.#closed && !signal?.aborted)
+        throw error instanceof SourceFontError
+          ? error
+          : new SourceFontError("Unable to retain source fonts", { cause: error });
       // Invalid/unsupported font dependencies must not turn otherwise valid
       // PDF content into a blank page. PDF.js retains its original font path.
     }
@@ -85,17 +168,49 @@ export class DocumentFonts {
   }
 
   async #load(font: PdfPageFont): Promise<void> {
-    const data = inhibitTrueTypeGridFitting(font.data);
-    if (!data || this.#closed) return;
-    const owner = this.#document.defaultView as (Window & typeof globalThis) | null;
-    if (!owner?.FontFace || !this.#document.fonts) return;
-    const family = `${font.family}_pdfjs_viewer_linear_${this.#id}`;
-    const face = new owner.FontFace(family, data.buffer as ArrayBuffer);
-    await face.load();
     if (this.#closed) return;
-    this.#document.fonts.add(face);
-    this.#faces.add(face);
-    this.#aliases.set(font.family, family);
+    if (this.#options.retainNativeFaces) await this.#loadFace(font.family, font.data, true);
+    if (this.#closed || this.#options.geometric === false) return;
+    const data = inhibitTrueTypeGridFitting(font.data);
+    if (!data) return;
+    const family = `${font.family}_pdfjs_viewer_linear_${this.#id}`;
+    if (await this.#loadFace(family, data, false)) this.#aliases.set(font.family, family);
+  }
+
+  /** Copies exactly the qualified font view; ownership never includes PDF.js's original face. */
+  async #loadFace(family: string, data: Uint8Array, native: boolean): Promise<boolean> {
+    const owner = this.#document.defaultView as (Window & typeof globalThis) | null;
+    if (!owner?.FontFace || !this.#document.fonts) {
+      if (native) throw new SourceFontError("Native source font copying is unavailable");
+      return false;
+    }
+    const bytes = data.byteLength;
+    const reservation = this.#options.reserveBytes?.(bytes);
+    if (reservation === null) throw new DocumentFontBudgetError("Source font budget exceeded");
+    this.#byteLength += bytes;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.#byteLength -= bytes;
+      reservation?.();
+    };
+    try {
+      const face = new owner.FontFace(family, data.slice().buffer as ArrayBuffer);
+      await face.load();
+      if (this.#closed) {
+        release();
+        return false;
+      }
+      this.#document.fonts.add(face);
+      this.#faces.add(face);
+      this.#reservations.set(face, release);
+      return true;
+    } catch (error) {
+      release();
+      if (native) throw new SourceFontError("Unable to copy native source font", { cause: error });
+      throw error;
+    }
   }
 
   /** Adapts only this render's context; DOM fonts and the original context remain consumer-owned. */
@@ -151,14 +266,31 @@ export class DocumentFonts {
     });
   }
 
-  /** Stops new aliases immediately; deletion waits for every raster still using this owner. */
-  async close(settlements: readonly Promise<unknown>[]): Promise<void> {
+  /** Revokes new work synchronously; all admitted text pins and physical rasters delay deletion. */
+  close(settlements: readonly Promise<unknown>[]): Promise<void> {
+    if (!this.#closing)
+      this.#closing = new Promise(resolve => {
+        this.#finishClose = resolve;
+      });
     this.#closed = true;
     this.#abort.abort();
-    await Promise.allSettled(settlements);
+    this.#drains++;
+    const drained = Promise.allSettled(settlements).then(() => {
+      this.#drains--;
+      this.#deleteWhenDrained();
+    });
+    return Promise.all([this.#closing, drained]).then(() => undefined);
+  }
+
+  /** Deletes only owned identities once both physical and logical users are gone. */
+  #deleteWhenDrained(): void {
+    if (!this.#closed || this.#drains || this.#retains || this.#physical.size) return;
     for (const face of this.#faces) this.#document.fonts.delete(face);
     this.#faces.clear();
+    for (const release of this.#reservations.values()) release();
+    this.#reservations.clear();
     this.#aliases.clear();
     this.#pending.clear();
+    this.#finishClose?.();
   }
 }

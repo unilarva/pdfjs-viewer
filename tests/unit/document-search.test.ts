@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DocumentSearch, type DocumentSearchHost } from "../../src/document-search.js";
 import { DocumentPageUsage } from "../../src/document-page-usage.js";
+import { PDFJS_TEXT_CONTENT_PARAMS } from "../../src/text-content-policy.js";
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -51,6 +52,200 @@ function textItem(
 ): object {
   return { str, transform, width, height };
 }
+
+test("source extraction indexes override text and rebuilds only an invalidated cached page", async () => {
+  const pdf = {
+    getPage: () => {
+      throw new Error("canonical base text must not be read");
+    },
+  };
+  const reads = [0, 0];
+  const revisions = [1, 1];
+  const releases = [0, 0];
+  const searchHost = host(pdf, {
+    pageCount: 2,
+    acquirePage: async page => {
+      const revision = revisions[page - 1];
+      return {
+        page: {
+          getTextContent: async (params: unknown) => {
+            assert.equal(params, PDFJS_TEXT_CONTENT_PARAMS);
+            reads[page - 1]++;
+            return { items: [textItem(`override-${page}-${revision}`)] };
+          },
+        } as never,
+        source: {
+          id: `source-${page}`,
+          revision,
+          logicalPage: page,
+          sourcePage: 1,
+          pdf: {} as never,
+          linkContext: "source",
+          isCurrent: () => revisions[page - 1] === revision,
+        },
+        release: () => {
+          releases[page - 1]++;
+        },
+      };
+    },
+  });
+  const feature = new DocumentSearch();
+  assert.equal(await feature.prepare(searchHost), true);
+  const unchangedItems = feature.itemsForPage(2);
+  revisions[0]++;
+  feature.invalidatePages(new Set([1]));
+  assert.equal(feature.ready, false);
+  assert.equal(feature.preparation, null);
+  assert.equal(feature.itemsForPage(1), undefined);
+  assert.equal(feature.itemsForPage(2), unchangedItems);
+  assert.deepEqual(
+    feature.findMatches("override", { caseSensitive: false, diacritics: "smart" }),
+    [],
+  );
+  assert.equal(await feature.prepare(searchHost), true);
+  assert.deepEqual(reads, [2, 1]);
+  assert.deepEqual(releases, [2, 1]);
+  assert.equal(feature.itemsForPage(2), unchangedItems);
+  const result = await feature.search(searchHost, "override-1-2", {});
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.matches[0].page, 1);
+});
+
+test("rapid source invalidation never publishes delayed reads and releases only after physical settlement", async () => {
+  const pdf = {};
+  const gates = [deferred<{ items: object[] }>(), deferred<{ items: object[] }>()];
+  const started = [deferred<void>(), deferred<void>()];
+  const releases = [0, 0, 0];
+  let revision = 0;
+  const feature = new DocumentSearch();
+  const searchHost = host(pdf, {
+    acquirePage: async () => {
+      const admitted = revision;
+      return {
+        page: {
+          getTextContent: () => {
+            if (admitted < 2) {
+              started[admitted].resolve();
+              return gates[admitted].promise;
+            }
+            return Promise.resolve({ items: [textItem("current-source")] });
+          },
+        } as never,
+        source: {
+          id: "source",
+          revision: admitted,
+          logicalPage: 1,
+          sourcePage: 1,
+          pdf: {} as never,
+          linkContext: "source",
+          isCurrent: () => admitted === revision,
+        },
+        release: () => {
+          releases[admitted]++;
+        },
+      };
+    },
+  });
+  const first = feature.prepare(searchHost);
+  await started[0].promise;
+  revision++;
+  feature.invalidatePages(new Set([1]));
+  const second = feature.prepare(searchHost);
+  await started[1].promise;
+  revision++;
+  feature.invalidatePages(new Set([1]));
+  assert.deepEqual(releases, [0, 0, 0]);
+  const latest = feature.prepare(searchHost);
+  assert.equal(await latest, true);
+  gates[1].resolve({ items: [textItem("stale-second")] });
+  assert.equal(await second, false);
+  gates[0].reject(new Error("cancelled extraction physically settled"));
+  assert.equal(await first, false);
+  assert.deepEqual(releases, [1, 1, 1]);
+  assert.equal(feature.itemsForPage(1)?.[0].str, "current-source");
+  assert.equal(feature.preparation, latest);
+  assert.equal(feature.ready, true);
+});
+
+test("source authority and captured revision are rechecked before atomic index publication", async () => {
+  for (const revoke of ["current", "revision"] as const) {
+    const second = deferred<{ items: object[] }>();
+    const started = deferred<void>();
+    let current = true;
+    const source = {
+      id: "source",
+      revision: 1,
+      logicalPage: 1,
+      sourcePage: 1,
+      pdf: {} as never,
+      linkContext: "source" as const,
+      isCurrent: () => current,
+    };
+    const feature = new DocumentSearch();
+    const searchHost = host(
+      {},
+      {
+        pageCount: 2,
+        acquirePage: async page => ({
+          page: {
+            getTextContent: () => {
+              if (page === 2) {
+                started.resolve();
+                return second.promise;
+              }
+              return Promise.resolve({ items: [textItem("old-source")] });
+            },
+          } as never,
+          source: page === 1 ? source : undefined,
+          release() {},
+        }),
+      },
+    );
+    const preparation = feature.prepare(searchHost);
+    await started.promise;
+    if (revoke === "current") current = false;
+    else source.revision++;
+    second.resolve({ items: [textItem("other-page")] });
+    assert.equal(await preparation, false);
+    assert.equal(feature.ready, false);
+    assert.equal(feature.indexedPageCount, 0);
+  }
+});
+
+test("revoked source reads are rejected even when host document identity remains current", async () => {
+  let released = 0;
+  let read = 0;
+  const feature = new DocumentSearch();
+  const searchHost = host(
+    {},
+    {
+      acquirePage: async () => ({
+        page: {
+          getTextContent: async () => {
+            read++;
+            return { items: [textItem("stale")] };
+          },
+        } as never,
+        source: {
+          id: "source",
+          revision: 1,
+          logicalPage: 1,
+          sourcePage: 1,
+          pdf: {} as never,
+          linkContext: "source",
+          isCurrent: () => false,
+        },
+        release: () => {
+          released++;
+        },
+      }),
+    },
+  );
+  assert.equal(await feature.prepare(searchHost), false);
+  assert.equal(read, 0);
+  assert.equal(released, 1);
+  assert.equal(feature.indexedPageCount, 0);
+});
 
 test("validates, defensively copies, and deeply freezes retained text items", async () => {
   const transform = [1, 0, 0, -1, 12, 0];

@@ -69,10 +69,83 @@ import {
   type PdfjsViewerDeviceEnvironment,
   type PdfjsViewerDeviceCompatibilityRule,
   type PdfjsViewerNativePrintCapabilities,
+  type PdfjsViewerPageSourceInput,
+  type PdfjsViewerPageSource,
+  type PdfjsViewerPageSourcePreparationOptions,
+  type PdfjsViewerPageSourcePreparationResult,
+  type PdfjsViewerPageSourceFailure,
+  type PdfjsViewerPageSourceOverride,
+  type PdfjsViewerPageSourceMutationOptions,
+  type PdfjsViewerPageSourceMutationResult,
+  type PdfjsViewerPageSourceState,
+  type PdfjsViewerPageSourcesChangeEvent,
+  type PdfjsViewerPageContentDetail,
+  type PdfjsViewerPageContentEvent,
 } from "@unilarva/pdfjs-viewer";
 import * as pdfjs from "pdfjs-dist";
 
 const pdfjsModule: PdfjsViewerPdfjsModule = pdfjs;
+
+/** Consumer compilation uses root exports, not private PDF.js proxies or package internals. */
+export async function checkPageSourceConsumerContract(viewer: PdfjsViewer, input: Uint8Array) {
+  const token = viewer.documentId;
+  if (token === null) return;
+  const sourceInput: PdfjsViewerPageSourceInput = { data: input };
+  const blobInput: PdfjsViewerPageSourceInput = { blob: new Blob([new Uint8Array(input)]) };
+  const blobPrepared = await viewer.preparePageSource(blobInput, token);
+  if (blobPrepared.ok) blobPrepared.source.release();
+  // @ts-expect-error A source must use exactly one backing representation.
+  const ambiguousInput: PdfjsViewerPageSourceInput = { data: input, blob: blobInput.blob };
+  void ambiguousInput;
+  // @ts-expect-error Empty input descriptors are not valid prepared PDF sources.
+  const emptyInput: PdfjsViewerPageSourceInput = {};
+  void emptyInput;
+  const preparation: PdfjsViewerPageSourcePreparationOptions = { linkContext: "base" };
+  const prepared: PdfjsViewerPageSourcePreparationResult = await viewer.preparePageSource(
+    sourceInput,
+    token,
+    preparation,
+  );
+  if (!prepared.ok) {
+    const failure: PdfjsViewerPageSourceFailure = prepared;
+    return failure.reason;
+  }
+  const source: PdfjsViewerPageSource = prepared.source;
+  try {
+    const changes: readonly PdfjsViewerPageSourceOverride[] = [
+      { page: 2, source, sourcePage: 1 },
+      { page: 3, source: null },
+    ];
+    const options: PdfjsViewerPageSourceMutationOptions = { signal: new AbortController().signal };
+    const result: PdfjsViewerPageSourceMutationResult = await viewer.setPageSourceOverrides(
+      changes,
+      token,
+      options,
+    );
+    if (result.ok) {
+      const state: PdfjsViewerPageSourceState = result;
+      void state.revision;
+    }
+    // @ts-expect-error Source page identity must be explicit for non-base assignments.
+    const incomplete: PdfjsViewerPageSourceOverride = { page: 2, source };
+    void incomplete;
+    // @ts-expect-error Captured document tokens are required numeric viewer identities.
+    void viewer.setPageSourceOverrides(changes, "not-a-token");
+    return result.ok;
+  } finally {
+    source.release();
+  }
+}
+export function checkPageSourceEvents(
+  event: PdfjsViewerPageSourcesChangeEvent | PdfjsViewerPageContentEvent,
+) {
+  if (event.type === "pdf:pagecontent") {
+    const detail: PdfjsViewerPageContentDetail = event.detail;
+    if (detail.status === "error") void detail.error;
+    return detail.documentId;
+  }
+  return event.detail.revision;
+}
 const nativePrintEnvironment: PdfjsViewerDeviceEnvironment = { userAgent: "package-consumer" };
 const nativePrintCapabilities: PdfjsViewerNativePrintCapabilities =
   resolveNativePrintCapabilities(nativePrintEnvironment);
