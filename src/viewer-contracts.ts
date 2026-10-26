@@ -1061,6 +1061,15 @@ export interface PdfjsViewerPrintFeatureOptions {
   mode?: PdfjsViewerPrintMode;
   /** Allow browser-source fallback and explicit source printing in native mode. Defaults to `true`. */
   browserFallback?: boolean;
+  /**
+   * Controlled native page content. Defaults to `base`, ignoring display replacements.
+   * `display` captures installed replacements at submission and renders each source
+   * with its own Print intent, not frozen screen pixels. Adapters, document-data
+   * queries and downloads are unchanged. While replacements are active, automatic
+   * browser-source printing requires {@link PdfjsViewerOptions.printOutputProvider}
+   * or returns `unsupported`; an explicit original/form-value action remains canonical.
+   */
+  pageSources?: "base" | "display";
   /** Defaults shared by package UI, custom UI, direct calls, and adapters. */
   defaults?: PdfjsViewerPrintDefaults;
 }
@@ -2405,9 +2414,19 @@ export type PdfjsViewerPrintResult =
     };
 /** Explicit source-document choice for browser PDF-handler fallback. */
 export interface PdfjsViewerPrintSourceOptions {
-  /** Source representation to open, or automatic selection from form state. */
-  document?: "auto" | PdfjsViewerDocumentVariant;
-  /** Whether to navigate directly to a URL or materialize PDF bytes. */
+  /**
+   * Source representation to open. `auto` uses the configured
+   * {@link PdfjsViewerOptions.printOutputProvider}; without one it selects from
+   * form state, unless display printing has active replacements (`unsupported`).
+   * `current` requires that provider. Explicit `original` and `with-form-values`
+   * bypass the provider and retain their canonical document semantics.
+   */
+  document?: "auto" | "current" | PdfjsViewerDocumentVariant;
+  /**
+   * Whether to navigate directly to a URL or materialize PDF bytes.
+   * Current output requires owned materialization: `direct` returns `unsupported`
+   * before resolving its bytes; `auto` and `materialize` use a viewer-owned Blob URL.
+   */
   navigation?: "auto" | "direct" | "materialize";
   /** Print intent used only to report semantics lost by source fallback. */
   print?: PdfjsViewerPrintOptions;
@@ -2462,6 +2481,70 @@ export interface PdfjsViewerPrintContext {
 export type PdfjsViewerPrintAdapter = (
   context: PdfjsViewerPrintContext,
 ) => PdfjsViewerPrintAdapterResult | Promise<PdfjsViewerPrintAdapterResult>;
+
+/** Immutable identity and lifetime captured for synchronous print-output admission. */
+export interface PdfjsViewerPrintOutputContext {
+  /** Viewer-local monotonic correlation ID, not a resumable job or snapshot handle. */
+  readonly operationId: number;
+  /** Exact ready-document token, matching {@link PdfjsViewer.documentId} at admission. */
+  readonly documentId: number;
+  /** Configured native source policy; not a promise to reproduce screen View intent. */
+  readonly pageSources: "base" | "display";
+  /** Global page-source mapping revision at admission, including mapping resets. */
+  readonly pageSourcesRevision: number;
+  /**
+   * Operation lifetime, aborted on cancellation, document replacement, destruction
+   * and completion, including closure of a pending browser destination. Host
+   * computation must observe it; late results cannot navigate.
+   */
+  readonly signal: AbortSignal;
+}
+
+/**
+ * Host-owned immutable output admission retained until one print operation ends.
+ * Structural implementations may retain additional host-owned fields or class state.
+ */
+export interface PdfjsViewerPrintOutput {
+  /**
+   * Lazily resolves a complete PDF for this admission's captured state.
+   *
+   * Successful controlled native printing never calls this method. A browser
+   * continuation uses this same admission, not newly captured host state. Return
+   * non-empty PDF bytes or a Blob, never a URL; the viewer owns the navigation
+   * Blob URL. Rejection, throws and invalid/empty results fail with `export-failed`,
+   * without silently substituting the original document. Keep returned byte storage
+   * valid and unchanged until resolution has settled and the admission is released.
+   *
+   * @returns Complete PDF data synchronously or through a promise.
+   */
+  resolveSource(): Uint8Array | ArrayBuffer | Blob | Promise<Uint8Array | ArrayBuffer | Blob>;
+  /**
+   * Idempotently releases retained host inputs. The viewer calls this exactly once
+   * when the operation completes, fails or aborts, independently of native print
+   * resources and the browser's navigation URL. It may run before an aborted
+   * asynchronous resolution settles; coordinate cleanup with the context signal.
+   */
+  release?(): void;
+}
+
+/**
+ * Synchronously admits immutable host output for an actual print/source submission.
+ *
+ * Capture only inputs needed for later resolution in the returned closure; do not
+ * compose eagerly. Admission occurs with the mapping snapshot before asynchronous
+ * permission/geometry/export work or reentrant events; preflight never calls it.
+ * Changing the ready document or mapping during this callback cancels admission.
+ * Both URL-backed and in-memory documents are supported. Explicit original/form
+ * source requests and adapter-owned printing bypass this provider.
+ *
+ * @param context - Captured operation identity, source policy and abort lifetime.
+ * @returns A lazy output admission, or `null` to deny with `unsupported`, even
+ * without replacements. Promises/thenables are invalid admission results. Throws
+ * and malformed results fail closed with `export-failed`.
+ */
+export type PdfjsViewerPrintOutputProvider = (
+  context: PdfjsViewerPrintOutputContext,
+) => PdfjsViewerPrintOutput | null;
 
 /** Active-document context supplied to a browser-source resolver. */
 export interface PdfjsViewerPrintSourceResolutionContext {
@@ -2709,6 +2792,16 @@ export interface PdfjsViewerOptions {
   printAdapter?: PdfjsViewerPrintAdapter;
   /** Resolves authenticated or application-specific browser-PDF fallback sources. */
   printSourceResolver?: PdfjsViewerPrintSourceResolver;
+  /**
+   * Optional synchronous admission for host-owned current browser-print output.
+   * The returned output is resolved lazily, never for successful native printing.
+   * `auto` source printing prefers it over original URLs and the legacy resolver;
+   * explicit original/form data, downloads and source requests remain unchanged.
+   * Without a provider, active display-print replacements cannot silently fall
+   * back to canonical output. See {@link PdfjsViewerPrintOutputProvider} for
+   * admission, cancellation, failure and ownership requirements.
+   */
+  printOutputProvider?: PdfjsViewerPrintOutputProvider;
   /**
    * Optional PDF named destination prefix used for shareable anchors.
    * Example: "songid:".

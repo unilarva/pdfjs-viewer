@@ -1197,3 +1197,468 @@ test("base-context sources pass only named/numeric links without consulting fore
   );
   await owner.close();
 });
+
+test("selected-page snapshot captures base slots and source revisions before later changes or caller release", async () => {
+  const basePage = fakePage();
+  const sourcePages = [fakePage(), fakePage()];
+  const { owner } = harness(
+    { load: async () => ({ pdf: fakePdf(sourcePages), dispose: async () => {} }) },
+    fakePdf([basePage, fakePage(), fakePage()]),
+  );
+  const source = await prepared(owner);
+  await owner.setOverrides([{ page: 2, source, sourcePage: 2 }]);
+  const snapshot = owner.snapshot([1, 2]);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(snapshot.mappingRevision, 1);
+  assert.equal(snapshot.revision(1), 0);
+  assert.equal(snapshot.revision(2), 1);
+  await owner.setOverrides([
+    { page: 1, source, sourcePage: 1 },
+    { page: 2, source: null },
+  ]);
+  source.release();
+  const base = await snapshot.acquire(1);
+  const changed = await snapshot.acquire(2);
+  assert.equal(base.page, basePage, "a formerly base slot cannot acquire a new replacement");
+  assert.equal(changed.page, sourcePages[1]);
+  assert.equal(changed.source?.sourcePage, 2);
+  assert.equal(changed.source?.logicalPage, 2);
+  assert.equal(changed.source?.revision, 1);
+  assert.equal(changed.source?.isCurrent(), true, "scope authority survives live-map changes");
+  assert.equal(base.source?.isCurrent(), true);
+  assert.equal(snapshot.revision(2), 1);
+  await assert.rejects(snapshot.acquire(3), /invalid-page/);
+  assert.throws(() => snapshot.revision(3), /invalid-page/);
+  snapshot.release();
+  snapshot.release();
+  assert.equal(changed.source?.isCurrent(), false);
+  assert.equal(base.source?.isCurrent(), false);
+  await assert.rejects(snapshot.acquire(1), /cancelled/);
+  assert.throws(() => snapshot.revision(1), /cancelled/);
+  base.release();
+  changed.release();
+  await owner.close();
+});
+
+test("backing-only snapshot pins permit lazy reopening beyond the one-reader cap after reset", async () => {
+  let live = 0;
+  let peak = 0;
+  const opened: number[] = [];
+  const { owner } = harness({
+    limits: { maxLiveDocuments: 1, maxLiveBytes: 1 },
+    load: async data => {
+      opened.push(data[0]);
+      peak = Math.max(peak, ++live);
+      return {
+        pdf: fakePdf([fakePage()]),
+        dispose: async () => {
+          live--;
+        },
+      };
+    },
+  });
+  const sources = [];
+  for (let byte = 1; byte <= 3; byte++) sources.push(await prepared(owner, byte));
+  await owner.setOverrides(sources.map((source, i) => ({ page: i + 1, source, sourcePage: 1 })));
+  const before = opened.length;
+  const snapshot = owner.snapshot([1, 2, 3]);
+  assert.equal(opened.length, before, "snapshot does not eagerly open readers");
+  for (const source of sources) source.release();
+  await owner.setOverrides(sources.map((_, i) => ({ page: i + 1, source: null })));
+  for (let page = 1; page <= 3; page++) {
+    const use = await snapshot.acquire(page);
+    assert.equal(use.source?.id, sources[page - 1].id);
+    use.release();
+  }
+  assert.deepEqual(opened, [1, 2, 3, 1, 2, 3]);
+  assert.equal(peak, 1);
+  snapshot.release();
+  await owner.close();
+  assert.equal(live, 0);
+});
+
+for (const backing of ["bytes", "Blob"] as const) {
+  test(`${backing}: selected distinct backing is charged once across overlapping snapshots and physical retirement`, async () => {
+    const disposal = deferred<void>();
+    const opened: number[] = [];
+    let delayDisposal = false;
+    const { owner } = harness({
+      limits: { maxBytes: 4, maxBlobBytes: 4, maxLiveDocuments: 1 },
+      load: async data => {
+        opened.push(data[0]);
+        return {
+          pdf: fakePdf(),
+          dispose: async () => {
+            if (delayDisposal && data[0] === 1) await disposal.promise;
+          },
+        };
+      },
+    });
+    const input = (byte: number) => {
+      const data = new Uint8Array([byte, byte]);
+      return backing === "Blob" ? new Blob([data]) : data;
+    };
+    const a = await owner.prepare(input(1));
+    const b = await owner.prepare(input(2));
+    assert.equal(a.ok, true);
+    assert.equal(b.ok, true);
+    if (!a.ok || !b.ok) return;
+    await owner.setOverrides([
+      { page: 1, source: a.source, sourcePage: 1 },
+      { page: 2, source: a.source, sourcePage: 2 },
+      { page: 3, source: b.source, sourcePage: 1 },
+    ]);
+    const first = owner.snapshot([1, 2]);
+    const second = owner.snapshot([2]);
+    a.source.release();
+    b.source.release();
+    await owner.setOverrides([1, 2, 3].map(page => ({ page, source: null })));
+    await turn();
+    const c = await owner.prepare(input(3));
+    assert.equal(c.ok, true, "unselected B is not pinned; A is not charged per page or scope");
+    assert.deepEqual(await owner.prepare(input(4)), { ok: false, reason: "resource-limit" });
+    first.release();
+    assert.deepEqual(await owner.prepare(input(4)), { ok: false, reason: "resource-limit" });
+    const use = await second.acquire(2);
+    assert.equal(use.source?.id, a.source.id);
+    delayDisposal = true;
+    second.release();
+    use.release();
+    await turn();
+    assert.deepEqual(await owner.prepare(input(4)), { ok: false, reason: "resource-limit" });
+    disposal.resolve();
+    await turn();
+    assert.equal((await owner.prepare(input(4))).ok, true, "settled retirement returns backing");
+    assert.deepEqual(opened, [1, 2, 3, 1, 4]);
+    await owner.close();
+  });
+}
+
+test("snapshot page validation is atomic and cannot leak backing pins", async () => {
+  const { owner } = harness({ limits: { maxBytes: 1 } });
+  const source = await prepared(owner);
+  await owner.setOverrides([{ page: 1, source, sourcePage: 1 }]);
+  const invalid = [[], [1, 1], [1, 0], [1, 4], [1, 1.5], [1, NaN], [1, Infinity], [1, 2, 3, 4]];
+  for (const pages of invalid) assert.throws(() => owner.snapshot(pages), /invalid-page/);
+  assert.throws(() => owner.snapshot(null as never), /invalid-page/);
+  const abort = new AbortController();
+  abort.abort();
+  assert.throws(() => owner.snapshot([1], { signal: abort.signal }), /cancelled/);
+  source.release();
+  await owner.setOverrides([{ page: 1, source: null }]);
+  await turn();
+  assert.equal((await owner.prepare(new Uint8Array([2]))).ok, true);
+  await owner.close();
+  assert.throws(() => owner.snapshot([1]), /destroyed/);
+});
+
+for (const action of ["release", "abort", "close"] as const) {
+  test(`snapshot ${action} wakes an opening queued behind a physical lease without opening stale backing`, async () => {
+    const { owner, loads } = harness({ limits: { maxLiveDocuments: 1 } });
+    const a = await prepared(owner, 1);
+    const b = await prepared(owner, 2);
+    await owner.setOverrides([
+      { page: 1, source: a, sourcePage: 1 },
+      { page: 2, source: b, sourcePage: 1 },
+    ]);
+    const active = await owner.acquire(1);
+    const abort = new AbortController();
+    const snapshot = owner.snapshot([2], { signal: abort.signal });
+    const pending = snapshot.acquire(2);
+    await turn();
+    const before = loads.length;
+    let closing: Promise<void> | undefined;
+    if (action === "release") snapshot.release();
+    else if (action === "abort") abort.abort();
+    else closing = owner.close();
+    await assert.rejects(pending, action === "close" ? /destroyed/ : /cancelled/);
+    assert.equal(loads.length, before);
+    await assert.rejects(snapshot.acquire(2), action === "close" ? /destroyed/ : /cancelled/);
+    active.release();
+    await (closing ?? owner.close());
+  });
+}
+
+test("close revokes unused snapshots but waits admitted source pages after snapshot release", async () => {
+  const pending = deferred<PDFJS.PDFPageProxy>();
+  let block = false;
+  let disposed = 0;
+  let cleanups = 0;
+  const { owner } = harness({
+    load: async () => ({
+      pdf: fakePdf(undefined, { getPage: async () => (block ? pending.promise : fakePage()) }),
+      dispose: async () => {
+        disposed++;
+      },
+    }),
+  });
+  const source = await prepared(owner);
+  await owner.setOverrides([{ page: 1, source, sourcePage: 1 }]);
+  const unused = owner.snapshot([1]);
+  const active = owner.snapshot([1]);
+  block = true;
+  const acquisition = active.acquire(1);
+  await turn();
+  source.release();
+  await owner.setOverrides([{ page: 1, source: null }]);
+  active.release();
+  let closed = false;
+  const closing = owner.close().then(() => {
+    closed = true;
+  });
+  await turn();
+  assert.equal(disposed, 0);
+  assert.equal(closed, false);
+  await assert.rejects(unused.acquire(1), /destroyed/);
+  pending.resolve(fakePage({ cleanup: () => cleanups++ }));
+  await assert.rejects(acquisition, /destroyed/);
+  await closing;
+  assert.equal(cleanups, 1);
+  assert.equal(disposed, 1);
+  unused.release();
+});
+
+test("failed snapshot reopening and page acquisition release physical admissions without revoking captured backing", async () => {
+  let opens = 0;
+  let rejectPage = false;
+  const { owner } = harness({
+    limits: { maxLiveDocuments: 1, maxBytes: 2 },
+    load: async () => {
+      if (++opens === 3) throw new Error("Synthetic open failure");
+      return {
+        pdf: fakePdf(undefined, {
+          getPage: async () => {
+            if (rejectPage) throw new Error("Synthetic page failure");
+            return fakePage();
+          },
+        }),
+        dispose: async () => {},
+      };
+    },
+  });
+  const source = await prepared(owner);
+  await owner.setOverrides([{ page: 1, source, sourcePage: 1 }]);
+  const snapshot = owner.snapshot([1]);
+  await prepared(owner, 2);
+  source.release();
+  await owner.setOverrides([{ page: 1, source: null }]);
+  await assert.rejects(snapshot.acquire(1), /Synthetic open failure/);
+  rejectPage = true;
+  await assert.rejects(snapshot.acquire(1), /Synthetic page failure/);
+  rejectPage = false;
+  const recovered = await snapshot.acquire(1);
+  assert.equal(recovered.source?.id, source.id);
+  assert.equal(recovered.source?.isCurrent(), true);
+  recovered.release();
+  snapshot.release();
+  await turn();
+  assert.equal((await owner.prepare(new Uint8Array([3]))).ok, true);
+  await owner.close();
+});
+
+for (const cancelled of ["initiator", "joiner"] as const) {
+  test(`cancelling a snapshot ${cancelled} leaves ordinary and overlapping-scope shared openers independent`, async () => {
+    const { owner, loads } = harness({ limits: { maxLiveDocuments: 1 } });
+    const a = await prepared(owner, 1);
+    const b = await prepared(owner, 2);
+    await owner.setOverrides([
+      { page: 1, source: a, sourcePage: 1 },
+      { page: 2, source: b, sourcePage: 1 },
+    ]);
+    const active = await owner.acquire(2);
+    const cancelledScope = owner.snapshot([1]);
+    const survivingScope = owner.snapshot([1]);
+    const first = cancelled === "initiator" ? cancelledScope.acquire(1) : owner.acquire(1);
+    await turn();
+    const second = cancelled === "initiator" ? owner.acquire(1) : cancelledScope.acquire(1);
+    const third = survivingScope.acquire(1);
+    await turn();
+    cancelledScope.release();
+    await assert.rejects(cancelled === "initiator" ? first : second, /cancelled/);
+    assert.deepEqual(
+      loads.map(data => data[0]),
+      [1, 2],
+      "one live lease still blocks the open",
+    );
+    active.release();
+    const [ordinary, scoped] = await Promise.all([
+      cancelled === "initiator" ? second : first,
+      third,
+    ]);
+    assert.equal(ordinary.source?.id, a.id);
+    assert.equal(scoped.source?.id, a.id);
+    assert.equal(scoped.source?.isCurrent(), true);
+    assert.deepEqual(
+      loads.map(data => data[0]),
+      [1, 2, 1],
+      "one shared cold open",
+    );
+    ordinary.release();
+    scoped.release();
+    survivingScope.release();
+    await owner.close();
+  });
+}
+
+test("cancelled queued scope releases unstarted backing before unrelated earlier openings settle", async () => {
+  const { owner, loads } = harness({ limits: { maxLiveDocuments: 1, maxBytes: 3 } });
+  const sources = [];
+  for (let byte = 1; byte <= 3; byte++) sources.push(await prepared(owner, byte));
+  await owner.setOverrides(sources.map((source, i) => ({ page: i + 1, source, sourcePage: 1 })));
+  const active = await owner.acquire(3);
+  const earlier = owner.acquire(1);
+  await turn();
+  const scope = owner.snapshot([2]);
+  const queued = scope.acquire(2);
+  sources[1].release();
+  await owner.setOverrides([{ page: 2, source: null }]);
+  await turn();
+  scope.release();
+  await assert.rejects(queued, /cancelled/);
+  await turn();
+  assert.deepEqual(
+    loads.map(data => data[0]),
+    [1, 2, 3],
+  );
+  let admitted: boolean | undefined;
+  const successor = owner.prepare(new Uint8Array([4])).then(result => {
+    admitted = result.ok;
+    return result;
+  });
+  await turn();
+  assert.equal(
+    admitted,
+    undefined,
+    "B's backing reservation is free; new work waits only for a reader",
+  );
+  active.release();
+  const use = await earlier;
+  use.release();
+  assert.equal((await successor).ok, true);
+  assert.deepEqual(
+    loads.map(data => data[0]),
+    [1, 2, 3, 1, 4],
+    "cancelled B never opens",
+  );
+  await owner.close();
+});
+
+test("last-waiter cancellation retains an in-flight shared loader until physical disposal", async () => {
+  const loaded = deferred<void>();
+  const started = deferred<void>();
+  let opens = 0;
+  let disposals = 0;
+  let loadSignal: AbortSignal | undefined;
+  const { owner } = harness({
+    limits: { maxLiveDocuments: 1, maxBytes: 2 },
+    load: async (_data, signal) => {
+      if (++opens === 3) {
+        loadSignal = signal;
+        started.resolve();
+        await loaded.promise;
+      }
+      return {
+        pdf: fakePdf(),
+        dispose: async () => {
+          disposals++;
+        },
+      };
+    },
+  });
+  const a = await prepared(owner, 1);
+  await owner.setOverrides([{ page: 1, source: a, sourcePage: 1 }]);
+  await prepared(owner, 2);
+  const scope = owner.snapshot([1]);
+  const pending = scope.acquire(1);
+  await started.promise;
+  a.release();
+  await owner.setOverrides([{ page: 1, source: null }]);
+  scope.release();
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(loadSignal?.aborted, true);
+  assert.deepEqual(await owner.prepare(new Uint8Array([3])), {
+    ok: false,
+    reason: "resource-limit",
+  });
+  let closed = false;
+  const closing = owner.close().then(() => {
+    closed = true;
+  });
+  await turn();
+  assert.equal(closed, false);
+  assert.equal(disposals, 2);
+  loaded.resolve();
+  await closing;
+  assert.equal(
+    disposals,
+    3,
+    "late successful loader is disposed, never installed as a live source",
+  );
+});
+
+for (const outcome of ["success", "load-rejection", "disposal-rejection"] as const) {
+  test(`same-source retry waits cancelled opening retirement: ${outcome}`, async () => {
+    const load = deferred<void>();
+    const dispose = deferred<void>();
+    const started = deferred<void>();
+    const retiring = deferred<void>();
+    let opens = 0;
+    let physical = 0;
+    let peak = 0;
+    const { owner } = harness({
+      limits: { maxLiveDocuments: 1, maxBytes: 2 },
+      load: async () => {
+        const generation = ++opens;
+        peak = Math.max(peak, ++physical);
+        if (generation === 3) {
+          started.resolve();
+          await load.promise;
+          if (outcome === "load-rejection") {
+            physical--;
+            throw new Error("Synthetic late load rejection");
+          }
+        }
+        return {
+          pdf: fakePdf(),
+          dispose: async () => {
+            if (generation === 3) {
+              retiring.resolve();
+              await dispose.promise;
+            }
+            physical--;
+            if (generation === 3 && outcome === "disposal-rejection")
+              throw new Error("Synthetic disposal rejection");
+          },
+        };
+      },
+    });
+    const source = await prepared(owner);
+    await owner.setOverrides([{ page: 1, source, sourcePage: 1 }]);
+    await prepared(owner, 2);
+    const old = owner.snapshot([1]);
+    const next = owner.snapshot([1]);
+    const cancelled = old.acquire(1);
+    await started.promise;
+    old.release();
+    await assert.rejects(cancelled, /cancelled/);
+    const retry = next.acquire(1);
+    await turn();
+    assert.equal(opens, 3, "retry cannot join the cancelled generation or open beside it");
+    load.resolve();
+    if (outcome !== "load-rejection") {
+      await retiring.promise;
+      await turn();
+      assert.equal(opens, 3, "late successful loader must finish physical disposal first");
+      dispose.resolve();
+    }
+    const use = await retry;
+    assert.equal(use.source?.id, source.id);
+    assert.equal(use.source?.isCurrent(), true);
+    assert.equal(opens, 4);
+    use.release();
+    next.release();
+    await owner.close();
+    assert.equal(peak, 1);
+    assert.equal(physical, 0);
+  });
+}

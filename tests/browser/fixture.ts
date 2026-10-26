@@ -32,11 +32,13 @@ import { discoverViewerUi } from "../../src/viewer-ui-discovery";
 import { PDFJS_VIEWER_UI_HOOKS } from "../../src/viewer-contracts";
 import type { RenderPresentationContext, RenderSurfaceLease } from "../../src/document-renderer";
 import { makeSyntheticPdf } from "./synthetic-pdf";
+import { instrumentPrintDocument, startPrintTrace } from "./replacement-print-fixture";
 
 declare global {
   interface Window {
     fixture: {
       pageSources: {
+        startPrintTrace: typeof startPrintTrace;
         makePdf: typeof makeSyntheticPdf;
         createViewer(
           options: Omit<ConstructorParameters<typeof PdfjsViewer>[0], "runtime">,
@@ -349,7 +351,7 @@ const fixturePdfjs = {
     const documentPromise = loadingTask.promise.then(pdf => {
       const stallFormPreparation = stallNextFormPreparation;
       stallNextFormPreparation = false;
-      return new Proxy(pdf, {
+      const instrumented = new Proxy(pdf, {
         get(target, property) {
           if (
             stallFormPreparation &&
@@ -428,6 +430,7 @@ const fixturePdfjs = {
           return typeof value === "function" ? value.bind(target) : value;
         },
       });
+      return instrumentPrintDocument(instrumented);
     });
     let rejectPasswordChallenge: ((reason?: unknown) => void) | null = null;
     const promise: typeof documentPromise = challengePassword
@@ -612,6 +615,7 @@ document.addEventListener("securitypolicyviolation", event => {
 
 window.fixture = {
   pageSources: {
+    startPrintTrace,
     makePdf: makeSyntheticPdf,
     createViewer: options => new PdfjsViewer({ ...options, runtime }),
     gateNextPageAcquisition,

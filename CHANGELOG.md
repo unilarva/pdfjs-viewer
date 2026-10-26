@@ -7,9 +7,19 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 - Added read-only display page replacements through `preparePageSource()` and
   `setPageSourceOverrides()`, accepting PDF bytes or Blobs. Replace or restore pages in
   atomic batches while keeping layout, text, search, thumbnails, and links consistent.
-  Downloads and all print routes still use the original PDF. See the
+  Downloads and default print routes still use the original PDF. Opt in with
+  `features.print.pageSources: "display"` to print selected replacements natively from a
+  stable mapping, including mixed two-page sheets. Each source uses its own Print layer
+  configuration, without exporting a complete PDF. Optional `printOutputProvider` captures
+  host state synchronously and lazily supplies complete current PDF bytes for browser
+  printing, including URL and in-memory documents and source-only `document: "current"`.
+  Missing providers with active opted-in replacements and provider failures fail closed;
+  explicit original/form-value output and the legacy source resolver remain unchanged. See the
   [usage guide](./USAGE.md#read-only-display-page-sources) for geometry, supported-PDF,
   resource, and lifecycle constraints.
+- Report retryable source/popup failures in print setup and direct browser-print actions instead
+  of silently dismissing failed output, and cancel pending source preparation when its reserved
+  browser tab closes.
 - Added `pdf:pagesourceschange` and `pdf:pagecontent` events to distinguish installed page
   mappings from rendering completion or failure.
 - Added `setLayerPageDependencies()` and document-scoped `documentId` tokens so

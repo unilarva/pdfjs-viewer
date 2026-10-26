@@ -1278,8 +1278,8 @@ existing query-result reasons. No existing API requires dependency registration.
 Use `preparePageSource()` and `setPageSourceOverrides()` to replace displayed pages with
 pages from another PDF without reloading the viewer or changing the original document.
 The loaded original is the **base PDF**; each page position in the viewer is a **logical
-page**. Replacement pages must match that position's geometry. Downloads and printing
-still use the base PDF, not the displayed replacements.
+page**. Replacement pages must match that position's geometry. Downloads and default printing
+still use the base PDF. [Native printing can explicitly include replacements](#printing-display-replacements).
 
 Your application supplies the replacement PDF as bytes or a Blob. Any conversion,
 content selection, persistence, or caching is application-owned. Both methods require
@@ -1378,7 +1378,7 @@ until their current visible pages report completion, rather than claiming a prep
 result is already displayed.
 
 The base outline, named navigation identity, information, permissions, original/filled PDF
-bytes, downloads and **all print routes** remain canonical to the base document. These
+bytes, downloads and default print routes remain canonical to the base document. These
 substitutions are not a PDF editor or a modified-document export. Base optional-content
 controls do not mutate a substitute PDF's independent default layer configuration.
 
@@ -1681,6 +1681,130 @@ portrait dimensions before `window.print()`. Raster and pure-XFA output use the 
 Mechanical checks, PDF permissions, and resource limits remain mandatory regardless of compatibility
 records.
 
+### Printing Display Replacements
+
+Display replacements do not change output by default. Set the viewer-level native policy
+explicitly when replacements should be printed:
+
+```ts
+features: { print: { mode: "native", pageSources: "display" } }
+```
+
+`pageSources: "base"` is the default. With `"display"`, submission captures an immutable
+mapping for the selected logical pages before asynchronous preparation. Later replacements,
+resets and caller-handle releases cannot change that job. Ranges, ordering, two-page sheets,
+geometry, canonical permissions and existing raster limits still apply. Native rendering
+reads individual source pages; it does not compose, export or reopen a complete PDF.
+
+Each replacement uses its own PDF's **Print** optional-content configuration, not its View
+configuration or the base PDF's layer IDs/form storage. Base pages retain the viewer's layer
+and current-form-value snapshots. This is source selection, not a promise to print identical
+screen pixels; consumer overlays and search/selection highlights remain excluded. Existing
+read-only source restrictions are unchanged.
+
+Only distinct source bundles needed by the selected range retain backing for the job. Reader
+opening/eviction and backing budgets remain bounded by the existing source limits; a snapshot
+does not pin every reader open or copy bytes per page. Source reads release before native image
+readiness/invocation, independently of the longer retained-image print lifecycle. Overlapping
+retirement can leave less budget for preparing new sources and return `resource-limit`.
+
+Browser output uses a host-supplied complete PDF through the optional provider below; the
+viewer does not compose replacements into a PDF. Without a provider, `"display"` with **any
+active replacement** makes browser-routed `print()` and auto `openPrintSource()` return
+`unsupported`, never silently opening the original. Native setup then reports
+`sourceFallbackAvailable: false`. Clearing all replacements restores legacy auto selection
+when no provider is configured. Adapters, `getDocumentData()`, `download()` and **Save filled
+PDF** keep their original/form-value semantics regardless of this policy or provider.
+
+### Host-Owned Current Print Output
+
+The optional constructor `printOutputProvider: PdfjsViewerPrintOutputProvider` supports URL
+and in-memory documents equally. It is a **synchronous admission callback**, not an async
+exporter. Return a `PdfjsViewerPrintOutput` closure that captures immutable host state and
+retains only the inputs needed for possible browser output. Do not compose eagerly:
+successful controlled native printing calls `resolveSource()` **zero times**.
+
+For example, an application with its own document processor can supply a retained snapshot
+(the `reportOutput` methods here are application-owned):
+
+```ts
+import type { PdfjsViewerPrintOutputProvider } from "@unilarva/pdfjs-viewer";
+
+const printOutputProvider: PdfjsViewerPrintOutputProvider = context => {
+  if (reportOutput.pending) return null;
+  const snapshot = reportOutput.retainSnapshot(context.documentId);
+  return {
+    resolveSource: () => snapshot.exportPdf({ signal: context.signal }),
+    release: () => snapshot.release(), // Must be idempotent.
+  };
+};
+
+const viewer = new PdfjsViewer({
+  rootEl,
+  runtime,
+  features: { print: { mode: "native", pageSources: "display" } },
+  printOutputProvider,
+});
+await viewer.load(pdfBytes);
+
+openCurrentButton.addEventListener("click", async () => {
+  // Reserve the browser tab before awaiting any other work.
+  const result = await viewer.openPrintSource({ document: "current" });
+  reportOutput.showPrintResult(result);
+});
+```
+
+`PdfjsViewerPrintOutputContext` has readonly `operationId` (viewer-local monotonic number),
+`documentId` (ready-document token), `pageSources` (chosen native policy),
+`pageSourcesRevision` (global mapping revision, including resets), and `signal` (operation
+lifetime). Admission captures the native mapping and calls the provider in the same
+synchronous submission turn, before permission/geometry/export awaits or reentrant public
+events. If the callback changes the ready document or mapping revision, the operation
+cancels. `operationId` is for correlation, not a resumable job handle: capture state in the
+returned closure rather than keeping a global snapshot history. Later host edits or resets
+must not change the closure's admitted output.
+
+`PdfjsViewerPrintOutput.resolveSource()` returns `Uint8Array | ArrayBuffer | Blob`, directly
+or asynchronously, only when current browser output is needed. URLs are not accepted. The
+viewer creates and owns the navigation Blob URL; the original URL cannot override current
+bytes. Source selection is:
+
+| `openPrintSource().document`        | Behavior                                                                                                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `"auto"` (default)                  | Uses the provider when configured; otherwise keeps dirty-form/original selection unless active display-policy replacements require `unsupported`.            |
+| `"current"`                         | Requires the provider, even without replacements. Available only for source printing, not `PdfjsViewerDocumentVariant`, `getDocumentData()` or `download()`. |
+| `"original"` / `"with-form-values"` | Bypasses the provider and keeps the explicit canonical/form-value meaning. Label these actions accordingly.                                                  |
+
+For current output, `navigation: "direct"` returns `unsupported` before export;
+`"auto"` and `"materialize"` use owned Blob URLs. Provider `null` denies admission with
+`unsupported` even without replacements, allowing hosts to block pending work. A throwing
+provider, malformed or thenable admission result, resolver failure, or empty/invalid byte
+result fails closed with `export-failed`. No provider error silently substitutes base bytes.
+The legacy `printSourceResolver` remains separate for canonical/form output, with unchanged
+URL precedence and behavior.
+
+Each actual print/source submission has one fresh admission. A later setup **Open PDF in
+browser** click is a new action, not continuation of a rejected job. An initially
+capability-selected browser route reserves its tab synchronously during user activation
+and uses that action's single admission. Ordinary native jobs do not reserve tabs; later
+native capability loss may fail explicitly rather than attempt an unactivated popup. Any
+within-operation browser continuation must retain the same closure/revisions or cancel,
+never read live host state or call the provider again. Preflight is only a plan: it does
+not call the provider or retain source backing, and provider availability is not a promise
+that admission or export will succeed.
+
+Output objects may be stateful class instances implementing the structural interface;
+additional host-owned fields are allowed. Optional `release(): void` must be idempotent.
+The viewer calls it exactly once on operation
+completion, failure or abort, and aborts `signal` on cancellation, load/close/destroy and
+completion. Host asynchronous work must obey that signal; late resolver completions remain
+observed but cannot navigate. Navigation checks abort, document/form/source authority and
+child closure after awaits and immediately before handoff. Closing a reserved tab during
+preparation cancels the operation without waiting for host export to settle. Unused reservations close;
+successfully navigated Blob URLs retain the existing child-close ownership, independently
+of host snapshot release or retained native images. Default consumers incur no provider
+callback or extra byte read.
+
 ### Fallback and adapters
 
 Native mode accepts `browserFallback`, which defaults to `true`. Set it to `false` when application
@@ -1756,12 +1880,14 @@ permissions, memory, or canvas limits.
 
 `openPrintSource({ document: "auto" })` is the explicit long-document fallback when native-mode
 `browserFallback` permits it. It reserves a
-blank tab synchronously, uses saved current-form bytes when dirty, otherwise uses the original,
-and reports warnings for controlled features the browser source cannot preserve. URL sources
+blank tab synchronously and uses the configured current-output provider. Without one, it
+uses saved current-form bytes when dirty, otherwise the original (subject to the display-policy
+fail-closed rule above). It reports warnings for controlled features the browser source cannot preserve. URL sources
 loaded with headers or credentials are materialized because direct navigation cannot reproduce
 PDF.js request policy. Use
 `navigation: "materialize"` to force that behavior or `printSourceResolver` to return a host URL or
-bytes. It remains an explicit action after a controlled-native resource failure.
+bytes on the legacy canonical/form route. The resolver does not replace the current-output
+provider. Source fallback remains an explicit action after a controlled-native resource failure.
 Source fallback hands a PDF source to the browser's own handler. It cannot preserve controlled
 sheet composition or DPI and cannot preset the browser's range, paper, orientation, scale, duplex,
 margin, color, destination, or cancellation result.

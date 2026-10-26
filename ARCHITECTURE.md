@@ -699,10 +699,11 @@ previews embedded HTML, SVG, PDFs, executables, or other arbitrary content.
 
 The read-only display-source boundary is a document-scoped `DocumentPageSources`
 beside, not instead of, the canonical
-base `DocumentPageUsage`. Only display-derived owners acquire through the resolver:
-main/detail rasters, thumbnails, text/index/search and annotation presentation. Base
-layout/page identity, destinations, outline, information, bytes, downloads and printing
-continue using the canonical document and base page owner. No conversion engine or
+base `DocumentPageUsage`. Display-derived owners acquire through the resolver:
+main/detail rasters, thumbnails, text/index/search and annotation presentation. Opted-in
+native printing uses a private immutable resolver scope. Base layout/page identity,
+destinations, outline, information, bytes, downloads and default printing continue using
+the canonical document and base page owner. No conversion engine or
 application-specific schema belongs in the package.
 
 Source preparation snapshots mutable in-memory bytes or retains a native immutable Blob
@@ -735,6 +736,31 @@ or rejection reason; physical document ownership remains in the entry and admitt
 The public `PDFWorker` is explicitly shared, so destroying an auxiliary loading task cannot
 destroy the base task's worker. Runtime worker release waits for the last auxiliary
 physical user as well as the last compatible runtime.
+
+The private `DocumentPageSources.snapshot()` capability captures selected logical slots
+(including base slots), their revisions and the whole mapping revision synchronously.
+It is not a package-root API. The print facade uses it only for the explicit
+`features.print.pageSources: "display"` policy; default printing remains canonical.
+A scope pins only the distinct selected entries' existing immutable
+backing, not PDF readers or another byte copy. Backing-only pins are separate from physical
+`uses`, so readers can still be evicted/reopened under the existing slot/input-byte limits
+when a scope spans more sources than the live-reader cap. Overlapping scopes and shared
+pages do not charge an entry again, but its original backing/handle admission remains
+charged until every caller, mapping, scope and physical user has released and disposal
+has settled. Unselected entries are not retained by the scope.
+Scope acquisitions keep the captured source authority across live-map changes. Release or
+abort revokes future reads, clears captured metadata, wakes queued openings and drops backing
+pins, without retiring admitted physical work early. Source-owner close revokes unused
+scopes synchronously and waits only the actual tracked work/disposals. A scope user must
+release every acquired page and the scope itself on all exits; scope retention cannot be
+used to pin the entire live-reader working set.
+Cold opens share one physical demand owner, not the initiating caller's abort signal.
+Cancelling an individual waiter settles it independently of queued/shared work; surviving
+waiters still receive the same opening. Only the last departing waiter cancels an unfinished
+open. Queued work with no remaining demand can release its backing promptly without bypassing
+the earlier opening order. Blob reads, loaders and disposals already in flight remain tracked
+and charged until physical settlement, including loaders that ignore cancellation and return
+success late (their result is disposed rather than installed).
 
 Auxiliary font owners are source-generation scoped. Native face copies required by mounted
 text are retained separately from a live PDF proxy; geometric aliases cannot collide across
@@ -1464,7 +1490,7 @@ configurable pre-allocation workload, DOM, and system print-dialog safety guard,
 requirement; its profile default is 350 and profiles may raise it after browser-specific testing. Sheet
 count is a hard non-DPI limit and is counted arithmetically before sheet arrays. Permission, canvas,
 and one phase-aware package-controlled print raster envelope check happen before page
-acquisition. It then freezes one form snapshot, creates a fresh print-intent OCG configuration,
+acquisition. It then freezes one base form snapshot, creates a fresh base print-intent OCG configuration,
 holds an exclusive `RasterWorkCoordinator` lease, renders each page directly at its contained
 sheet-slot resolution through `DocumentPageUsage`, and enforces actual Blob bytes after every
 sheet. Cancellation is rechecked after uncancellable encoding before any progress publication.
@@ -1502,6 +1528,58 @@ compressed PNG Blob sources plus reused sheet/page scratch and the larger of ann
 invocation is retained Blob sources plus decoded final image backing. The larger phase and safety margin determine admission. Blob sources remain retained through the native print lifecycle
 so cross-browser image loading cannot outlive their object URLs; source page and sheet scratch canvases are reused,
 not retained per PDF page. Actual encoded sizes vary by content and recompute this same envelope after every sheet.
+
+For `pageSources: "display"`, the facade captures a selected-page source scope synchronously
+before permission/geometry awaits and submission logs/UI events. Later live-map revisions do
+not invalidate that admitted mapping. Geometry and permissions remain canonical. Each
+replacement acquisition obtains a fresh Print configuration from its own live PDF; it never
+receives base OCG visibility IDs or base annotation storage, and no job-wide strong source-PDF
+cache defeats pool eviction. Replacement geometry relies on the immutable source's existing
+view/rotation/userUnit admission checks, rather than a stricter physical-viewport comparison;
+canonical pages retain their stale-geometry guard with a `1e-4` tolerance. Every page use
+releases after drawing, before acquiring its
+two-up neighbor, so even a one-reader pool can progress. The source scope releases immediately
+after the last draw, before final encoding/image readiness, and on abort/error/finally. This
+revokes future opens while admitted physical reads settle under the existing accounting.
+Retained native images, URLs and exclusive raster resources remain separately window-owned.
+Preflight only plans and never pins source backing. No full-document export is performed.
+
+The optional constructor `printOutputProvider` is synchronous admission, not composition.
+In the same submission turn as native mapping capture, before awaits or reentrant public
+events, the facade passes `operationId`, `documentId`, `pageSources`, `pageSourcesRevision`
+and the operation `signal`. It rechecks document/map identity after callback reentrancy.
+The host retains immutable inputs in the returned closure; the ID is correlation, not a
+public resumable snapshot or a reason to retain a global history. Preflight never invokes
+the provider or retains source backing. Default consumers incur no new callback/byte read.
+
+`resolveSource()` is lazy and byte-only (`Uint8Array`, `ArrayBuffer` or `Blob`, synchronous
+or asynchronous); successful native printing performs zero calls/full-document exports.
+The viewer owns current-output navigation Blob URLs, so no host-URL lease protocol or
+composition engine belongs here. Auto source output uses the provider when configured,
+for URL and in-memory bases alike; explicit source-only `document: "current"` requires it.
+Current direct navigation is unsupported before resolution. Without a provider, active
+display-policy replacements fail closed instead of falling back to the base. Null admission
+is unsupported even without replacements; throwing/malformed/thenable admissions and failed
+or empty/invalid byte results are `export-failed`. Explicit original/form-value requests
+bypass the provider; downloads, document-data variants, form saving, adapters and legacy
+`printSourceResolver` URL precedence remain unchanged.
+
+Each actual submission has one fresh admission. Capability-selected browser routes reserve
+their tab synchronously during user activation and use that single closure. Native jobs
+reserve no popup; later capability loss may fail explicitly. A within-operation continuation
+must reuse its admitted closure/revisions or cancel, never admit again or read live host
+state. A later setup Source action is a new submission. Source navigation rechecks abort,
+document/form/source authority and child closure after every await and immediately before
+navigation; stale completions stay observed but cannot navigate. Unused reservations close.
+A preparation-only child-closure monitor aborts admission even while host export is unresolved;
+it is removed on every exit, leaving successful URL retention to the existing window owner.
+
+Host `release()` is idempotent and invoked exactly once on completion/failure/abort. The
+operation signal aborts on cancellation, load/close/destroy and completion; host detached
+work must obey it. This ownership is separate from the earlier native source-scope release,
+retained native images and window-owned browser Blob URLs, which keep their existing
+child-close retention after navigation.
+
 PDF.js caches, browser internals, and
 GPU resources are excluded. The facade captures profile identity, revision, and immutable limits for each
 preflight/job. Preflight itself is observational. After exclusive admission drains physical work, `DocumentPrint`

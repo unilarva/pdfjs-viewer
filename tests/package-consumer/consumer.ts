@@ -28,6 +28,9 @@ import {
   type PdfjsViewerPageChangeEvent,
   type PdfjsViewerPrintAdapter,
   type PdfjsViewerPrintOptions,
+  type PdfjsViewerPrintOutputContext,
+  type PdfjsViewerPrintOutput,
+  type PdfjsViewerPrintOutputProvider,
   type PdfjsViewerPrintResult,
   type PdfjsViewerPrintFeatureOptions,
   type PdfjsViewerPrintDefaults,
@@ -160,6 +163,52 @@ const printAdapter: PdfjsViewerPrintAdapter = async context => {
   void context.options.pageScaling;
   return { status: "adapter-completed", sheetCount: 3 };
 };
+const printOutputProvider: PdfjsViewerPrintOutputProvider = context => {
+  const admission: PdfjsViewerPrintOutputContext = context;
+  const operationId: number = admission.operationId;
+  const documentId: NonNullable<PdfjsViewer["documentId"]> = admission.documentId;
+  const pageSources: "base" | "display" = admission.pageSources;
+  const pageSourcesRevision: number = admission.pageSourcesRevision;
+  const signal: AbortSignal = admission.signal;
+  void [operationId, documentId, pageSources, pageSourcesRevision];
+  if (signal.aborted) return null;
+  const output: PdfjsViewerPrintOutput = {
+    resolveSource: async () => new Blob([new Uint8Array([37, 80, 68, 70])]),
+    release() {},
+  };
+  return output;
+};
+const printOutputRepresentations = [
+  { resolveSource: () => new Uint8Array([37, 80, 68, 70]) },
+  { resolveSource: () => new ArrayBuffer(4) },
+  { resolveSource: () => new Blob() },
+  { resolveSource: async () => new Uint8Array([37, 80, 68, 70]) },
+  { resolveSource: async () => new ArrayBuffer(4) },
+  { resolveSource: async () => new Blob() },
+] satisfies readonly PdfjsViewerPrintOutput[];
+void printOutputRepresentations;
+if (false) {
+  // @ts-expect-error Admission must return synchronously, not an export promise.
+  const asynchronousProvider: PdfjsViewerPrintOutputProvider = async () => null;
+  // @ts-expect-error Providers must explicitly deny with null, not undefined.
+  const missingAdmission: PdfjsViewerPrintOutputProvider = () => undefined;
+  // @ts-expect-error Output accepts bytes/Blob only, never a host-owned URL.
+  const urlOutput: PdfjsViewerPrintOutput = { resolveSource: () => "/current.pdf" };
+  // @ts-expect-error Output requires a lazy resolver, not eagerly returned bytes.
+  const eagerOutput: PdfjsViewerPrintOutput = new Uint8Array(4);
+  void [asynchronousProvider, missingAdmission, urlOutput, eagerOutput];
+  const context = {} as PdfjsViewerPrintOutputContext;
+  // @ts-expect-error Captured operation identities are immutable.
+  context.operationId = 2;
+  // @ts-expect-error Captured ready-document tokens are immutable.
+  context.documentId = 2;
+  // @ts-expect-error Captured source policies are immutable.
+  context.pageSources = "base";
+  // @ts-expect-error Captured mapping revisions are immutable.
+  context.pageSourcesRevision = 2;
+  // @ts-expect-error Captured operation lifetimes are immutable.
+  context.signal = new AbortController().signal;
+}
 const compatibility = {
   engine: "chromium",
   platform: "desktop",
@@ -285,6 +334,7 @@ const viewerOptions = {
   },
   ui: { mode: "default", ...generatedUiOptions },
   printAdapter,
+  printOutputProvider,
   thumbnails: { maxDpr: 2 } satisfies PdfjsViewerThumbnailsOptions,
   renderingProfiles: {
     balanced: {
@@ -296,6 +346,19 @@ const viewerOptions = {
   },
 } satisfies PdfjsViewerOptions;
 const typedViewer = new PdfjsViewer(viewerOptions);
+const replacementPrintFeatures = {
+  print: { mode: "native", pageSources: "display", browserFallback: true },
+} satisfies NonNullable<PdfjsViewerOptions["features"]>;
+void replacementPrintFeatures;
+if (false) {
+  const invalidPrintFeatures = {
+    print: {
+      // @ts-expect-error Source policy does not add arbitrary export variants.
+      pageSources: "current",
+    },
+  } satisfies NonNullable<PdfjsViewerOptions["features"]>;
+  void invalidPrintFeatures;
+}
 const runtimeUiText = {
   labels: { attachmentDownload: "Save attachment", outlineUntitled: "(Untitled section)" },
   formatters: { zoom: scale => `${Math.round(scale * 100)} percent` },
@@ -458,6 +521,17 @@ function exerciseTextSelection(viewer: PdfjsViewer): void {
   const printPreflight: Promise<PdfjsViewerPrintPreflightResult> =
     viewer.preflightPrint(printOptions);
   const printSourceOptions = { document: "auto" } satisfies PdfjsViewerPrintSourceOptions;
+  const currentPrintSourceOptions = {
+    document: "current",
+    navigation: "materialize",
+  } satisfies PdfjsViewerPrintSourceOptions;
+  void viewer.openPrintSource(currentPrintSourceOptions);
+  if (false) {
+    // @ts-expect-error Current output is source-print-only, not a document-data variant.
+    void viewer.getDocumentData({ document: "current" });
+    // @ts-expect-error Original/form downloads do not become current-output exports.
+    void viewer.download({ document: "current" });
+  }
   const printSource: Promise<PdfjsViewerPrintSourceResult> =
     viewer.openPrintSource(printSourceOptions);
   const printState: PdfjsViewerPrintState = viewer.state.print;

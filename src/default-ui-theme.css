@@ -3,6 +3,21 @@
 
 /* Default UI layout and theme fragment. The build appends it to core.css. */
 @scope ([data-pdfjs-viewer-root]) {
+  .pdf-print-action-feedback {
+    position: absolute;
+    inset-inline: 1rem;
+    bottom: 1rem;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem;
+    border: 1px solid;
+    border-radius: 0.5rem;
+    background: Canvas;
+    color: CanvasText;
+    overflow-wrap: anywhere;
+  }
   :scope.pdf-default-ui,
   .pdf-default-ui {
     color-scheme: light dark;

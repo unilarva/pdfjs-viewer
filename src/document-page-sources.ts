@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Private fixed-geometry display-page resolver and bounded auxiliary document pool.
+ * Private fixed-geometry page resolver, immutable acquisition scopes and bounded auxiliary pool.
  * This is not a supported consumer subpath. The canonical document remains owned
  * by the facade. See the [architecture guide](../ARCHITECTURE.md).
  * @packageDocumentation
@@ -31,21 +31,33 @@ type Live = Loaded & {
   usage: DocumentPageUsage;
   optionalContentConfigPromise: ReturnType<PDFJS.PDFDocumentProxy["getOptionalContentConfig"]>;
 };
+type Opening = { promise: Promise<Live>; abort: AbortController; waiters: number };
 type Entry = {
   handle: PdfjsViewerPageSource;
   bytes?: Uint8Array;
   blob?: Blob;
   caller: boolean;
   maps: number;
+  snapshots: number;
   uses: number;
   touched: number;
   geometry: readonly Geometry[];
   linkContext: "source" | "base";
   live?: Live;
-  opening?: Promise<Live>;
+  opening?: Opening;
   destroying?: Promise<void>;
 };
 type Mapping = { entry: Entry; sourcePage: number };
+
+/** Private selected-page scope; retains backing, never live readers or copied PDF bytes. */
+export interface DocumentPageSourceSnapshot extends DocumentPageAcquirer {
+  /** Whole-map revision captured synchronously with the selected slots. */
+  readonly mappingRevision: number;
+  /** Returns the captured slot revision; rejects unselected pages and released scopes. */
+  revision(page: number): number;
+  /** Revokes new reads and drops backing pins; admitted physical uses settle independently. */
+  release(): void;
+}
 
 /** Loader ownership is injected; this owner never creates a worker/loading task. */
 export interface DocumentPageSourcesOptions {
@@ -163,6 +175,7 @@ export class DocumentPageSources implements DocumentPageAcquirer {
   #abort = new AbortController();
   #queue: Promise<void> = Promise.resolve();
   #jobs = new Set<Promise<unknown>>();
+  #snapshots = new Set<() => void>();
   #waiters = new Set<() => void>();
   #closePromise?: Promise<void>;
 
@@ -247,6 +260,7 @@ export class DocumentPageSources implements DocumentPageAcquirer {
       blob,
       caller: true,
       maps: 0,
+      snapshots: 0,
       uses: 1,
       touched: ++this.#clock,
       geometry: [],
@@ -383,10 +397,81 @@ export class DocumentPageSources implements DocumentPageAcquirer {
     return this.#revisions.get(page) ?? 0;
   }
 
+  /** Whole-map authority revision, including resets to canonical pages. */
+  get mappingRevision(): number {
+    return this.#revision;
+  }
+
+  /** Whether any logical page currently selects an auxiliary source. */
+  get hasOverrides(): boolean {
+    return this.#mappings.size !== 0;
+  }
+
   /** Diagnostic mapping snapshot; undefined means the canonical base page. */
   currentSource(page: number): { source: PdfjsViewerPageSource; sourcePage: number } | undefined {
     const mapping = this.#mappings.get(page);
     return mapping && { source: mapping.entry.handle, sourcePage: mapping.sourcePage };
+  }
+
+  /** Captures selected logical slots atomically without opening or copying auxiliary PDFs. */
+  snapshot(
+    pages: readonly number[],
+    options: { signal?: AbortSignal } = {},
+  ): DocumentPageSourceSnapshot {
+    const signal = options.signal;
+    this.#check(signal);
+    if (!Array.isArray(pages) || !pages.length || pages.length > this.#base.numPages)
+      throw new SourceFailure("invalid-page");
+    const selected = new Map<number, { mapping: Mapping | undefined; revision: number }>();
+    const entries = new Set<Entry>();
+    for (const page of pages) {
+      if (!this.#validPage(page) || selected.has(page)) throw new SourceFailure("invalid-page");
+      const mapping = this.#mappings.get(page);
+      selected.set(page, { mapping, revision: this.revision(page) });
+      if (mapping) entries.add(mapping.entry);
+    }
+    const mappingRevision = this.#revision;
+    const abort = new AbortController();
+    for (const entry of entries) entry.snapshots++;
+    const release = (): void => {
+      if (abort.signal.aborted) return;
+      abort.abort();
+      signal?.removeEventListener("abort", release);
+      this.#snapshots.delete(release);
+      selected.clear();
+      for (const entry of entries) {
+        entry.snapshots--;
+        this.#retire(entry);
+      }
+      entries.clear();
+      this.#wake();
+    };
+    this.#snapshots.add(release);
+    signal?.addEventListener("abort", release, { once: true });
+    // Also reject an abort that raced listener installation (including foreign signals).
+    if (signal?.aborted) release();
+    return Object.freeze({
+      mappingRevision,
+      revision: (page: number): number => {
+        this.#check(abort.signal);
+        const slot = selected.get(page);
+        if (!slot) throw new SourceFailure("invalid-page");
+        return slot.revision;
+      },
+      acquire: async (page: number): Promise<DocumentPageUse> => {
+        this.#check(abort.signal);
+        const slot = selected.get(page);
+        if (!slot) throw new SourceFailure("invalid-page");
+        return this.#acquire(
+          page,
+          slot.mapping,
+          slot.revision,
+          () => !abort.signal.aborted,
+          abort.signal,
+        );
+      },
+      release,
+    });
   }
 
   /** Admits a physical lease before awaiting document loading or page acquisition. */
@@ -395,6 +480,23 @@ export class DocumentPageSources implements DocumentPageAcquirer {
     if (!this.#validPage(logicalPage)) throw new SourceFailure("invalid-page");
     const mapping = this.#mappings.get(logicalPage);
     const revision = this.revision(logicalPage);
+    return this.#acquire(
+      logicalPage,
+      mapping,
+      revision,
+      () => this.revision(logicalPage) === revision && this.#mappings.get(logicalPage) === mapping,
+    );
+  }
+
+  /** Shared physical admission for live-map reads and immutable selected-page scopes. */
+  async #acquire(
+    logicalPage: number,
+    mapping: Mapping | undefined,
+    revision: number,
+    isCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<DocumentPageUse> {
+    this.#check(signal);
     const entry = mapping?.entry;
     if (entry) entry.uses++;
     let finish!: () => void;
@@ -402,14 +504,17 @@ export class DocumentPageSources implements DocumentPageAcquirer {
       finish = resolve;
     });
     this.#track(settlement);
+    const abort = () => this.#wake();
+    signal?.addEventListener("abort", abort);
     try {
-      const live = entry ? await this.#ensure(entry) : undefined;
+      const live = entry ? await this.#ensure(entry, signal) : undefined;
+      this.#check(signal);
       const pdf = live?.pdf ?? this.#base;
       const sourcePage = mapping?.sourcePage ?? logicalPage;
       const use = await (live?.usage ?? this.#baseAcquirer).acquire(sourcePage);
-      if (this.#closed) {
+      if (this.#closed || signal?.aborted) {
         use.release();
-        throw new SourceFailure("destroyed");
+        this.#check(signal);
       }
       let released = false;
       const source = Object.freeze({
@@ -422,10 +527,7 @@ export class DocumentPageSources implements DocumentPageAcquirer {
           ? { optionalContentConfigPromise: live.optionalContentConfigPromise, fonts: live.fonts }
           : {}),
         linkContext: entry?.linkContext ?? "base",
-        isCurrent: () =>
-          !this.#closed &&
-          this.revision(logicalPage) === revision &&
-          this.#mappings.get(logicalPage) === mapping,
+        isCurrent: () => !this.#closed && isCurrent(),
       });
       return Object.freeze({
         page: use.page,
@@ -445,6 +547,8 @@ export class DocumentPageSources implements DocumentPageAcquirer {
       if (entry) this.#release(entry);
       finish();
       throw error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
     }
   }
 
@@ -511,6 +615,7 @@ export class DocumentPageSources implements DocumentPageAcquirer {
     this.#closed = true;
     this.#sequence++;
     this.#abort.abort();
+    for (const release of this.#snapshots) release();
     this.#mappings.clear();
     for (const entry of this.#entries) {
       entry.caller = false;
@@ -608,7 +713,7 @@ export class DocumentPageSources implements DocumentPageAcquirer {
   }
 
   #retire(entry: Entry): void {
-    if (entry.caller || entry.maps || entry.uses) return;
+    if (entry.caller || entry.maps || entry.snapshots || entry.uses) return;
     if (entry.live) {
       void this.#evict(entry).catch(() => undefined);
       return;
@@ -648,20 +753,57 @@ export class DocumentPageSources implements DocumentPageAcquirer {
     return entry.destroying;
   }
 
+  /** Cancels one queued/shared waiter without discarding the underlying physical settlement. */
+  #waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return promise;
+    this.#check(signal);
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => {
+        signal.removeEventListener("abort", abort);
+        reject(new SourceFailure(this.#closed ? "destroyed" : "cancelled"));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      void promise.then(
+        value => {
+          signal.removeEventListener("abort", abort);
+          resolve(value);
+        },
+        error => {
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      );
+      if (signal.aborted) abort();
+    });
+  }
+
+  /** Shares physical opening, but each waiter owns its cancellation and demand independently. */
   #ensure(entry: Entry, signal?: AbortSignal): Promise<Live> {
     this.#check(signal);
     if (entry.live) return Promise.resolve(entry.live);
-    if (entry.opening) return entry.opening;
-    const opening = this.#queue
-      .catch(() => undefined)
-      .then(async () => {
-        this.#check(signal);
+    if (entry.opening?.abort.signal.aborted) {
+      // A cancelled loader must finish disposal before a new generation may open.
+      return this.#waitFor(
+        entry.opening.promise.then(
+          () => undefined,
+          () => undefined,
+        ),
+        signal,
+      ).then(() => this.#ensure(entry, signal));
+    }
+    if (!entry.opening) {
+      const abort = new AbortController();
+      const sharedSignal = AbortSignal.any([abort.signal, this.#abort.signal]);
+      const previous = this.#queue;
+      const opening: Opening = { abort, waiters: 0, promise: undefined! };
+      const work = this.#waitFor(previous, sharedSignal).then(async () => {
+        this.#check(sharedSignal);
         if (entry.destroying) await entry.destroying;
         while (
           this.#slots >= this.#limits.maxLiveDocuments ||
           entry.handle.byteLength > this.#limits.maxLiveBytes - this.#liveBytes
         ) {
-          this.#check(signal);
+          this.#check(sharedSignal);
           const idle = [...this.#entries]
             .filter(item => item.live && !item.uses)
             .sort((a, b) => a.touched - b.touched)[0];
@@ -671,7 +813,7 @@ export class DocumentPageSources implements DocumentPageAcquirer {
           }
           await new Promise<void>(resolve => this.#waiters.add(resolve));
         }
-        this.#check(signal);
+        this.#check(sharedSignal);
         this.#slots++;
         this.#liveBytes += entry.handle.byteLength;
         let loaded: Loaded | undefined;
@@ -681,11 +823,9 @@ export class DocumentPageSources implements DocumentPageAcquirer {
           const data = entry.blob
             ? new Uint8Array(await entry.blob.arrayBuffer())
             : entry.bytes!.slice();
-          this.#check(signal);
-          loaded = await this.#options.load(
-            data,
-            signal ? AbortSignal.any([signal, this.#abort.signal]) : this.#abort.signal,
-          );
+          this.#check(sharedSignal);
+          loaded = await this.#options.load(data, sharedSignal);
+          this.#check(sharedSignal);
           const optionalContentConfigPromise = loaded.pdf.getOptionalContentConfig({
             intent: "display",
           });
@@ -711,17 +851,31 @@ export class DocumentPageSources implements DocumentPageAcquirer {
           throw error;
         }
       });
-    entry.opening = this.#track(
-      opening.finally(() => {
-        entry.opening = undefined;
-        this.#retire(entry);
-      }),
-    );
-    // Serialize settlement only, without rooting the last opened Live or rejection reason.
-    this.#queue = entry.opening.then(
-      () => undefined,
-      () => undefined,
-    );
-    return entry.opening;
+      opening.promise = this.#track(
+        work.finally(() => {
+          entry.opening = undefined;
+          this.#retire(entry);
+        }),
+      );
+      entry.opening = opening;
+      // A cancelled queued open can settle promptly without bypassing earlier work.
+      // Both tails retain only void settlement, never a Live or rejection reason.
+      this.#queue = Promise.all([
+        previous,
+        opening.promise.then(
+          () => undefined,
+          () => undefined,
+        ),
+      ]).then(() => undefined);
+    }
+    const opening = entry.opening;
+    opening.waiters++;
+    return this.#waitFor(opening.promise, signal).finally(() => {
+      opening.waiters--;
+      if (!opening.waiters && entry.opening === opening) {
+        opening.abort.abort();
+        this.#wake();
+      }
+    });
   }
 }

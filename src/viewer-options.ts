@@ -99,6 +99,7 @@ export interface NormalizedViewerFeatures {
   print: Readonly<{
     mode: PdfjsViewerPrintMode;
     browserFallback: boolean;
+    pageSources: "base" | "display";
     defaults: PdfjsViewerNormalizedPrintDefaults;
   }>;
 }
@@ -517,6 +518,7 @@ const VIEWER_OPTION_KEYS = {
   navigationState: true,
   printAdapter: true,
   printSourceResolver: true,
+  printOutputProvider: true,
   shareableNamedDestinationPrefix: true,
   fitMode: true,
   initialRotation: true,
@@ -736,6 +738,8 @@ export function normalizeViewerOptions(
     throw new TypeError("PdfjsViewer: printAdapter must be a function when provided");
   if (opts.printSourceResolver !== undefined && typeof opts.printSourceResolver !== "function")
     throw new TypeError("PdfjsViewer: printSourceResolver must be a function when provided");
+  if (opts.printOutputProvider !== undefined && typeof opts.printOutputProvider !== "function")
+    throw new TypeError("PdfjsViewer: printOutputProvider must be a function when provided");
   if (opts.uiBindings !== undefined && !isOptionsObject(opts.uiBindings))
     throw new TypeError("PdfjsViewer: uiBindings must be an object when provided");
   if (opts.ui !== undefined && typeof opts.ui !== "string" && !isOptionsObject(opts.ui))
@@ -925,7 +929,7 @@ export function normalizeViewerOptions(
   if (typeof sourceFeatures.print === "object") {
     rejectUnknownOptions(
       sourceFeatures.print,
-      ["mode", "browserFallback", "defaults"],
+      ["mode", "browserFallback", "pageSources", "defaults"],
       "features.print",
     );
     requireOptionalBoolean(sourceFeatures.print.browserFallback, "features.print.browserFallback");
@@ -949,6 +953,15 @@ export function normalizeViewerOptions(
     typeof sourceFeatures.print === "object"
       ? (sourceFeatures.print.browserFallback ?? true)
       : true;
+  const pageSources =
+    typeof sourceFeatures.print === "object"
+      ? sourceFeatures.print.pageSources === undefined
+        ? "base"
+        : sourceFeatures.print.pageSources
+      : "base";
+  if (pageSources !== "base" && pageSources !== "display") {
+    throw new RangeError("PdfjsViewer: features.print.pageSources must be base or display");
+  }
   const printDefaults = normalizePrintDefaults(
     typeof sourceFeatures.print === "object" ? sourceFeatures.print.defaults : undefined,
   );
@@ -1129,7 +1142,12 @@ export function normalizeViewerOptions(
         xfa: formsEnabled && (formOptions.xfa ?? true),
       },
       layers: sourceFeatures.layers !== false,
-      print: Object.freeze({ mode: printMode, browserFallback, defaults: printDefaults }),
+      print: Object.freeze({
+        mode: printMode,
+        browserFallback,
+        pageSources,
+        defaults: printDefaults,
+      }),
     },
     accessibility: {
       documentLabel: opts.accessibility?.documentLabel ?? "PDF document",

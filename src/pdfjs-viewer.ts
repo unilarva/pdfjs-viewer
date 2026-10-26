@@ -122,7 +122,7 @@ import { DocumentLayers } from "./document-layers.js";
 import { LayerPageDependencies } from "./layer-page-dependencies.js";
 import { DocumentLayersPresentation } from "./document-layers-presentation.js";
 import { DocumentPageUsage, type DocumentPageUse } from "./document-page-usage.js";
-import { DocumentPageSources } from "./document-page-sources.js";
+import { DocumentPageSources, type DocumentPageSourceSnapshot } from "./document-page-sources.js";
 import { DocumentFonts } from "./document-fonts.js";
 import type {
   PdfjsViewerPageSourceInput,
@@ -188,7 +188,6 @@ import type {
   PdfjsViewerUiTextOptions,
   PdfjsViewerUiBindings,
   PdfjsViewerKeyboardScope,
-  PdfjsViewerPrintMode,
   PdfjsViewerAccessibilityOptions,
   PdfjsViewerSource,
   PdfjsViewerPasswordReason,
@@ -239,6 +238,8 @@ import type {
   PdfjsViewerPrintSourceResult,
   PdfjsViewerPrintAdapter,
   PdfjsViewerPrintSourceResolver,
+  PdfjsViewerPrintOutput,
+  PdfjsViewerPrintOutputProvider,
   PdfjsViewerOptions,
 } from "./viewer-contracts.js";
 
@@ -257,6 +258,39 @@ type LoadAttempt = {
   settled: boolean;
   settle(result: PdfjsViewerLoadResult): void;
 };
+
+/** Private submission lifetime, independent of retained native images/browser URLs. */
+type PrintOutputAdmission = {
+  readonly signal: AbortSignal;
+  readonly output: PdfjsViewerPrintOutput | null;
+  finish(): void;
+};
+
+/** Accepts real byte/Blob brands across same-origin realms without trusting string tags. */
+function isNonemptyPrintOutput(value: unknown): value is Uint8Array | ArrayBuffer | Blob {
+  if (ArrayBuffer.isView(value)) {
+    const prototype = Object.getPrototypeOf(Uint8Array.prototype);
+    const typedArrayName = Object.getOwnPropertyDescriptor(
+      prototype,
+      Symbol.toStringTag,
+    )?.get?.call(value);
+    return (
+      typedArrayName === "Uint8Array" &&
+      Object.getOwnPropertyDescriptor(prototype, "byteLength")!.get!.call(value) > 0
+    );
+  }
+  try {
+    if (Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!.call(value) > 0)
+      return true;
+  } catch {
+    /* Not an ArrayBuffer. */
+  }
+  try {
+    return Object.getOwnPropertyDescriptor(Blob.prototype, "size")!.get!.call(value) > 0;
+  } catch {
+    return false;
+  }
+}
 
 const SCROLL_MOTION_IDLE_MS = 120;
 const SMOOTH_NAVIGATION_MIN_DURATION_MS = 180;
@@ -433,11 +467,9 @@ export class PdfjsViewer {
   #formatters: Readonly<PdfjsViewerFormatters>;
   #printAdapter: PdfjsViewerPrintAdapter | null;
   #printSourceResolver: PdfjsViewerPrintSourceResolver | null;
-  #printFeature: Readonly<{
-    mode: PdfjsViewerPrintMode;
-    browserFallback: boolean;
-    defaults: import("./viewer-contracts.js").PdfjsViewerNormalizedPrintDefaults;
-  }>;
+  #printOutputProvider: PdfjsViewerPrintOutputProvider | null;
+  #nextPrintOperationId = 0;
+  #printFeature: NormalizedViewerFeatures["print"];
   #deviceCompatibility: readonly Readonly<PdfjsViewerDeviceCompatibilityRule>[];
   #defaultDocumentOptions: PdfjsViewerDocumentOptions;
   #activeDocumentOptions: PdfjsViewerDocumentOptions = {};
@@ -459,6 +491,7 @@ export class PdfjsViewer {
   #printBtnEl: HTMLButtonElement | null = null;
   #viewerPrintSetup: ViewerPrintSetup | null = null;
   #printActionBusy = false;
+  #printActionFeedback: HTMLElement | null = null;
   #documentInformationBtnEl: HTMLButtonElement | null = null;
   #viewerDocumentInformation: ViewerDocumentInformation | null = null;
 
@@ -744,6 +777,7 @@ export class PdfjsViewer {
     this.#formatters = normalized.ui.formatters;
     this.#printAdapter = opts.printAdapter ?? null;
     this.#printSourceResolver = opts.printSourceResolver ?? null;
+    this.#printOutputProvider = opts.printOutputProvider ?? null;
     this.#printFeature = normalized.features.print;
     this.#deviceCompatibility = normalized.deviceCompatibility;
     this.#documentPrint = new DocumentPrint(
@@ -1664,6 +1698,8 @@ export class PdfjsViewer {
     if (!next) {
       this.#cancelPresentationMode(true);
       void this.#viewerFullscreen.exit();
+      this.#printActionFeedback?.remove();
+      this.#printActionFeedback = null;
     }
     this.#hostActive = next;
     this.#documentView.setPageOverlaysActive(next);
@@ -2018,11 +2054,12 @@ export class PdfjsViewer {
       return {
         ok: false,
         reason: "unsupported",
-        sourceFallbackAvailable: route.route === "browser",
+        sourceFallbackAvailable: route.route === "browser" && !this.#displayPrintSourceBlocked(),
         ...(route.capabilities ? { nativeCapabilities: route.capabilities } : {}),
       };
     }
-    const sourceFallbackAvailable = this.#printFeature.browserFallback;
+    let sourceFallbackAvailable =
+      this.#printFeature.browserFallback && !this.#displayPrintSourceBlocked();
     const normalized = this.#constrainNativePrintOptions(requested, route.capabilities!);
     if (!normalized) {
       return {
@@ -2051,6 +2088,8 @@ export class PdfjsViewer {
     const printPermission = resolveDocumentPrintPermission(permission.information);
     const geometry = await this.#prepareNativePrintGeometry(normalized, pdf, pages, generation);
     if (!geometry) return { ok: false, reason: "cancelled", sourceFallbackAvailable: false };
+    sourceFallbackAvailable =
+      this.#printFeature.browserFallback && !this.#displayPrintSourceBlocked();
     if (this.#renderingProfile !== profile || this.#renderingProfileRevision !== profileRevision) {
       return { ok: false, reason: "cancelled", sourceFallbackAvailable: false };
     }
@@ -2169,6 +2208,9 @@ export class PdfjsViewer {
   /**
    * Prints the active document through the configured native, browser-source,
    * or host-adapter route.
+   * Controlled native printing uses canonical pages by default. The explicit
+   * `features.print.pageSources: "display"` policy captures selected source mappings
+   * synchronously at submission, before asynchronous preparation.
    *
    * @returns A discriminated invocation result or expected failure.
    * @throws When options are invalid, the viewer is destroyed, or a host print
@@ -2193,13 +2235,17 @@ export class PdfjsViewer {
     );
     if (requestedOptions.signal?.aborted) return { ok: false, reason: "cancelled" };
     const route = this.#printRoute();
-    if (logDirectRoute) this.#logPrintRoute("public-api", route);
+    if (logDirectRoute && ["disabled", "unavailable", "adapter"].includes(route.route))
+      this.#logPrintRoute("public-api", route);
     if (route.route === "disabled") return { ok: false, reason: "disabled" };
     if (route.route === "unavailable") return { ok: false, reason: "unsupported" };
     if (this.#destroyed || this.#status !== "ready" || !this.#pdf)
       return { ok: false, reason: "not-ready" };
-    if (route.route === "browser")
-      return this.openPrintSource({ document: "auto", print: requestedOptions });
+    if (route.route === "browser") {
+      const pending = this.openPrintSource({ document: "auto", print: requestedOptions });
+      if (logDirectRoute) this.#logPrintRoute("public-api", route);
+      return pending;
+    }
     const pdf = this.#pdf;
     if (route.route === "adapter") return this.#printWithAdapter(requestedOptions, pdf);
     const normalizedOptions = this.#constrainNativePrintOptions(
@@ -2214,10 +2260,31 @@ export class PdfjsViewer {
       return { ok: false, reason: "cancelled" };
     const admission = Object.freeze({ generation });
     this.#controlledPrintAdmission = admission;
-    const sourceFallbackAvailable = this.#printFeature.browserFallback;
-    this.#closeTransientUi();
+    const sourceFallbackAvailable =
+      this.#printFeature.browserFallback && !this.#displayPrintSourceBlocked();
+    let sourceSnapshot: DocumentPageSourceSnapshot | undefined;
+    let outputAdmission: PrintOutputAdmission | undefined;
     try {
-      const permission = await this.#resolvePrintPermission();
+      if (this.#printFeature.pageSources === "display") {
+        const selected = selectedPrintRuns(normalizedOptions.pages, pdf.numPages).flatMap(run =>
+          Array.from({ length: run.to - run.from + 1 }, (_, index) => run.from + index),
+        );
+        // Capture before permission/geometry awaits or reentrant UI events, not per rendered page.
+        sourceSnapshot = this.#documentPageSources!.snapshot(selected, {
+          signal: normalizedOptions.signal,
+        });
+      }
+      if (this.#printOutputProvider) {
+        const admitted = this.#admitPrintOutput(true, normalizedOptions.signal);
+        if (!admitted.ok) return admitted;
+        outputAdmission = admitted.admission;
+      }
+      if (logDirectRoute) this.#logPrintRoute("public-api", route);
+      this.#closeTransientUi();
+      const permission = outputAdmission
+        ? await this.#waitForDocumentValue(this.#resolvePrintPermission(), outputAdmission.signal)
+        : await this.#resolvePrintPermission();
+      if (!permission || outputAdmission?.signal.aborted) return { ok: false, reason: "cancelled" };
       if (!permission.ok) return { ok: false, reason: permission.reason };
       if (!this.#isCurrentDocument(pdf, generation) || this.#documentPageUsage !== pages) {
         return { ok: false, reason: "cancelled" };
@@ -2229,7 +2296,7 @@ export class PdfjsViewer {
         pages,
         generation,
       );
-      if (!geometry) return { ok: false, reason: "cancelled" };
+      if (!geometry || outputAdmission?.signal.aborted) return { ok: false, reason: "cancelled" };
       const layout = geometry.layout;
       const runs = geometry.runs;
       const sheetCount = countPrintSheets(runs, layout);
@@ -2279,6 +2346,7 @@ export class PdfjsViewer {
         layers: layerVisibility?.revision ?? null,
         forms: formRevision,
         geometry: geometry.revision,
+        ...(sourceSnapshot ? { pageSources: sourceSnapshot.mappingRevision } : {}),
       });
       if (xfaAdmission && this.#documentPresentation.formRevision !== formRevision) {
         return { ok: false, reason: "cancelled" };
@@ -2288,7 +2356,8 @@ export class PdfjsViewer {
         : null;
       return await this.#documentPrint.print(normalizedOptions, {
         pdf,
-        pages,
+        pages: sourceSnapshot ?? pages,
+        releasePageSources: sourceSnapshot?.release,
         information: permission.information,
         geometry,
         layerVisibility,
@@ -2311,6 +2380,8 @@ export class PdfjsViewer {
         profile: Object.freeze({ id: profile, revision: profileRevision }),
       });
     } finally {
+      sourceSnapshot?.release();
+      outputAdmission?.finish();
       if (this.#controlledPrintAdmission === admission) this.#controlledPrintAdmission = null;
     }
   }
@@ -2332,6 +2403,106 @@ export class PdfjsViewer {
     const mode = this.#printFeature.mode;
     const capabilities = mode === "native" ? this.#resolveNativePrintCapabilities() : null;
     return resolveViewerPrintRoute(mode, capabilities, this.#printFeature.browserFallback);
+  }
+
+  /** Active display output cannot silently use canonical bytes without a provider. */
+  #displayPrintSourceBlocked(): boolean {
+    return (
+      !this.#printOutputProvider &&
+      this.#printFeature.pageSources === "display" &&
+      !!this.#documentPageSources?.hasOverrides
+    );
+  }
+
+  /** Captures host state before awaits/events and owns exactly one release on every exit. */
+  #admitPrintOutput(
+    useProvider: boolean,
+    callerSignal?: AbortSignal,
+  ):
+    | { ok: true; admission: PrintOutputAdmission }
+    | Extract<PdfjsViewerPrintSourceResult, { ok: false }> {
+    const pdf = this.#pdf!;
+    const generation = this.#documentGeneration;
+    const documentId = this.#documentId!;
+    const sources = this.#documentPageSources;
+    const revision = sources?.mappingRevision ?? 0;
+    const documentSignal = this.#documentLifetime.signal;
+    const controller = new this.#ownerWindow.AbortController();
+    let output: PdfjsViewerPrintOutput | null = null;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      documentSignal.removeEventListener("abort", finish);
+      callerSignal?.removeEventListener("abort", finish);
+      controller.abort();
+      runCleanup(output?.release);
+    };
+    documentSignal.addEventListener("abort", finish, { once: true });
+    callerSignal?.addEventListener("abort", finish, { once: true });
+    if (documentSignal.aborted || callerSignal?.aborted) finish();
+    try {
+      if (finished) return { ok: false, reason: "cancelled" };
+      if (useProvider) {
+        if (!this.#printOutputProvider) {
+          finish();
+          return { ok: false, reason: "unsupported" };
+        }
+        const candidate = this.#printOutputProvider(
+          Object.freeze({
+            operationId: ++this.#nextPrintOperationId,
+            documentId,
+            pageSources: this.#printFeature.pageSources,
+            pageSourcesRevision: revision,
+            signal: controller.signal,
+          }),
+        );
+        if (candidate === null) {
+          finish();
+          return { ok: false, reason: "unsupported" };
+        }
+        const release = candidate?.release;
+        if (typeof release === "function") {
+          output = {
+            resolveSource: () => candidate.resolveSource(),
+            release: () => release.call(candidate),
+          };
+          if (finished) runCleanup(output.release);
+        }
+        // Invalid async admissions are still observed, including late rejections.
+        if (candidate && typeof (candidate as unknown as { then?: unknown }).then === "function") {
+          void Promise.resolve(candidate).catch(() => {});
+          throw new TypeError("PdfjsViewer: printOutputProvider admission must be synchronous");
+        }
+        if (
+          !candidate ||
+          typeof candidate !== "object" ||
+          Array.isArray(candidate) ||
+          typeof candidate.resolveSource !== "function" ||
+          (release !== undefined && typeof release !== "function")
+        ) {
+          throw new TypeError(
+            "PdfjsViewer: printOutputProvider must return resolveSource() and optional release()",
+          );
+        }
+        const resolveSource = candidate.resolveSource;
+        output = { resolveSource: () => resolveSource.call(candidate), release: output?.release };
+      }
+      if (
+        finished ||
+        !this.#isCurrentDocument(pdf, generation) ||
+        this.#documentId !== documentId ||
+        sources !== this.#documentPageSources ||
+        (sources?.mappingRevision ?? 0) !== revision
+      ) {
+        finish();
+        return { ok: false, reason: "cancelled" };
+      }
+      return { ok: true, admission: { signal: controller.signal, output, finish } };
+    } catch (error) {
+      finish();
+      return { ok: false, reason: "export-failed", error };
+    }
   }
 
   #logPrintRoute(trigger: "button" | "keyboard" | "public-api", route = this.#printRoute()): void {
@@ -2447,21 +2618,24 @@ export class PdfjsViewer {
     return { ok: true, allowed, information: result.information };
   }
 
-  /** Explicitly opens original/current-value bytes in the browser PDF handler. */
+  /**
+   * Opens a browser PDF-handler source. Automatic selection prefers the configured
+   * current-output provider, otherwise retains canonical original/form semantics.
+   * Explicit original/form choices bypass the provider; current output requires it.
+   */
   public async openPrintSource(
     options: PdfjsViewerPrintSourceOptions = {},
   ): Promise<PdfjsViewerPrintSourceResult> {
     this.#assertAlive("openPrintSource");
-    this.#closeTransientUi();
     if (options === null || typeof options !== "object" || Array.isArray(options))
       throw new TypeError("PdfjsViewer: print source options must be an object");
     for (const key of Object.keys(options))
       if (!["document", "navigation", "print"].includes(key))
         throw new TypeError(`PdfjsViewer: unknown print source.${key} option`);
     const choice = options.document ?? "auto";
-    if (!["auto", "original", "with-form-values"].includes(choice))
+    if (!["auto", "current", "original", "with-form-values"].includes(choice))
       throw new RangeError(
-        "PdfjsViewer: print source document must be auto, original, or with-form-values",
+        "PdfjsViewer: print source document must be auto, current, original, or with-form-values",
       );
     const navigation = options.navigation ?? "auto";
     if (!["auto", "direct", "materialize"].includes(navigation))
@@ -2485,78 +2659,142 @@ export class PdfjsViewer {
     }
     if (this.#destroyed || this.#status !== "ready" || !this.#pdf)
       return { ok: false, reason: "not-ready" };
+    if (normalizedPrint?.signal?.aborted) return { ok: false, reason: "cancelled" };
+    if (choice === "auto" && this.#displayPrintSourceBlocked())
+      return { ok: false, reason: "unsupported" };
+    const currentOutput =
+      choice === "current" || (choice === "auto" && !!this.#printOutputProvider);
+    if (currentOutput && (navigation === "direct" || !this.#printOutputProvider))
+      return { ok: false, reason: "unsupported" };
+    const admittedSources =
+      currentOutput || (choice === "auto" && this.#printFeature.pageSources === "display")
+        ? this.#documentPageSources
+        : null;
+    const admittedSourcesRevision = admittedSources?.mappingRevision;
+    const admittedPdf = this.#pdf;
+    const admittedGeneration = this.#documentGeneration;
+    const admittedFormRevision = this.#documentPresentation.formRevision;
+    // A host callback and the native mapping snapshot share the same synchronous admission turn.
+    const admitted = this.#admitPrintOutput(currentOutput, normalizedPrint?.signal);
+    if (!admitted.ok) return admitted;
+    const admission = admitted.admission;
     const win = this.#ownerWindow;
-    const child = win.open("about:blank", "_blank");
-    if (!child) return { ok: false, reason: "popup-blocked" };
-    try {
-      child.opener = null;
-    } catch {
-      /* Browser may prevent opener mutation. */
-    }
+    let child: Window | null = null;
+    let reservationMonitor: number | undefined;
+    let url: string | null = null;
+    let opened = false;
     const resolved =
-      choice === "auto"
+      choice === "auto" || choice === "current"
         ? this.#documentPresentation.formDirty
           ? "with-form-values"
           : "original"
         : choice;
-    const admittedPdf = this.#pdf;
-    const admittedGeneration = this.#documentGeneration;
-    const admittedFormRevision = this.#documentPresentation.formRevision;
-    const warnings: PdfjsViewerPrintSourceWarning[] = [];
-    if (normalizedPrint) {
-      if (normalizedPrint.pages !== "all") warnings.push("custom-range-lost");
-      const geometry = this.#documentView.printGeometrySnapshot();
-      const exactSizes = selectedPrintRuns(
-        normalizedPrint.pages,
-        this.#documentView.pageCount,
-      ).flatMap(run =>
-        Array.from({ length: run.to - run.from + 1 }, (_, index) =>
-          geometry.exactSizeFor(run.from + index),
-        ),
-      );
-      const printLayout = resolvePrintLayout(
-        normalizedPrint.layout,
-        geometry.preferredLayout,
-        exactSizes,
-        normalizedPrint.sheet,
-        normalizedPrint.orientation,
-      );
-      const preferredSpreadGeometryMissing =
-        normalizedPrint.layout.mode === "auto" &&
-        (geometry.preferredLayout === "two-left" || geometry.preferredLayout === "two-right") &&
-        exactSizes.some(size => size === null);
-      if (printLayout.mode === "spread" || preferredSpreadGeometryMissing)
-        warnings.push("spread-parity-lost");
-    }
-    const layers = this.#documentLayers.visibilitySnapshot();
-    if (layers?.hasLayers && layers.differsFromDefaults) warnings.push("layer-state-lost");
+    const isCurrent = () =>
+      !admission.signal.aborted &&
+      !!child &&
+      !child.closed &&
+      this.#isCurrentDocument(admittedPdf, admittedGeneration) &&
+      this.#documentPresentation.formRevision === admittedFormRevision &&
+      (!admittedSources ||
+        (admittedSources === this.#documentPageSources &&
+          admittedSources.mappingRevision === admittedSourcesRevision));
     try {
-      const permission = await this.#resolvePrintPermission();
+      child = win.open("about:blank", "_blank");
+      if (!child) return { ok: false, reason: "popup-blocked" };
+      try {
+        child.opener = null;
+      } catch {
+        /* Browser may prevent opener mutation. */
+      }
+      // Release a reserved blank tab even if a host never settles its cancelled computation.
+      const reservedChild = child;
+      const closeReservation = () => {
+        if (!opened) runCleanup(() => reservedChild.close());
+      };
+      admission.signal.addEventListener("abort", closeReservation, { once: true });
+      // A closed destination must cancel even an exporter that never settles.
+      reservationMonitor = win.setInterval(() => {
+        if (reservedChild.closed) admission.finish();
+      }, 500);
+      this.#closeTransientUi();
+      const warnings: PdfjsViewerPrintSourceWarning[] = [];
+      if (normalizedPrint) {
+        if (normalizedPrint.pages !== "all") warnings.push("custom-range-lost");
+        const geometry = this.#documentView.printGeometrySnapshot();
+        const exactSizes = selectedPrintRuns(
+          normalizedPrint.pages,
+          this.#documentView.pageCount,
+        ).flatMap(run =>
+          Array.from({ length: run.to - run.from + 1 }, (_, index) =>
+            geometry.exactSizeFor(run.from + index),
+          ),
+        );
+        const printLayout = resolvePrintLayout(
+          normalizedPrint.layout,
+          geometry.preferredLayout,
+          exactSizes,
+          normalizedPrint.sheet,
+          normalizedPrint.orientation,
+        );
+        const preferredSpreadGeometryMissing =
+          normalizedPrint.layout.mode === "auto" &&
+          (geometry.preferredLayout === "two-left" || geometry.preferredLayout === "two-right") &&
+          exactSizes.some(size => size === null);
+        if (printLayout.mode === "spread" || preferredSpreadGeometryMissing)
+          warnings.push("spread-parity-lost");
+      }
+      const layers = this.#documentLayers.visibilitySnapshot();
+      if (layers?.hasLayers && layers.differsFromDefaults) warnings.push("layer-state-lost");
+      const permission = await this.#waitForDocumentValue(
+        this.#resolvePrintPermission(),
+        admission.signal,
+      );
+      if (!permission || !isCurrent()) return { ok: false, reason: "cancelled" };
       if (!permission.ok) {
-        child.close();
         return { ok: false, reason: permission.reason };
       }
       if (!permission.allowed) {
-        child.close();
         return { ok: false, reason: "disabled" };
       }
-      if (
-        !this.#isCurrentDocument(admittedPdf, admittedGeneration) ||
-        this.#documentPresentation.formRevision !== admittedFormRevision
-      ) {
-        child.close();
+      if (!isCurrent()) {
         return { ok: false, reason: "cancelled" };
+      }
+      if (currentOutput) {
+        const data = await this.#waitForDocumentValue(
+          Promise.resolve(admission.output!.resolveSource()),
+          admission.signal,
+        );
+        if (!isCurrent()) return { ok: false, reason: "cancelled" };
+        if (!isNonemptyPrintOutput(data))
+          throw new TypeError(
+            "PdfjsViewer: print output resolveSource() must return nonempty PDF bytes",
+          );
+        const blob = new win.Blob([data as BlobPart], { type: "application/pdf" });
+        url = win.URL.createObjectURL(blob);
+        if (!isCurrent()) return { ok: false, reason: "cancelled" };
+        child.location.replace(url);
+        retainPrintSourceUrl(win, child, url);
+        opened = true;
+        return { ok: true, status: "source-opened", warnings: Object.freeze(warnings) };
       }
       const authenticated =
         !!Object.keys(this.#activeDocumentOptions.httpHeaders ?? {}).length ||
         this.#activeDocumentOptions.withCredentials === true;
       let resolvedByHost: string | Uint8Array | ArrayBuffer | null = null;
       if (this.#printSourceResolver && this.#pdfUrl) {
-        resolvedByHost = await this.#printSourceResolver({
-          sourceUrl: this.#pdfUrl,
-          authenticated,
-          document: resolved,
-        });
+        resolvedByHost = await this.#waitForDocumentValue(
+          Promise.resolve(
+            this.#printSourceResolver({
+              sourceUrl: this.#pdfUrl,
+              authenticated,
+              document: resolved,
+            }),
+          ),
+          admission.signal,
+        );
+      }
+      if (!isCurrent()) {
+        return { ok: false, reason: "cancelled" };
       }
       const directAllowed =
         navigation !== "materialize" && (!authenticated || typeof resolvedByHost === "string");
@@ -2566,20 +2804,24 @@ export class PdfjsViewer {
           ? safePrintSourceUrl(sourceCandidate, win.document.baseURI)
           : null;
       if (navigation === "direct" && !sourceUrl) {
-        child.close();
         return { ok: false, reason: "unsupported" };
       }
       if (sourceUrl) {
+        if (!isCurrent()) return { ok: false, reason: "cancelled" };
         child.location.replace(sourceUrl);
+        opened = true;
         return { ok: true, status: "source-opened", warnings: Object.freeze(warnings) };
       }
       let data: Uint8Array;
       if (resolvedByHost instanceof Uint8Array || resolvedByHost instanceof ArrayBuffer) {
         data = Uint8Array.from(new Uint8Array(resolvedByHost));
       } else {
-        const documentData = await this.getDocumentData({ document: resolved });
+        const documentData = await this.#waitForDocumentValue(
+          this.getDocumentData({ document: resolved }),
+          admission.signal,
+        );
+        if (!documentData || !isCurrent()) return { ok: false, reason: "cancelled" };
         if (!documentData.ok) {
-          child.close();
           if (documentData.reason === "error")
             return { ok: false, reason: "export-failed", error: documentData.error };
           if (documentData.reason === "not-ready" || documentData.reason === "disabled")
@@ -2588,15 +2830,28 @@ export class PdfjsViewer {
         }
         data = documentData.data;
       }
-      const url = (win as ViewerWindow).URL.createObjectURL(
+      if (!isCurrent()) {
+        return { ok: false, reason: "cancelled" };
+      }
+      url = (win as ViewerWindow).URL.createObjectURL(
         new (win as ViewerWindow).Blob([data as BlobPart], { type: "application/pdf" }),
       );
+      if (!isCurrent()) return { ok: false, reason: "cancelled" };
       child.location.replace(url);
       retainPrintSourceUrl(win, child, url);
+      opened = true;
       return { ok: true, status: "source-opened", warnings: Object.freeze(warnings) };
     } catch (error) {
-      child.close();
+      if (admission.signal.aborted || (child && !isCurrent()))
+        return { ok: false, reason: "cancelled" };
       return { ok: false, reason: "export-failed", error };
+    } finally {
+      if (reservationMonitor !== undefined) win.clearInterval(reservationMonitor);
+      if (!opened) {
+        runCleanup(() => child?.close());
+        if (url) runCleanup(() => win.URL.revokeObjectURL(url!));
+      }
+      admission.finish();
     }
   }
 
@@ -2664,6 +2919,11 @@ export class PdfjsViewer {
     this.#formatters = text.formatters;
     if (this.#ownedUiEl) refreshGeneratedUiText(this.#ownedUiEl, this.#labels);
     this.#viewerPrintSetup?.setUiText(this.#labels, this.#formatters);
+    if (this.#printActionFeedback) {
+      this.#printActionFeedback.firstElementChild!.textContent =
+        this.#labels.printPreparationUnavailable;
+      this.#printActionFeedback.lastElementChild!.textContent = this.#labels.close;
+    }
     this.#viewerDocumentInformation?.setUiText(
       this.#labels,
       this.#formatters.documentInformationDate,
@@ -4176,6 +4436,8 @@ export class PdfjsViewer {
     preparationSettlements: readonly Promise<unknown>[];
   } {
     this.#documentId = null;
+    this.#printActionFeedback?.remove();
+    this.#printActionFeedback = null;
     const pageSources = this.#documentPageSources;
     this.#documentPageSources = null;
     const sourceSettlement = pageSources?.close();
@@ -4592,7 +4854,10 @@ export class PdfjsViewer {
 
   /** Resolves an uncancellable PDF.js read early with `null` when its document ends. */
   #waitForDocumentValue<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | null> {
-    if (signal.aborted) return Promise.resolve(null);
+    if (signal.aborted) {
+      void promise.catch(() => {});
+      return Promise.resolve(null);
+    }
     return new Promise((resolve, reject) => {
       const finish = (value: T | null) => {
         signal.removeEventListener("abort", cancel);
@@ -6510,15 +6775,62 @@ export class PdfjsViewer {
   #runPrintAction(trigger: "button" | "keyboard"): void {
     if (this.#printActionBusy) return;
     this.#printActionBusy = true;
-    this.#closeTransientUi();
+    this.#printActionFeedback?.remove();
+    this.#printActionFeedback = null;
+    const generation = this.#documentGeneration;
+    // Admission runs synchronously before host logging or transient-UI events can reenter.
+    const pending = this.#executePrint({}, false);
     this.#logPrintRoute(trigger);
-    void this.#executePrint({}, false)
+    void pending
+      .then(result => {
+        if (
+          !result.ok &&
+          result.reason !== "cancelled" &&
+          this.#documentGeneration === generation &&
+          this.#hostActive &&
+          !this.#destroyed &&
+          this.#status === "ready"
+        )
+          this.#showPrintActionFailure();
+      })
       .catch(error => {
         this.#log("error", "print-failed", "Print action failed", { error });
+        if (
+          this.#documentGeneration === generation &&
+          this.#hostActive &&
+          !this.#destroyed &&
+          this.#status === "ready"
+        )
+          this.#showPrintActionFailure();
       })
       .finally(() => {
         this.#printActionBusy = false;
       });
+  }
+
+  /** Direct browser-route actions have no setup dialog in which to report retryable failures. */
+  #showPrintActionFailure(): void {
+    this.#printActionFeedback?.remove();
+    const feedback = this.#ownerDocument.createElement("div");
+    feedback.className = "pdf-print-action-feedback";
+    feedback.setAttribute("role", "alert");
+    const text = this.#ownerDocument.createElement("span");
+    text.textContent = this.#labels.printPreparationUnavailable;
+    const close = this.#ownerDocument.createElement("button");
+    close.type = "button";
+    close.textContent = this.#labels.close;
+    close.addEventListener(
+      "click",
+      () => {
+        feedback.remove();
+        if (this.#printActionFeedback === feedback) this.#printActionFeedback = null;
+        this.#docContainerEl?.focus({ preventScroll: true });
+      },
+      { once: true },
+    );
+    feedback.append(text, close);
+    this.#pdfRootEl.append(feedback);
+    this.#printActionFeedback = feedback;
   }
 
   /**

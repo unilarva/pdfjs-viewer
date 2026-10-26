@@ -23,7 +23,7 @@ import type {
   PdfjsViewerPrintResult,
   PdfjsViewerPrintStartDetail,
 } from "./viewer-contracts.js";
-import type { DocumentPageAcquirer, DocumentPageUse } from "./document-page-usage.js";
+import type { DocumentPageAcquirer } from "./document-page-usage.js";
 import type { DocumentLayersVisibilitySnapshot } from "./document-layers.js";
 import type { DocumentXfaPrintSnapshot } from "./document-xfa-print.js";
 import { materializeXfaStructure } from "./xfa-value-snapshot.js";
@@ -54,7 +54,7 @@ import {
 import { resolveDocumentPrintPermission } from "./print-permission.js";
 
 const PDF_TO_CSS_UNITS = 96 / 72;
-const PAGE_GEOMETRY_EPSILON = 1e-6;
+const PAGE_GEOMETRY_EPSILON = 1e-4;
 
 type AnnotationStorage = PDFJS.PDFDocumentProxy["annotationStorage"];
 type DocumentPrintPhase = "idle" | "preflight" | "preparing" | "invoked";
@@ -85,6 +85,8 @@ type DocumentPrintEvent =
 interface DocumentPrintContext {
   readonly pdf: PDFJS.PDFDocumentProxy;
   readonly pages: DocumentPageAcquirer;
+  /** Idempotently revokes source reads, independently of retained native images. */
+  readonly releasePageSources?: () => void;
   readonly information: PdfjsViewerDocumentInformation;
   readonly geometry: DocumentPrintGeometrySnapshot;
   readonly layerVisibility: DocumentLayersVisibilitySnapshot | null;
@@ -95,6 +97,7 @@ interface DocumentPrintContext {
     layers: number | null;
     forms: number;
     geometry: number;
+    pageSources?: number;
   }>;
   readonly AnnotationMode: typeof PDFJS.AnnotationMode;
   readonly XfaLayer?: typeof PDFJS.XfaLayer;
@@ -295,11 +298,19 @@ export class DocumentPrint {
     const abort = new AbortController();
     this.#abort = abort;
     const cancel = () => abort.abort();
+    let sourcesReleased = false;
+    const releasePageSources = () => {
+      if (sourcesReleased) return;
+      sourcesReleased = true;
+      context.releasePageSources?.();
+    };
+    abort.signal.addEventListener("abort", releasePageSources, { once: true });
     options.signal?.addEventListener("abort", cancel, { once: true });
     context.signal.addEventListener("abort", cancel, { once: true });
     // Abort may race with listener installation. Do not publish a job or allocate
     // resources unless both caller-owned lifetimes are still active.
     if (options.signal?.aborted || context.signal.aborted) {
+      abort.signal.removeEventListener("abort", releasePageSources);
       options.signal?.removeEventListener("abort", cancel);
       context.signal.removeEventListener("abort", cancel);
       if (this.#abort === abort) this.#abort = null;
@@ -411,25 +422,33 @@ export class DocumentPrint {
         for (let index = 0; index < sheets.length; index++) {
           this.#throwIfAborted(abort.signal);
           const sheet = sheets[index]!;
-          const uses: DocumentPageUse[] = [];
-          try {
-            const sheetContext = sheetCanvas.getContext("2d", { alpha: false });
-            if (!sheetContext) throw new Error("PdfjsViewer: print sheet canvas is unavailable");
-            sheetContext.fillStyle = "white";
-            sheetContext.setTransform(1, 0, 0, 1, 0, 0);
-            sheetContext.fillRect(0, 0, sheetCanvas.width, sheetCanvas.height);
-            if (transport.rotatedCounterclockwise)
-              sheetContext.setTransform(0, -1, 1, 0, 0, sheetCanvas.height);
-            for (const pageNo of [sheet.left, sheet.right]) {
-              if (pageNo === null) continue;
-              const use = await context.pages.acquire(pageNo);
-              uses.push(use);
+          const sheetContext = sheetCanvas.getContext("2d", { alpha: false });
+          if (!sheetContext) throw new Error("PdfjsViewer: print sheet canvas is unavailable");
+          sheetContext.fillStyle = "white";
+          sheetContext.setTransform(1, 0, 0, 1, 0, 0);
+          sheetContext.fillRect(0, 0, sheetCanvas.width, sheetCanvas.height);
+          if (transport.rotatedCounterclockwise)
+            sheetContext.setTransform(0, -1, 1, 0, 0, sheetCanvas.height);
+          for (const pageNo of [sheet.left, sheet.right]) {
+            if (pageNo === null) continue;
+            const use = await context.pages.acquire(pageNo);
+            try {
+              this.#throwIfAborted(abort.signal);
+              const sourcePdf = use.source?.pdf ?? context.pdf;
+              const base = sourcePdf === context.pdf;
+              // Source-local Print usage must never receive another PDF's OCG IDs or forms.
+              const sourceConfig = base
+                ? optionalContentConfig
+                : await sourcePdf.getOptionalContentConfig({ intent: "print" });
               this.#throwIfAborted(abort.signal);
               const baseViewport = use.page.getViewport({ scale: 1, rotation: use.page.rotate });
               const admittedSize = context.geometry.sizeFor(pageNo);
+              // Immutable replacements already passed view/rotation/userUnit validation.
+              // Their accepted rounding drift can grow when converted to physical dimensions.
               if (
-                Math.abs(baseViewport.width - admittedSize.width) >= PAGE_GEOMETRY_EPSILON ||
-                Math.abs(baseViewport.height - admittedSize.height) >= PAGE_GEOMETRY_EPSILON
+                base &&
+                (Math.abs(baseViewport.width - admittedSize.width) >= PAGE_GEOMETRY_EPSILON ||
+                  Math.abs(baseViewport.height - admittedSize.height) >= PAGE_GEOMETRY_EPSILON)
               ) {
                 return { ok: false, reason: "cancelled" };
               }
@@ -479,8 +498,8 @@ export class DocumentPrint {
                     viewport,
                     intent: "print",
                     annotationMode: context.AnnotationMode.ENABLE_STORAGE,
-                    optionalContentConfigPromise: Promise.resolve(optionalContentConfig),
-                    printAnnotationStorage: printAnnotationStorage as AnnotationStorage["print"],
+                    optionalContentConfigPromise: Promise.resolve(sourceConfig),
+                    ...(base ? { printAnnotationStorage: context.formStorageSnapshot } : {}),
                     annotationCanvasMap,
                   },
                   abort.signal,
@@ -504,28 +523,30 @@ export class DocumentPrint {
               } finally {
                 releaseCanvasMap(annotationCanvasMap);
               }
+            } finally {
+              // Release before opening the neighbor: a sheet may span a one-reader pool.
+              use.release();
             }
-            const blob = await canvasBlob(sheetCanvas);
-            this.#throwIfAborted(abort.signal);
-            retainedBytes += blob.size;
-            const remainingEstimatedBytes =
-              (estimate.estimatedRetainedBytes * (sheets.length - index - 1)) / sheets.length;
-            const projectedRetainedBytes = Math.ceil(retainedBytes + remainingEstimatedBytes);
-            if (
-              estimatePrintPeakBytes(estimate, projectedRetainedBytes, limits, 0) >
-              limits.memoryLimitMiB * 1024 * 1024
-            ) {
-              return {
-                ok: false,
-                reason: "memory-limit",
-                estimatedSheetCount: sheetCount,
-                sourceFallbackAvailable,
-              };
-            }
-            urls.push(windowUrl(context.window).createObjectURL(blob));
-          } finally {
-            for (const use of uses) use.release();
           }
+          if (index === sheets.length - 1) releasePageSources();
+          const blob = await canvasBlob(sheetCanvas);
+          this.#throwIfAborted(abort.signal);
+          retainedBytes += blob.size;
+          const remainingEstimatedBytes =
+            (estimate.estimatedRetainedBytes * (sheets.length - index - 1)) / sheets.length;
+          const projectedRetainedBytes = Math.ceil(retainedBytes + remainingEstimatedBytes);
+          if (
+            estimatePrintPeakBytes(estimate, projectedRetainedBytes, limits, 0) >
+            limits.memoryLimitMiB * 1024 * 1024
+          ) {
+            return {
+              ok: false,
+              reason: "memory-limit",
+              estimatedSheetCount: sheetCount,
+              sourceFallbackAvailable,
+            };
+          }
+          urls.push(windowUrl(context.window).createObjectURL(blob));
           this.#progress(abort, jobId, index + 1, sheets.length, retainedBytes);
         }
         sheetCanvas.width = sheetCanvas.height = 0;
@@ -613,6 +634,8 @@ export class DocumentPrint {
         return { ok: false, reason: "cancelled" };
       throw error;
     } finally {
+      releasePageSources();
+      abort.signal.removeEventListener("abort", releasePageSources);
       exclusive?.release();
       options.signal?.removeEventListener("abort", cancel);
       context.signal.removeEventListener("abort", cancel);

@@ -722,6 +722,27 @@ visual variables listed above.
 For print modes, output options, resource limits, and device compatibility, see
 [Printing](./USAGE.md#printing).
 
+Custom and generated native setup share `features.print.pageSources`. The opt-in `"display"`
+policy captures selected replacements at submission; it does not change original downloads or
+adapter data access. Supply constructor `printOutputProvider` for host-owned current browser
+output, using the [synchronous admission and lazy byte-source contract](./USAGE.md#host-owned-current-print-output).
+The same provider applies to generated/custom print actions, setup submission, keyboard
+printing and direct print/source APIs. Without it, active display-policy replacements make
+automatic browser-source output unsupported and preflight reports
+`sourceFallbackAvailable: false`. Custom setup must honor that flag; a configured provider can still deny admission or
+fail export, so do not treat availability as guaranteed success.
+
+Keep host state in the admitted closure, release its retained inputs idempotently, and cancel
+host work through the operation signal. Successful native printing never resolves a full PDF.
+Call `print()` or `openPrintSource({ document: "current" })` directly from user activation
+so browser routes can reserve a tab synchronously, before asynchronous export. A later setup
+Source click creates a fresh admission; it does not resume an old failed job. Package-managed
+setup cancels a pending source action when the dialog closes or a later action supersedes it.
+Fully host-owned controls should pass `print.signal` for their corresponding UI lifetime. Explicit
+`"original"`/`"with-form-values"` source actions bypass the provider and should be labeled
+accordingly. Original download and **Save filled PDF** remain unchanged; any separate
+application export/download control and PDF composition remain host-owned.
+
 Generated UI calls the primary action **Open system print dialog** and the conditional fallback
 **Open PDF in browser**. The latter appears only when preparation reduces quality or fails and source
 fallback is allowed; it opens the PDF for the browser's own PDF-printing flow rather than opening the

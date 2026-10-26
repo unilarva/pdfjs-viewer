@@ -309,19 +309,29 @@ export class ViewerPrintSetup {
     this.#source.addEventListener(
       "click",
       () => {
+        const controller = new AbortController();
         let options: PdfjsViewerPrintOptions;
         try {
-          options = this.#options();
+          options = this.#options(controller.signal);
         } catch {
           this.#invalid();
           return;
         }
+        // Source is a new submission, cancelled by dialog close or a later action.
+        this.#preparation?.abort();
+        this.#preparation = controller;
         void this.#callbacks
           .openSource(options)
           .then(result => {
+            if (controller.signal.aborted || this.#preparation !== controller) return;
             if (result.ok) this.#dialog.close();
+            else if (this.#dialog.open && result.reason !== "cancelled")
+              this.#status.textContent = this.#labels.printPreparationUnavailable;
           })
-          .catch(this.#callbacks.failed);
+          .catch(this.#callbacks.failed)
+          .finally(() => {
+            if (this.#preparation === controller) this.#preparation = null;
+          });
       },
       { signal },
     );
@@ -478,9 +488,13 @@ export class ViewerPrintSetup {
       ...options,
       quality: { dpi: preflight.resolvedDpi },
     });
-    if (this.#preparation === controller) this.#preparation = null;
+    if (this.#preparation !== controller || controller.signal.aborted) return;
+    this.#preparation = null;
     if (result.ok) this.#dialog.close();
-    else if (this.#dialog.open && !controller.signal.aborted) this.#preflight();
+    else if (this.#dialog.open && !controller.signal.aborted) {
+      this.#submit.disabled = false;
+      this.#status.textContent = this.#labels.printPreparationUnavailable;
+    }
   }
 
   #apply(result: PdfjsViewerPrintPreflightResult, options: PdfjsViewerPrintOptions): void {

@@ -39,7 +39,9 @@ the package's default theme.
 - URL and in-memory loading, password handling, reusable viewers, shared workers, typed
   state and events, document-local Back/Forward, and optional URL-hash navigation.
 - [Replace displayed pages](./USAGE.md#read-only-display-page-sources) with pages from other PDFs,
-  including their text and links, without changing the original PDF, downloads, or printing.
+  including their text and links, without changing the original PDF or downloads. Native
+  printing includes replacements only when explicitly opted in; optional host-owned current
+  output supports browser printing. See [Printing](./USAGE.md#printing).
 - Themeable, localizable controls with semantic markup, focus management, and reduced-motion
   support. See the [accessibility limitations](./CUSTOMIZATION.md#accessibility) when
   evaluating PDF content for assistive technologies.

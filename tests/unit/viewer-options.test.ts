@@ -140,6 +140,91 @@ test("host device compatibility rules validate, detach, and freeze records", () 
   for (const value of invalid) assert.throws(() => normalizeDeviceCompatibilityRules(value));
 });
 
+test("native source policy is strictly opt-in and independent of print route", () => {
+  class HTMLElement {
+    ownerDocument = { defaultView: { HTMLElement } };
+  }
+  const options = {
+    rootEl: new HTMLElement(),
+    runtime: Object.create(PdfjsViewerRuntime.prototype),
+  } as PdfjsViewerOptions;
+  const normalize = (print?: unknown) =>
+    normalizeViewerOptions({ ...options, features: { print } } as PdfjsViewerOptions, false)
+      .features.print;
+  for (const print of [undefined, "native", "browser", "off", {}, { mode: "native" }]) {
+    assert.equal(normalize(print).pageSources, "base");
+  }
+  for (const mode of ["native", "browser", "off"]) {
+    const policy = normalize({ mode, pageSources: "display" });
+    assert.equal(policy.pageSources, "display");
+    assert.ok(Object.isFrozen(policy));
+  }
+  for (const pageSources of [null, false, 0, {}, [], "", "current", "DISPLAY"]) {
+    assert.throws(() => normalize({ pageSources }), /features.print.pageSources/);
+  }
+  assert.throws(() => normalize({ pageSource: "display" }), /unknown features.print.pageSource/);
+  assert.throws(() => normalizePrintOptions({ pageSources: "display" } as never, 1), /pageSources/);
+});
+
+test("current-output provider is optional, strictly function-valued and never called by normalization", () => {
+  class HTMLElement {
+    ownerDocument = { defaultView: { HTMLElement } };
+  }
+  const options = {
+    rootEl: new HTMLElement(),
+    runtime: Object.create(PdfjsViewerRuntime.prototype),
+  } as PdfjsViewerOptions;
+  assert.doesNotThrow(() => normalizeViewerOptions(options, false));
+  let calls = 0;
+  const printOutputProvider = () => {
+    calls++;
+    throw new Error("Admission must remain lazy");
+  };
+  for (const mode of ["native", "browser", "off", "adapter"] as const) {
+    for (const pageSources of ["base", "display"] as const) {
+      assert.doesNotThrow(() =>
+        normalizeViewerOptions(
+          {
+            ...options,
+            features: { print: { mode, pageSources } },
+            ...(mode === "adapter"
+              ? { printAdapter: () => ({ status: "adapter-completed" }) }
+              : {}),
+            printOutputProvider,
+            printSourceResolver: () => null,
+          },
+          false,
+        ),
+      );
+    }
+  }
+  assert.equal(calls, 0);
+  assert.doesNotThrow(() =>
+    normalizeViewerOptions({ ...options, printOutputProvider: undefined }, false),
+  );
+  for (const value of [null, false, true, 0, 1, "", "provider", {}, [], Promise.resolve(null)]) {
+    assert.throws(
+      () => normalizeViewerOptions({ ...options, printOutputProvider: value } as never, false),
+      {
+        name: "TypeError",
+        message: "PdfjsViewer: printOutputProvider must be a function when provided",
+      },
+    );
+  }
+  assert.throws(
+    () => normalizeViewerOptions({ ...options, printOutputProviderr: () => null } as never, false),
+    /unknown printOutputProviderr option/,
+  );
+  assert.throws(
+    () =>
+      normalizeViewerOptions(
+        { ...options, features: { print: { printOutputProvider } } } as never,
+        false,
+      ),
+    /unknown features.print.printOutputProvider option/,
+  );
+});
+
 test("print options normalize defaults and merge ordered adjacent ranges", () => {
   const signal = new AbortController().signal;
   const normalized = normalizePrintOptions(
