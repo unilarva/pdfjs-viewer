@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+## 0.9.0
+
 - Added read-only display page replacements through `preparePageSource()` and
   `setPageSourceOverrides()`, accepting PDF bytes or Blobs. Replace or restore pages in
   atomic batches while keeping layout, text, search, thumbnails, and links consistent.
