@@ -8,10 +8,10 @@ in [USAGE.md](./USAGE.md).
 ## Contents
 
 - [UI modes](#ui-modes)
-  - [Functional text-layer CSS](#functional-text-layer-css)
   - [`default`](#default)
-  - [`custom`](#custom)
   - [`headless`](#headless)
+  - [`custom`](#custom)
+  - [Functional text-layer CSS](#functional-text-layer-css)
 - [Generated document content and states](#generated-document-content-and-states)
   - [Package-managed styling states](#package-managed-styling-states)
   - [Generated annotation markup](#generated-annotation-markup)
@@ -23,6 +23,8 @@ in [USAGE.md](./USAGE.md).
   - [Accessibility](#accessibility)
   - [Custom panels and progress](#custom-panels-and-progress)
 - [Visual properties](#visual-properties)
+  - [Theme the default UI](#theme-the-default-ui)
+  - [Page spacing](#page-spacing)
 - [Print setup UI](#print-setup-ui)
 
 ## UI modes
@@ -35,49 +37,16 @@ All modes accept `ui.labels` and `ui.formatters`. Only default mode accepts gene
 composition (`direction`, `controls`, and `sidebar`); supplying those options in custom or
 headless mode is rejected rather than ignored.
 
-### Functional text-layer CSS
+Choose the mode by who owns the controls and document surface:
 
-PDF.js text layers are semantic DOM whose geometry depends on functional CSS, not merely
-visual theming. This CSS is required when document search highlights or text selection are
-enabled. Without it, native ranges may still contain the correct text while search and
-selection boundaries drift horizontally from the rendered PDF canvas.
+| Mode       | Controls                                                      | Document surface                      | Stylesheet                         |
+| ---------- | ------------------------------------------------------------- | ------------------------------------- | ---------------------------------- |
+| `default`  | Package-generated; theme, localize, or omit selected controls | Package-generated                     | `default-ui.css`                   |
+| `headless` | Application-owned, using methods and events                   | Package-generated                     | `core.css`                         |
+| `custom`   | Application markup, optionally bound to viewer behavior       | Application-supplied `.pdf-container` | `core.css` plus application layout |
 
-Importing `@unilarva/pdfjs-viewer/core.css` supplies functional rendering rules for every
-UI mode. `default-ui.css` is a generated aggregate containing `core.css` followed by the
-package default UI theme and layout. Do not import `core.css` in addition to `default-ui.css`;
-doing so duplicates the same functional stylesheet. Import `core.css` alone for custom/headless
-use and `default-ui.css` alone for default use.
-
-Functional rules are scoped beneath the exported `PDFJS_VIEWER_ROOT_ATTRIBUTE`
-(`data-pdfjs-viewer-root`). Construction adds this marker to `rootEl`, generated/headless
-shells, and directly bound external functional elements, then removes only markers it added.
-Preconstructed custom markup may include the marker itself. Native print sheets are the sole
-global exception because they transfer to the owning document body; their names are package-prefixed.
-
-Applications that replace `core.css` take responsibility for reproducing its complete
-page, text-layer, annotation, XFA, selection, and zoom geometry contract. Custom thumbnail
-UIs must also set `--pdf-thumbnail-width`. Extending the
-published stylesheet is safer than copying individual rules from it. Do not add
-`!important` transform transitions to `.pdf-content` or suppress text selection on an
-ancestor of `.pdf-text-layer`; both interfere with viewer interaction.
-
-The viewer owns main page-canvas dimensions and transforms. A settled canvas can be slightly
-larger than its fractional `.pdf-page` wrapper because its integer backing store is presented at
-the exact render DPR and the wrapper clips blank rounding surplus. Custom CSS must not override
-the main canvas's inline `width`, `height`, or `transform`, and must retain the page wrapper's
-clipping behavior. Text, search/selection highlights, annotations, forms, and XFA use the exact
-fractional wrapper geometry rather than the quantized canvas box. Canvas or memory limits may
-intentionally lower render DPR without changing document layout.
-
-During zoom, retained old-scale canvases preserve that rounding surplus while scaling with
-the page wrapper; their inline percentage dimensions can therefore exceed `100%`.
-
-Automatic high-resolution detail canvases overlay the base bitmap below the interactive layers.
-They are renderer-owned, clipped to the page, and pointer-transparent. Custom CSS must preserve
-their positioning, clipping, and stacking rather than apply blanket page-canvas sizing rules.
-The base canvas remains the fallback when detail rendering is downsampled, skipped, or fails;
-custom and headless UIs need no additional controls to enable it. See
-[rendering profiles](./USAGE.md#rendering-profiles) for the shared safety and memory constraints.
+Import only the stylesheet for your chosen mode. All modes need a host with an explicit
+height. For colors, typography, and control sizing, start with [Theme the default UI](#theme-the-default-ui).
 
 ### `default`
 
@@ -88,6 +57,26 @@ default chrome/theme.
 ```ts
 const viewer = new PdfjsViewer({ rootEl, runtime, ui: "default" });
 await viewer.load(pdfUrl);
+```
+
+### `headless`
+
+Creates only the scrollable rendering surface. Control the viewer through methods and
+events. Import `core.css`; it provides the package's document-surface and functional
+text-layer rules without the generated default chrome. A host may instead reproduce that
+functional contract deliberately, but `default-ui.css` is unnecessary for headless use:
+
+```ts
+const viewer = new PdfjsViewer({
+  rootEl,
+  runtime,
+  ui: "headless",
+});
+await viewer.load(pdfUrl);
+
+viewer.navigateToPage(4);
+viewer.zoomTo(1.5);
+await viewer.setPageLayout("single");
 ```
 
 ### `custom`
@@ -269,25 +258,49 @@ The viewer writes geometry variables such as `--pdf-page-scale`, `--scale-factor
 `--user-unit`, and `--total-scale-factor` on page wrappers. Consumers may read them for
 scale-aware decoration but must not assign or remove them.
 
-### `headless`
+### Functional text-layer CSS
 
-Creates only the scrollable rendering surface. Control the viewer through methods and
-events. Import `core.css`; it provides the package's document-surface and functional
-text-layer rules without the generated default chrome. A host may instead reproduce that
-functional contract deliberately, but `default-ui.css` is unnecessary for headless use:
+PDF.js text layers are semantic DOM whose geometry depends on functional CSS, not merely
+visual theming. This CSS is required when document search highlights or text selection are
+enabled. Without it, native ranges may still contain the correct text while search and
+selection boundaries drift horizontally from the rendered PDF canvas.
 
-```ts
-const viewer = new PdfjsViewer({
-  rootEl,
-  runtime,
-  ui: "headless",
-});
-await viewer.load(pdfUrl);
+Importing `@unilarva/pdfjs-viewer/core.css` supplies functional rendering rules for every
+UI mode. `default-ui.css` is a generated aggregate containing `core.css` followed by the
+package default UI theme and layout. Do not import `core.css` in addition to `default-ui.css`;
+doing so duplicates the same functional stylesheet. Import `core.css` alone for custom/headless
+use and `default-ui.css` alone for default use.
 
-viewer.navigateToPage(4);
-viewer.zoomTo(1.5);
-viewer.setPageLayout("single");
-```
+Functional rules are scoped beneath the exported `PDFJS_VIEWER_ROOT_ATTRIBUTE`
+(`data-pdfjs-viewer-root`). Construction adds this marker to `rootEl`, generated/headless
+shells, and directly bound external functional elements, then removes only markers it added.
+Preconstructed custom markup may include the marker itself. Native print sheets are the sole
+global exception because they transfer to the owning document body; their names are package-prefixed.
+
+Applications that replace `core.css` take responsibility for reproducing its complete
+page, text-layer, annotation, XFA, selection, and zoom geometry contract. Custom thumbnail
+UIs must also set `--pdf-thumbnail-width`. Extending the
+published stylesheet is safer than copying individual rules from it. Do not add
+`!important` transform transitions to `.pdf-content` or suppress text selection on an
+ancestor of `.pdf-text-layer`; both interfere with viewer interaction.
+
+The viewer owns main page-canvas dimensions and transforms. A settled canvas can be slightly
+larger than its fractional `.pdf-page` wrapper because its integer backing store is presented at
+the exact render DPR and the wrapper clips blank rounding surplus. Custom CSS must not override
+the main canvas's inline `width`, `height`, or `transform`, and must retain the page wrapper's
+clipping behavior. Text, search/selection highlights, annotations, forms, and XFA use the exact
+fractional wrapper geometry rather than the quantized canvas box. Canvas or memory limits may
+intentionally lower render DPR without changing document layout.
+
+During zoom, retained old-scale canvases preserve that rounding surplus while scaling with
+the page wrapper; their inline percentage dimensions can therefore exceed `100%`.
+
+Automatic high-resolution detail canvases overlay the base bitmap below the interactive layers.
+They are renderer-owned, clipped to the page, and pointer-transparent. Custom CSS must preserve
+their positioning, clipping, and stacking rather than apply blanket page-canvas sizing rules.
+The base canvas remains the fallback when detail rendering is downsampled, skipped, or fails;
+custom and headless UIs need no additional controls to enable it. See
+[rendering profiles](./USAGE.md#rendering-profiles) for the shared safety and memory constraints.
 
 ## Generated document content and states
 
@@ -706,7 +719,53 @@ navigation and zoom rendering do not reopen it.
 
 CSS custom properties are reserved for visual styling and layout dimensions. They
 are resolved from each viewer's `rootEl`, so multiple viewers can be themed
-independently. The viewer currently reads `--pdf-page-hgap` and `--pdf-page-vgap`
+independently.
+
+### Theme the default UI
+
+Load your application stylesheet after `@unilarva/pdfjs-viewer/default-ui.css`. Override
+variables on the generated `.pdf-default-ui` element, not only its parent: the theme
+declares defaults on that element, which take precedence over inherited values.
+
+```css
+#pdf-viewer .pdf-default-ui {
+  --pdf-ui-font: "Helvetica Neue", Arial, sans-serif;
+  --pdf-ui-font-size: 15px;
+  --pdf-ui-color-accent: light-dark(#7a284b, #ffb1d0);
+  --pdf-ui-color-accent-fg: light-dark(#fff, #351021);
+  --pdf-ui-color-surface: light-dark(#fffaf5, #251f24);
+  --pdf-ui-color-fg: light-dark(#30252a, #f4e8ee);
+  --pdf-ui-color-page-bg: light-dark(#eee6df, #171317);
+  --pdf-ui-control-size: 2.25rem;
+}
+```
+
+If `.pdf-default-ui` is itself your host, use `#pdf-viewer.pdf-default-ui` instead.
+The default theme follows the browser's light/dark preference. To follow an application
+theme switch, set `color-scheme: light` or `color-scheme: dark` on that same element.
+Choose foreground/background pairs with sufficient contrast in both schemes.
+
+| Variable                                                         | Purpose                                         |
+| ---------------------------------------------------------------- | ----------------------------------------------- |
+| `--pdf-ui-font`, `--pdf-ui-font-size`, `--pdf-ui-line-height`    | Control typography                              |
+| `--pdf-ui-color-accent`, `--pdf-ui-color-accent-fg`              | Accent and contrasting foreground               |
+| `--pdf-ui-color-surface`, `--pdf-ui-color-fg`                    | Control/panel backgrounds and text              |
+| `--pdf-ui-color-muted`, `--pdf-ui-color-border`                  | Secondary text and borders                      |
+| `--pdf-ui-color-page-bg`                                         | Document canvas surround, not PDF paper/content |
+| `--pdf-ui-control-size`, `--pdf-ui-toolbar-padding`              | Base control size and toolbar padding           |
+| `--pdf-ui-space-xs` through `--pdf-ui-space-xl`                  | Theme spacing scale                             |
+| `--pdf-ui-sidebar-width`                                         | Sidebar width                                   |
+| `--pdf-ui-radius-sm`, `--pdf-ui-radius-md`, `--pdf-ui-radius-lg` | Corner radii                                    |
+| `--pdf-ui-icon-*`                                                | Individual control icon masks                   |
+
+These variables style the generated default UI, not caller-owned custom controls.
+The complete defaults remain in
+[`default-ui-theme.css`](https://github.com/unilarva/pdfjs-viewer/blob/main/src/default-ui-theme.css).
+Keep the [functional CSS contract](#functional-text-layer-css) intact when adding other rules.
+
+### Page spacing
+
+The viewer reads `--pdf-page-hgap` and `--pdf-page-vgap`
 for page spacing. Each value is the gap when the document reference page's displayed short
 edge is 600 CSS pixels. Fit-driven resizing and explicit zoom therefore scale gaps with the
 displayed page rather than with document-internal dimensions. A configured zero remains zero.

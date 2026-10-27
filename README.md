@@ -17,36 +17,40 @@ navigation, and interaction.
 application that started this project. It uses an application-owned UI, rather than
 the package's default theme.
 
-[Quick start](#quick-start) | [Usage guide](./USAGE.md) | [Customization](./CUSTOMIZATION.md)
+[Quick start](#quick-start) | [Default UI preview](#default-ui-preview) | [Usage guide](./USAGE.md) | [Customization](./CUSTOMIZATION.md)
 
 ## Highlights
 
-- Complete default UI, selectively generated controls, custom markup bindings, or a
-  headless document surface. No framework adapter is required.
-- Responsive single-page and book-style spreads, touch and touchpad pinch zoom,
-  drag-to-scroll, browser fullscreen, discrete-page presentation mode, and viewer-scoped
-  keyboard shortcuts.
-- Progressive [Screen Wake Lock](./USAGE.md#screen-wake-lock) with selectable policies,
-  defaulting to presentation mode; browser or OS policy may prevent acquisition.
-- Search, filtered outlines, thumbnails, internal links, rotation, document metadata,
-  attachments, optional-content layers, and cross-page text selection that survives view changes.
-- Visible-first, high-DPI rendering with automatic high-zoom detail overlays and configurable
-  profiles that bound viewer-managed raster memory. See [rendering profiles](./USAGE.md#rendering-profiles).
-- Read-only annotations and popups, interactive AcroForms and pure XFA forms, and
-  filled-PDF export for supported form values. PDF JavaScript is never executed.
-- Controlled printing with ranges, paper sizes, two-page sheets, and DPI settings where
-  the browser supports it, plus browser-source and application-adapter routes.
-- URL and in-memory loading, password handling, reusable viewers, shared workers, typed
-  state and events, document-local Back/Forward, and optional URL-hash navigation.
-- [Replace displayed pages](./USAGE.md#read-only-display-page-sources) with pages from other PDFs,
-  including their text and links, without changing the original PDF or downloads. Native
-  printing includes replacements only when explicitly opted in; optional host-owned current
-  output supports browser printing. See [Printing](./USAGE.md#printing).
-- Themeable, localizable controls with semantic markup, focus management, and reduced-motion
-  support. See the [accessibility limitations](./CUSTOMIZATION.md#accessibility) when
-  evaluating PDF content for assistive technologies.
-- Deterministic server-renderable UI and a browser DOM factory that avoids HTML parsing sinks for
-  CSP and Trusted Types-conscious deployments.
+- **Your UI, your framework:** use the complete responsive UI, select generated controls,
+  bind custom markup, or embed a headless document surface. No framework adapter is required.
+- **Comfortable reading across devices:** automatic single-page and book-style spreads,
+  touch and touchpad pinch zoom, drag-to-scroll, rotation, viewer-scoped keyboard shortcuts,
+  and document-local Back/Forward.
+- **Adaptive, high-DPI rendering:** visible pages take priority, configurable profiles bound
+  viewer-managed raster memory, and automatic detail overlays improve resolution at high zoom.
+  Optional [geometric font rendering](./USAGE.md#font-rendering) helps keep larger embedded
+  TrueType text visually consistent across zoom levels.
+- **Find and follow content:** search with configurable case and diacritic matching, filtered
+  outlines, thumbnails, internal links, optional URL-hash navigation, and cross-page text
+  selection that survives view changes.
+- **Application-owned extensions:** attach [interactive DOM controls to PDF coordinates](./USAGE.md#page-anchored-dom-overlays)
+  or [replace displayed pages](./USAGE.md#read-only-display-page-sources) with pages from other
+  PDFs, including text and links, without modifying the original PDF or its downloads.
+  Replacement printing is an explicit [opt-in](./USAGE.md#printing-display-replacements).
+- **Rich PDF content:** read-only annotations and popups, attachments, document metadata,
+  optional-content layers, interactive AcroForms and pure XFA forms, and filled-PDF export
+  for supported values. PDF JavaScript is never executed.
+- **Present and print:** discrete-page presentation, browser fullscreen, and progressive
+  [Screen Wake Lock](./USAGE.md#screen-wake-lock); controlled printing with page ranges,
+  paper sizes, two-page sheets, and DPI settings on supported environments, plus browser-source
+  and application-adapter routes.
+- **Built for integration:** URL and in-memory loading, password handling, reusable viewers,
+  shared workers, typed state and events, themeable/localizable controls, focus management,
+  and reduced-motion support. See the [accessibility limitations](./CUSTOMIZATION.md#accessibility)
+  when evaluating PDF content for assistive technologies.
+- **SSR-friendly UI markup and DOM-based browser UI creation:** supports
+  [CSP and Trusted Types-conscious deployments](./USAGE.md#strict-csp-and-browser-security-headers)
+  without using HTML parsing sinks for generated browser controls.
 
 > **Pre-1.0 status:** Public APIs, options, behavior, styling hooks, and the exact
 > supported `pdfjs-dist` version set can change between minor releases. Pin exact
@@ -68,6 +72,35 @@ and the new viewer release's `peerDependencies`.
   markup bindings; styling; generated UI; and localization.
 - [Architecture](./ARCHITECTURE.md): maintainer-only source, release-qualification, and
   implementation guidance.
+
+## Default UI Preview
+
+<img
+  src="https://raw.githubusercontent.com/unilarva/pdfjs-viewer/main/assets/screenshots/default-ui-desktop-0.9.0.png"
+  alt="Default PDF viewer with its outline sidebar and a fitted two-page spread on desktop."
+  width="960"
+/>
+
+_Default UI in version 0.9.0, desktop Chromium, using the demo's generated sample PDF.
+The viewer is cropped from the demo page; no custom viewer styling is applied._
+
+<details>
+<summary>Mobile-width preview</summary>
+
+<img
+  src="https://raw.githubusercontent.com/unilarva/pdfjs-viewer/main/assets/screenshots/default-ui-mobile-0.9.0.png"
+  alt="Default PDF viewer at mobile width with compact controls and a single-column document."
+  width="390"
+/>
+
+_Default UI in version 0.9.0, Chromium at a 390-pixel touch-capable viewport.
+This is a responsive-layout preview, not a physical-device screenshot._
+
+</details>
+
+Run the [local demo](./ARCHITECTURE.md#development-and-contributing) to try the default UI
+with the generated sample PDF or your own document. Screenshots are repository assets,
+loaded from GitHub rather than bundled into the npm runtime package.
 
 ## Requirements
 

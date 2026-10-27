@@ -25,6 +25,10 @@ and demo commands belong to the
   - [Configure once at application startup](#configure-once-at-application-startup)
 - [Common options](#common-options)
   - [Rendering profiles](#rendering-profiles)
+    - [How rendering adapts](#how-rendering-adapts)
+    - [Profile overrides](#profile-overrides)
+    - [Font rendering](#font-rendering)
+    - [Inactive viewers and hidden documents](#inactive-viewers-and-hidden-documents)
   - [Interaction behavior](#interaction-behavior)
   - [Document features](#document-features)
 - [PDF.js document loading](#pdfjs-document-loading)
@@ -34,12 +38,23 @@ and demo commands belong to the
   - [Updates while scrolling and navigating](#updates-while-scrolling-and-navigating)
   - [Multiple viewers and navigation-state ownership](#multiple-viewers-and-navigation-state-ownership)
 - [Public controls](#public-controls)
+  - [Exported types and API inventory](#exported-types-and-api-inventory)
+  - [View controls](#view-controls)
   - [Fullscreen and presentation mode](#fullscreen-and-presentation-mode)
   - [Screen Wake Lock](#screen-wake-lock)
   - [In-document navigation history](#in-document-navigation-history)
+- [Document queries](#document-queries)
+  - [Document information](#document-information)
+  - [Search and outline results](#search-and-outline-results)
+- [Layers and forms](#layers-and-forms)
+  - [Precise Layer Page Dependencies](#precise-layer-page-dependencies)
+- [Advanced features](#advanced-features)
+  - [Read-Only Display Page Sources](#read-only-display-page-sources)
+  - [Page-Anchored DOM Overlays](#page-anchored-dom-overlays)
 - [Behavior and features](#behavior-and-features)
-  - [Read-only display page sources](#read-only-display-page-sources)
 - [Printing](#printing)
+  - [Printing Display Replacements](#printing-display-replacements)
+  - [Host-Owned Current Print Output](#host-owned-current-print-output)
   - [Fallback and adapters](#fallback-and-adapters)
   - [Print events](#print-events)
   - [Availability and device compatibility](#availability-and-device-compatibility)
@@ -454,52 +469,6 @@ separate rendering implementation:
 Existing sufficient bitmaps are reused, and replacements render offscreen before an atomic commit
 unless the selected profile explicitly permits direct visible rendering under unavoidable pressure.
 
-The default `fontRendering: "native"` preserves ordinary PDF.js font rendering.
-
-Choose `fontRendering: "geometric"` if larger letters in an embedded TrueType font visibly
-change height or shape while zooming, especially when a lower-resolution full-page bitmap is
-replaced by the high-resolution detail overlay. Native font hinting can make those two rasters
-show different letter proportions. Geometric rendering keeps larger text closer to the font's
-original outlines, reducing these distracting shape changes without disabling native text
-rendering for the whole document.
-
-This is a font-shape consistency option, not a general sharpening filter: it does not increase
-bitmap resolution, remove ordinary antialiasing differences, or make a low-resolution preview
-as crisp as the detail overlay. Keep the native default when text already looks satisfactory
-or when avoiding the additional font preparation and rendering overhead is more important.
-
-An optional constructor policy enables geometry-preserving native TrueType text:
-
-```ts
-const viewer = new PdfjsViewer({ rootEl, runtime, fontRendering: "geometric" });
-```
-
-With this opt-in, main page and detail canvases preserve embedded TrueType outline proportions for
-font sizes above 24 CSS pixels, rather than letting native grid fitting reshape larger
-letters at different zoom levels or render DPRs. Smaller text keeps ordinary native
-hinting for contrast and can still have normal pixel-grid-dependent shape changes.
-The policy uses visible font size, not render DPR, so base and detail choose the same
-font. Rendering still uses native canvas text; original fonts remain available to text
-selection and form controls.
-Unsupported font formats or unavailable native font APIs retain ordinary PDF.js rendering,
-and explicit `documentOptions.disableFontFace: true` continues to select PDF.js outlines.
-The policy is qualified with supported PDF.js display builds and native browser font APIs,
-but different browser/OS rasterizers can still produce different antialiasing. CFF/Type 1
-fonts are unchanged. Disable the opt-in if a document or platform does not benefit.
-Converted font data and native aliases are held for the document lifetime only when enabled, outside the
-canvas-only raster budget, and released when the document closes.
-
-Enabling geometric rendering adds initial font preparation and per-text-draw work; the cost
-depends on the PDF and browser and can matter on slower devices or text-heavy pages.
-Aliases are prepared lazily for encountered fonts and reused across page renders and zooms,
-but they remain cached until document close rather than being evicted with page bitmaps.
-Memory therefore grows with distinct embedded font objects encountered, not just font-family
-names: a long PDF assembled from separate files may contain hundreds of independent subsets
-of the same font. Native font faces and glyph caches add browser-managed memory beyond the
-retained font bytes, and the canvas raster budget does not cap that total. For font-heavy
-documents, compare a representative long browsing session with the native default before
-enabling this policy broadly; CFF/Type 1 fonts receive no geometric aliases.
-
 The exact configurable sequence is documented on `PdfjsViewerRenderingProfileSettings`; see
 [Render planning and admission](./ARCHITECTURE.md#render-planning-and-admission) for its ownership,
 memory, and scheduling invariants.
@@ -592,6 +561,54 @@ caches add memory beyond page bitmaps, and releasing resources need not immediat
 memory. Page and thumbnail placeholder counts do not measure bitmap memory: zero-sized canvases have
 no page-sized backing store. Deactivation keeps the document open; use `close()` or `destroy()` to
 release it.
+
+#### Font rendering
+
+The default `fontRendering: "native"` preserves ordinary PDF.js font rendering.
+
+Choose `fontRendering: "geometric"` if larger letters in an embedded TrueType font visibly
+change height or shape while zooming, especially when a lower-resolution full-page bitmap is
+replaced by the high-resolution detail overlay. Native font hinting can make those two rasters
+show different letter proportions. Geometric rendering keeps larger text closer to the font's
+original outlines, reducing these distracting shape changes without disabling native text
+rendering for the whole document.
+
+This is a font-shape consistency option, not a general sharpening filter: it does not increase
+bitmap resolution, remove ordinary antialiasing differences, or make a low-resolution preview
+as crisp as the detail overlay. Keep the native default when text already looks satisfactory
+or when avoiding the additional font preparation and rendering overhead is more important.
+
+An optional constructor policy enables geometry-preserving native TrueType text:
+
+```ts
+const viewer = new PdfjsViewer({ rootEl, runtime, fontRendering: "geometric" });
+```
+
+With this opt-in, main page and detail canvases preserve embedded TrueType outline proportions for
+font sizes above 24 CSS pixels, rather than letting native grid fitting reshape larger
+letters at different zoom levels or render DPRs. Smaller text keeps ordinary native
+hinting for contrast and can still have normal pixel-grid-dependent shape changes.
+The policy uses visible font size, not render DPR, so base and detail choose the same
+font. Rendering still uses native canvas text; original fonts remain available to text
+selection and form controls.
+Unsupported font formats or unavailable native font APIs retain ordinary PDF.js rendering,
+and explicit `documentOptions.disableFontFace: true` continues to select PDF.js outlines.
+The policy is qualified with supported PDF.js display builds and native browser font APIs,
+but different browser/OS rasterizers can still produce different antialiasing. CFF/Type 1
+fonts are unchanged. Disable the opt-in if a document or platform does not benefit.
+Converted font data and native aliases are held for the document lifetime only when enabled, outside the
+canvas-only raster budget, and released when the document closes.
+
+Enabling geometric rendering adds initial font preparation and per-text-draw work; the cost
+depends on the PDF and browser and can matter on slower devices or text-heavy pages.
+Aliases are prepared lazily for encountered fonts and reused across page renders and zooms,
+but they remain cached until document close rather than being evicted with page bitmaps.
+Memory therefore grows with distinct embedded font objects encountered, not just font-family
+names: a long PDF assembled from separate files may contain hundreds of independent subsets
+of the same font. Native font faces and glyph caches add browser-managed memory beyond the
+retained font bytes, and the canvas raster budget does not cap that total. For font-heavy
+documents, compare a representative long browsing session with the native default before
+enabling this policy broadly; CFF/Type 1 fonts receive no geometric aliases.
 
 #### Inactive viewers and hidden documents
 
@@ -930,6 +947,10 @@ Starting another structured navigation supersedes an unresolved one. Closing,
 replacing, or destroying the document also prevents stale requests from scrolling a
 replacement document.
 
+Named-destination navigation requires `viewer.state.status === "ready"` and otherwise
+returns a structured `not-ready` result. It does not operate on a document that is still
+loading, failed, closed, or being replaced.
+
 ### Multiple viewers and navigation-state ownership
 
 `viewerId` identifies a viewer instance in applications that keep multiple viewers alive.
@@ -1010,6 +1031,34 @@ Useful methods include the following nonexhaustive selection:
 - `resetForms()` restores the visible AcroForm or pure-XFA values loaded when the viewer opened;
 - `setActive(active)` for applications with multiple views; and
 - `destroy()` for deterministic cleanup.
+
+### Exported types and API inventory
+
+The package root also exports the relevant TypeScript contracts, including
+`PdfjsViewerOptions`, `PdfjsViewerPageLayout`, `PdfjsViewerFitMode`,
+`PdfjsViewerFitModeSelection`, `PdfjsViewerRotation`, `PdfjsViewerUiControlOptions`,
+`PdfjsViewerRenderingProfile`,
+`PdfjsViewerRenderingProfileSelection`, `PdfjsViewerRenderingProfileSettings`,
+`PdfjsViewerDocumentVariant`, `PdfjsViewerDocumentDataResult`, `PdfjsViewerDownloadResult`,
+`PdfjsViewerState`, event types, navigation results, runtime options, UI bindings, and document-loading
+options. `renderPdfjsViewerUi()` and `PDFJS_VIEWER_UI_HOOKS` are
+available for custom integration as described in
+[Customize and localize the UI](./CUSTOMIZATION.md#customize-and-localize-the-ui). Package implementation files
+are not public entry points. Treat the generated package-root declaration (`dist/index.d.ts`)
+and the package-root export inventory in [`ARCHITECTURE.md`](./ARCHITECTURE.md#module-status-and-audience)
+as the complete current API inventory.
+
+### View controls
+
+Page-layout and rotation changes are asynchronous and reject without partially applying a failed
+change or when no document is ready. `setFitMode()` may update the selected mode while closed or
+loading and applies it to the next ready document; `fit()` requires a ready document.
+
+`zoomTo()` rejects non-finite scales, while `zoomBy()` rejects non-finite or non-positive
+factors with `RangeError`; valid values are clamped to the configured zoom range. Committed
+scales are normalized to six decimal places; transient pinch, wheel, and slider feedback
+remains continuous until commit. See [Behavior and features](#behavior-and-features) for
+layout, fit, zoom gesture, and rotation behavior.
 
 ### Fullscreen and presentation mode
 
@@ -1140,23 +1189,7 @@ This feature never calls browser history or changes a URL. `PdfjsViewerNavigatio
 the hash adapter remain the separate shareable-destination mechanism and continue using replace
 semantics for one host-owned destination.
 
-Page-layout and rotation changes are asynchronous and reject without partially applying a failed
-change or when no document is ready. `setFitMode()` may update the selected mode while closed or
-loading and applies it to the next ready document; `fit()` requires a ready document.
-
-The package root also exports the relevant TypeScript contracts, including
-`PdfjsViewerOptions`, `PdfjsViewerPageLayout`, `PdfjsViewerFitMode`,
-`PdfjsViewerFitModeSelection`, `PdfjsViewerRotation`, `PdfjsViewerUiControlOptions`,
-`PdfjsViewerRenderingProfile`,
-`PdfjsViewerRenderingProfileSelection`, `PdfjsViewerRenderingProfileSettings`,
-`PdfjsViewerDocumentVariant`, `PdfjsViewerDocumentDataResult`, `PdfjsViewerDownloadResult`,
-`PdfjsViewerState`, event types, navigation results, runtime options, UI bindings, and document-loading
-options. `renderPdfjsViewerUi()` and `PDFJS_VIEWER_UI_HOOKS` are
-available for custom integration as described in
-[Customize and localize the UI](./CUSTOMIZATION.md#customize-and-localize-the-ui). Package implementation files
-are not public entry points. Treat the generated package-root declaration (`dist/index.d.ts`)
-and the package-root export inventory in [`ARCHITECTURE.md`](./ARCHITECTURE.md#module-status-and-audience)
-as the complete current API inventory.
+## Document queries
 
 Document information, search, outline, and attachment queries use structured results:
 
@@ -1205,7 +1238,88 @@ if (attachments.ok) {
   const first = attachments.attachments[0];
   if (first) await viewer.downloadAttachment(first.id);
 }
+```
 
+Document queries require a ready document and return expected failures with `ok: false` and
+`reason: "not-ready"`, `"cancelled"`, `"destroyed"`, or `"error"`. Search, outline, attachments, and
+current-form-value byte access can additionally return `"disabled"` when their feature is disabled. `downloadAttachment()` also
+returns `"not-found"` for an unknown document-scoped ID and `"unavailable"` when PDF.js cannot
+provide bytes. Attachment support currently covers catalog-level embedded files; page-local
+File Attachment annotations and full PDF Portfolio collection semantics are outside this scope.
+Error failures also expose `error`. `search()` rejects an empty or non-string query with
+`TypeError`; explicit API searches allow one-character queries. Returned arrays and objects
+are detached snapshots, so caller mutation does not affect later queries or viewer UI.
+
+### Document information
+
+`getDocumentInformation()` returns normalized data rather than PDF.js objects. Standard PDF
+Info fields and parsed XMP `metadata` remain separate because they may
+disagree. XMP values are strings or string arrays. `creationDate` and `modificationDate`
+preserve original PDF date strings so applications can choose their own parsing and time-zone
+policy. `permissions` is the explicit list of granted operations, or `null` when PDF.js could
+not expose a permission list. `null` must not be interpreted as proof that an encrypted PDF is
+unrestricted. Document fingerprints expose separate original and modified IDs.
+The result also reports AcroForm, XFA, portfolio/collection, signature, linearization, and
+tagged-PDF flags. `formPresentation` distinguishes `acroform`, `pure-xfa`,
+`hybrid-acroform-fallback`, and unavailable XFA rather than implying mixed `getXfa()` support.
+It intentionally omits file size: PDF.js `getDownloadInfo()` can force a
+range-loaded document to finish downloading, which would make a metadata query unexpectedly
+expensive.
+Creation and modification dates remain the raw PDF strings in this result. Their timezone suffix,
+for example `+03'00'`, comes from the PDF metadata rather than the host device. `formatPdfDate()`
+provides a human-readable projection such as `2026-08-09 04:38:55 +03:00` while preserving that
+encoded wall time and offset; invalid values pass through unchanged. The generated dialog uses this
+helper through the overridable `ui.formatters.documentInformationDate` formatter.
+The optional generated default-UI dialog consumes this same public result through the facade. It
+does not add a generated-UI dependency to metadata acquisition. Custom and headless modes do not
+discover, populate, or manage information controls: consumers own their markup and call the query
+when needed. This also supports projections outside a dialog without ambient DOM binding:
+
+```ts
+root.addEventListener("pdf:ready", async () => {
+  const result = await viewer.getDocumentInformation();
+  if (!result.ok) return;
+  documentTitle.textContent = result.information.title ?? "";
+});
+```
+
+### Search and outline results
+
+Search results contain page-local source `segments`; `characterIndex` and `length` are
+JavaScript UTF-16 offsets into each segment's original `text`. Matches may span adjacent PDF.js
+text items but not page boundaries. A queried `getOutline()` result includes matching items and
+their ancestors to preserve hierarchy.
+
+Document search, search highlighting, generated/custom outline filtering, `search()`, and
+filtered `getOutline()` use the same character comparison and substring helpers. Matching
+is case-insensitive by default. Diacritic modes are:
+
+- `"smart"`: an unaccented query matches accented or unaccented text, while an accented
+  query requires the same accent;
+- `"ignore"`: accents are folded on both query and document text; and
+- `"respect"`: accents must match after NFC normalization.
+
+`behavior.searchQueryOptions` supplies defaults for UI document search and public `search()`
+calls. `behavior.outlineFilterOptions` supplies defaults for UI outline filtering and
+queried `getOutline()` calls. Both default to `{ caseSensitive: false, diacritics: "smart" }`.
+Public method options are partial overrides: an omitted field is inherited from the relevant
+stored default. These are query-time policies over retained original strings, so changing
+them between public calls never rebuilds the search index or outline.
+Outline `destinationStatus` is `"resolved"`, `"none"`, or `"unresolved"`, distinguishing
+usable targets from destinationless items and malformed or unsupported PDF destinations.
+`destination.pdfNamedDestination` preserves an explicit string destination from the PDF
+outline itself.
+`destination.navigationDestinationId` is separate and optional: it is inferred only when
+`shareableNamedDestinationPrefix` and `navigationState` configure persisted destination syncing and a
+prefix-matching PDF named destination is on the same page within
+`behavior.destinationMatchTolerance`. The ID has the configured prefix removed. A named
+destination elsewhere in the document, or one farther away on the same page, is not assigned.
+Generated outline navigation uses this same inferred ID, so API results and URL/hash state do
+not disagree about a selected outline spot.
+
+## Layers and forms
+
+```ts
 const layers = viewer.getLayers();
 if (layers.ok) {
   await viewer.setLayerVisibility([{ id: "optional-content-id", visible: false }]);
@@ -1220,18 +1334,11 @@ if (viewer.state.formDirty) {
 }
 ```
 
-Document queries require a ready document and return expected failures with `ok: false` and
-`reason: "not-ready"`, `"cancelled"`, `"destroyed"`, or `"error"`. Search, outline, attachments, and
-current-form-value byte access can additionally return `"disabled"` when their feature is disabled. `downloadAttachment()` also
-returns `"not-found"` for an unknown document-scoped ID and `"unavailable"` when PDF.js cannot
-provide bytes. Attachment support currently covers catalog-level embedded files; page-local
-File Attachment annotations and full PDF Portfolio collection semantics are outside this scope.
-Error failures also expose `error`. `search()` rejects an empty or non-string query with
-`TypeError`; explicit API searches allow one-character queries. Returned arrays and objects
-are detached snapshots, so caller mutation does not affect later queries or viewer UI.
 Layer mutations additionally return `reason: "unknown-layer"` with all unknown IDs and reject
 the whole operation. Successful changes increment `revision` and preserve PDF radio-button
-group semantics.
+group semantics. See [Document queries](#document-queries) for shared query-result contracts,
+[Document features](#document-features) for layer/form capabilities, and
+[Behavior and features](#behavior-and-features) for filled-document export and reset semantics.
 
 ### Precise Layer Page Dependencies
 
@@ -1272,6 +1379,8 @@ on output dimensions and DPR, not group count; estimates exclude PDF.js internal
 asynchronous metadata work. Replacement, close and destroy revoke it and clear registrations;
 passing an old token returns `stale-document`. Ordinary lifecycle/feature failures use the
 existing query-result reasons. No existing API requires dependency registration.
+
+## Advanced features
 
 ### Read-Only Display Page Sources
 
@@ -1469,76 +1578,6 @@ never enter exported PDF bytes, downloads or controlled print output.
 
 Call `setActive(false)` when switching away from a retained viewer. Its overlay hosts
 are hidden and inert until reactivation; the registrations themselves remain intact.
-
-`getDocumentInformation()` returns normalized data rather than PDF.js objects. Standard PDF
-Info fields and parsed XMP `metadata` remain separate because they may
-disagree. XMP values are strings or string arrays. `creationDate` and `modificationDate`
-preserve original PDF date strings so applications can choose their own parsing and time-zone
-policy. `permissions` is the explicit list of granted operations, or `null` when PDF.js could
-not expose a permission list. `null` must not be interpreted as proof that an encrypted PDF is
-unrestricted. Document fingerprints expose separate original and modified IDs.
-The result also reports AcroForm, XFA, portfolio/collection, signature, linearization, and
-tagged-PDF flags. `formPresentation` distinguishes `acroform`, `pure-xfa`,
-`hybrid-acroform-fallback`, and unavailable XFA rather than implying mixed `getXfa()` support.
-It intentionally omits file size: PDF.js `getDownloadInfo()` can force a
-range-loaded document to finish downloading, which would make a metadata query unexpectedly
-expensive.
-Creation and modification dates remain the raw PDF strings in this result. Their timezone suffix,
-for example `+03'00'`, comes from the PDF metadata rather than the host device. `formatPdfDate()`
-provides a human-readable projection such as `2026-08-09 04:38:55 +03:00` while preserving that
-encoded wall time and offset; invalid values pass through unchanged. The generated dialog uses this
-helper through the overridable `ui.formatters.documentInformationDate` formatter.
-The optional generated default-UI dialog consumes this same public result through the facade. It
-does not add a generated-UI dependency to metadata acquisition. Custom and headless modes do not
-discover, populate, or manage information controls: consumers own their markup and call the query
-when needed. This also supports projections outside a dialog without ambient DOM binding:
-
-```ts
-root.addEventListener("pdf:ready", async () => {
-  const result = await viewer.getDocumentInformation();
-  if (!result.ok) return;
-  documentTitle.textContent = result.information.title ?? "";
-});
-```
-
-Search results contain page-local source `segments`; `characterIndex` and `length` are
-JavaScript UTF-16 offsets into each segment's original `text`. Matches may span adjacent PDF.js
-text items but not page boundaries. A queried `getOutline()` result includes matching items and
-their ancestors to preserve hierarchy.
-
-Document search, search highlighting, generated/custom outline filtering, `search()`, and
-filtered `getOutline()` use the same character comparison and substring helpers. Matching
-is case-insensitive by default. Diacritic modes are:
-
-- `"smart"`: an unaccented query matches accented or unaccented text, while an accented
-  query requires the same accent;
-- `"ignore"`: accents are folded on both query and document text; and
-- `"respect"`: accents must match after NFC normalization.
-
-`behavior.searchQueryOptions` supplies defaults for UI document search and public `search()`
-calls. `behavior.outlineFilterOptions` supplies defaults for UI outline filtering and
-queried `getOutline()` calls. Both default to `{ caseSensitive: false, diacritics: "smart" }`.
-Public method options are partial overrides: an omitted field is inherited from the relevant
-stored default. These are query-time policies over retained original strings, so changing
-them between public calls never rebuilds the search index or outline.
-Outline `destinationStatus` is `"resolved"`, `"none"`, or `"unresolved"`, distinguishing
-usable targets from destinationless items and malformed or unsupported PDF destinations.
-`destination.pdfNamedDestination` preserves an explicit string destination from the PDF
-outline itself.
-`destination.navigationDestinationId` is separate and optional: it is inferred only when
-`shareableNamedDestinationPrefix` and `navigationState` configure persisted destination syncing and a
-prefix-matching PDF named destination is on the same page within
-`behavior.destinationMatchTolerance`. The ID has the configured prefix removed. A named
-destination elsewhere in the document, or one farther away on the same page, is not assigned.
-Generated outline navigation uses this same inferred ID, so API results and URL/hash state do
-not disagree about a selected outline spot.
-
-Named-destination navigation requires `viewer.state.status === "ready"` and otherwise
-returns a structured `not-ready` result. It does not operate on a document that is still
-loading, failed, closed, or being replaced. `zoomTo()` rejects non-finite scales, while
-`zoomBy()` rejects non-finite or non-positive factors with `RangeError`; valid values are
-clamped to the configured zoom range. Committed scales are normalized to six decimal places;
-transient pinch, wheel, and slider feedback remains continuous until commit.
 
 ## Behavior and features
 

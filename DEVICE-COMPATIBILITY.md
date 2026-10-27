@@ -7,13 +7,14 @@ Native printing consumes the `nativePrintSupport` field:
 
 | Value                      | Controlled native behavior                                                                                       |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `"unsupported"`            | Use browser-source fallback.                                                                                     |
+| `"unsupported"`            | No controlled native printing; browser-source fallback is conditional (see below).                               |
 | `"portrait"`               | Permit every layout, rotating complete logical landscape sheets counterclockwise into portrait native transport. |
 | `"portrait-and-landscape"` | Permit every layout and pass either logical sheet orientation to native transport directly.                      |
 
 This policy never bypasses mechanical requirements. Constructed CSS stylesheets, PDF print
 permission, canvas limits, memory limits, PDF.js rendering, and `window.print()` must still work.
-Browser-source printing remains available when controlled native printing is unsupported.
+When controlled native printing is unsupported, browser-source printing depends on the viewer's
+print configuration and source-output availability, including any required host provider.
 Hosts that must not expose the source route can set native-mode `browserFallback: false`; this is an
 application distribution policy rather than a compatibility decision or DRM boundary.
 
@@ -60,8 +61,8 @@ additionally send landscape media directly. WebKit remains unsupported by defaul
 browser-source fallback when the viewer's print configuration permits it.
 
 Apple mobile devices are explicitly excluded from controlled native printing for every recognized
-browser compatibility family and therefore use browser-source fallback. Unknown browser compatibility
-families also use source fallback because no engine rule matches them.
+browser compatibility family. Unknown browser compatibility families are also unsupported because no
+engine rule matches them. Both may use browser-source fallback subject to the conditions above.
 
 Recognized Android and other non-Apple mobile environments retain portrait native transport unless a
 more specific package or host rule says otherwise. Logical landscape sheets on those platforms are
@@ -190,7 +191,7 @@ Fullscreen API stubs remain the primary command and lifecycle regression coverag
 | Android Firefox             | Portrait single and counterclockwise-rotated A4 landscape spread | Native media remains portrait; physical size, orientation, guidance, parity, and clipping are correct. |
 | Android Chrome and Firefox  | Changed AcroForm and pure-XFA values                             | Controlled output contains current values and contained layout.                                        |
 
-Automated prepared-DOM checks and print preview are valuable regressions tests but do not establish
+Automated prepared-DOM checks and print preview are valuable regression tests but do not establish
 physical-output correctness by themselves.
 
 ## Evidence Record Template

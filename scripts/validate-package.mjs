@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2022-2026 Lari Natri <lari.natri@iki.fi>
 // SPDX-License-Identifier: Apache-2.0
 
+// Validates package metadata, source boundaries, and local documentation links before packing.
+
 import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -458,10 +460,57 @@ try {
   // The required-file errors above report absent stylesheet sources.
 }
 
+// Ignore examples when resolving links and GitHub-style heading anchors.
+const documentationFiles = [
+  "README.md",
+  "USAGE.md",
+  "CUSTOMIZATION.md",
+  "ARCHITECTURE.md",
+  "DEVICE-COMPATIBILITY.md",
+  "CHANGELOG.md",
+  "assets/icons/README.md",
+];
+const documentation = new Map();
+for (const file of documentationFiles) {
+  const content = (await readFile(resolve(packageDir, file), "utf8")).replace(
+    /^```[^\n]*\n[\s\S]*?^```\s*$/gm,
+    "",
+  );
+  const anchors = new Set();
+  for (const heading of content.matchAll(/^#{1,6}\s+(.+?)\s*#*$/gm)) {
+    const base = heading[1]
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\p{M}_\-\s]/gu, "")
+      .replace(/\s/g, "-");
+    let anchor = base;
+    for (let suffix = 1; anchors.has(anchor); suffix++) anchor = `${base}-${suffix}`;
+    anchors.add(anchor);
+  }
+  documentation.set(resolve(packageDir, file), { content, anchors });
+}
+for (const [file, { content }] of documentation) {
+  const links = [
+    ...Array.from(content.matchAll(/\[[^\]\n]*\]\(([^\s)]+)\)/g), match => match[1]),
+    ...Array.from(content.matchAll(/\b(?:src|href)="([^"\s]+)"/g), match => match[1]),
+  ];
+  for (const link of links) {
+    if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(link)) continue;
+    const [target, fragment] = link.split("#");
+    const destination = target ? resolve(dirname(file), decodeURIComponent(target)) : file;
+    await expectFile(destination, `Documentation link from ${file}`);
+    if (fragment && documentation.has(destination)) {
+      expect(
+        documentation.get(destination).anchors.has(decodeURIComponent(fragment)),
+        `Documentation heading link is missing in ${file}: ${link}`,
+      );
+    }
+  }
+}
+
 if (errors.length) {
   console.error("Package validation failed:");
   for (const error of errors) console.error(`- ${error}`);
   process.exitCode = 1;
 } else {
-  console.log("Package metadata and source entry points are valid.");
+  console.log("Package metadata, source entry points, and local documentation links are valid.");
 }

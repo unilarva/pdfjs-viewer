@@ -1638,39 +1638,12 @@ print-owner construction may retain diagnostics, but the production facade expos
 option or release method.
 
 The public pure `device-compatibility.ts` boundary owns generic browser/device classification and
-immutable compatibility rules. `PdfjsViewerBrowserCompatibilityEngine` classifies recognized browser
-compatibility families as `chromium`, `firefox`, or `webkit`; this is a policy abstraction rather
-than proof of the literal runtime engine executing the page. Chrome, Edge, and Chromium belong to the
-`chromium` compatibility family, Firefox to `firefox`, and Safari to `webkit`. This distinction is
-intentional on platforms where browser branding and the underlying runtime engine need not coincide.
-
-Device classification separately exposes browser identity, compatibility engine, platform, and
-operating-system family. Platforms are `desktop`, `android`, `apple-mobile`, and `other-mobile`;
-operating-system families are `linux`, `windows`, `macos`, `android`, `ios`, and `other`.
-`apple-mobile` is the Apple mobile platform family and pairs coherently with the `ios`
-operating-system family. Classification recognizes conventional iPhone, iPad, and iPod user agents
-and Macintosh-style iPadOS user agents carrying a `Mobile/<build>` token. An explicit environment
-classification of `android` or `ios` also selects the corresponding `android` or `apple-mobile`
-platform. Other detected mobile environments remain `other-mobile`.
-
-Every compatibility rule requires a recognized compatibility engine and may refine it by browser,
-platform, and operating system. Host rules replace package rules with the same selector set; all
-other records are merged. Specificity is deterministic selector containment, never declaration
-order: one matching rule overrides another only when it contains every selector of the broader rule
-and adds at least one. Independent overlapping refinements with different `nativePrintSupport`
-require an explicit intersection rule and otherwise fail constructor normalization. Duplicate selector
-sets, invalid browser/compatibility-engine combinations, and incoherent mobile platform/OS pairs such
-as `android`/`ios` or `apple-mobile`/`android` are rejected during normalization. This keeps
-compatibility policy deterministic while allowing later compatibility fields to reuse the same
-generic record model without coupling classification to print routing.
-
-The package compatibility baseline grants `portrait` controlled native printing to recognized
-Chromium and Firefox compatibility families, then refines their desktop environments to
-`portrait-and-landscape`. WebKit is conservatively `unsupported` by default. Apple mobile platforms
-are explicitly `unsupported` for all recognized compatibility families, and unknown compatibility
-engines also remain unsupported because no engine rule matches them. Recognized Android and other
-non-Apple mobile Chromium/Firefox environments therefore retain portrait native transport unless a
-narrower package or host rule overrides the baseline.
+immutable compatibility rules, independently of print routing. The device guide defines the
+[classification dimensions and policy semantics](DEVICE-COMPATIBILITY.md#policy-layers),
+[package print defaults](DEVICE-COMPATIBILITY.md#default-records), and
+[deterministic selector matching and host-rule normalization](DEVICE-COMPATIBILITY.md#deterministic-matching).
+The generic record model keeps compatibility policy deterministic without coupling classification
+to print routing.
 
 `PdfjsViewerNativePrintCapabilities` combines the resolved `unsupported`, `portrait`, or `portrait-and-landscape`
 policy with constructed-CSSOM checks, but owns no lifetime. Unknown compatibility engines, no matching
@@ -1937,8 +1910,8 @@ documented in `DEVICE-COMPATIBILITY.md`; unmatched classes use source fallback w
 
 ### Standalone Publication And CI
 
-This directory is designed to become the standalone repository root. Publication metadata and
-links target that standalone project. `.github/workflows/ci.yml` and `.gitlab-ci.yml` are
+This is the standalone public package repository. Publication metadata and links target
+this project. `.github/workflows/ci.yml` and `.gitlab-ci.yml` are
 parallel standalone CI definitions with equivalent logical gates; syntax, caches, scheduling, and
 artifact presentation are platform-specific. Both use the official Playwright image for all
 browser gates, including desktop and mobile Chromium, Firefox, and direct WebKit execution.
@@ -2078,6 +2051,13 @@ To deliberately expose it on a development LAN, set an explicit host such as
 under `examples/` includes both the minimal default integration and the interactive
 URL-loading demo.
 
+README previews use the generated `sample.pdf` and the unmodified default theme. When
+refreshing them, capture only the viewer element after visible pages finish rendering;
+never use private documents. Keep the image filenames and captions versioned, and state
+the browser and viewport context rather than implying physical-device qualification.
+The PNGs under `assets/screenshots/` are repository-only documentation assets, served from GitHub in
+the README and intentionally excluded from the npm tarball.
+
 For exploratory PDF.js compatibility and device-print testing, select native mode and, when needed,
 opt into an unqualified PDF.js version. To force the public compatibility policy to portrait-only
 or portrait-and-landscape native transport on every recognized engine, set
@@ -2132,7 +2112,8 @@ size, or host-shape assertions would be brittle
 and would reward superficial compliance rather than sound ownership.
 
 `npm run validate` is the complete source gate: formatting, the aggregate environment-scoped
-typecheck, unit execution, architecture guardrails, and package metadata validation. Built-output
+typecheck, unit execution, architecture guardrails, package metadata, and local documentation
+file/heading-link validation. Built-output
 and installed-consumer qualification remain in `validate:dist` because they require the emitted
 artifact. CI and release workflows call these aggregate gates rather than duplicating their
 individual commands.
