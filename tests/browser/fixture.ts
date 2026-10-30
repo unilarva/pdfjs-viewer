@@ -145,7 +145,7 @@ declare global {
       probeSidebarBehavior(mode: "overlay" | "persistent"): Promise<boolean>;
       addSidebarLayoutFallbackViewer(): PdfjsViewer;
       probeInvalidConstructorOptions(): Record<string, boolean>;
-      probeUiDiscoveryContracts(): Promise<Record<string, boolean>>;
+      probeUiDiscoveryContracts(variant?: "default" | "custom"): Promise<Record<string, boolean>>;
       probeNavigationHistoryBindingOwnership(): Record<string, boolean>;
       probeDeferredInitialLoad(): Promise<Record<string, boolean | number | string | null>>;
       probeSourceDescriptors(): Promise<Record<string, string | null>>;
@@ -5085,7 +5085,7 @@ window.fixture = {
       host.remove();
     }
   },
-  async probeUiDiscoveryContracts() {
+  async probeUiDiscoveryContracts(variant: "default" | "custom" = "default") {
     const root = document.createElement("section");
     const container = document.createElement("div");
     container.className = "pdf-container";
@@ -5149,9 +5149,18 @@ window.fixture = {
       discoverViewerUi(ignoredPrintRoot, {}, PDFJS_VIEWER_UI_HOOKS, false).printSetup.dialog ===
       null;
 
-    const printRoot = createPdfjsViewerUi({ id: "discovery-print" });
+    const printRoot = createPdfjsViewerUi({ id: "discovery-print", variant });
     root.append(printRoot);
-    const print = discoverViewerUi(printRoot, {}, PDFJS_VIEWER_UI_HOOKS).printSetup;
+    const discovered = discoverViewerUi(printRoot, {}, PDFJS_VIEWER_UI_HOOKS);
+    const print = discovered.printSetup;
+    const cornerBindingsPreserved =
+      discovered.menu.close === printRoot.querySelector(".pdf-menu-close-btn") &&
+      print.close === printRoot.querySelector(".pdf-print-close") &&
+      print.close!.form === print.form &&
+      print.submit!.form === print.form &&
+      print.form!.method === "dialog" &&
+      printRoot.querySelectorAll(".pdf-close-rail > button").length === 3 &&
+      printRoot.querySelectorAll(".pdf-close-placeholder:not([aria-hidden='true'])").length === 0;
     const custom = print.customSheet!;
     custom.append(print.customSheetUnit!, print.customSheetHeight!, print.customSheetWidth!);
     const action = printRoot.querySelector<HTMLButtonElement>(".pdf-print-btn")!;
@@ -5250,6 +5259,7 @@ window.fixture = {
       wrongTypeRejected,
       directWins,
       ignoredPrintSchema,
+      cornerBindingsPreserved,
       mappingPreserved,
       schemaMissingRejected,
       formContainmentRejected,

@@ -182,9 +182,33 @@
     backdrop-filter: blur(2px);
   }
   .pdf-default-ui .pdf-print-setup form {
-    display: grid;
-    gap: var(--pdf-ui-space-xl);
     padding: var(--pdf-ui-space-xl);
+  }
+  /* Overlay siblings share the full content height, not a short header's bounds. */
+  .pdf-default-ui .pdf-close-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pdf-default-ui .pdf-close-layout > * {
+    grid-area: 1 / 1;
+    min-width: 0;
+  }
+  .pdf-default-ui .pdf-close-content {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--pdf-ui-space-xl);
+  }
+  .pdf-default-ui .pdf-close-rail {
+    position: sticky;
+    inset-block-start: var(--pdf-ui-space-xl);
+    align-self: start;
+    justify-self: end;
+    z-index: 1;
+    pointer-events: none;
+  }
+  .pdf-default-ui .pdf-close-rail > .pdf-ui-button {
+    pointer-events: auto;
+    box-shadow: 0 1px 4px var(--pdf-ui-color-shadow);
   }
   .pdf-default-ui .pdf-print-setup h2 {
     margin: 0;
@@ -192,8 +216,14 @@
   .pdf-default-ui .pdf-print-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
+  }
+  .pdf-default-ui :is(.pdf-print-header, .pdf-document-information-header) h2 {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .pdf-default-ui :is(.pdf-print-header, .pdf-document-information-header) .pdf-close-placeholder {
+    margin-inline-start: 0.75rem;
   }
   .pdf-default-ui .pdf-print-basic {
     display: grid;
@@ -334,15 +364,11 @@
     overflow: auto;
   }
   .pdf-default-ui .pdf-document-information-dialog {
-    display: grid;
-    gap: var(--pdf-ui-space-xl);
     padding: var(--pdf-ui-space-xl);
   }
   .pdf-default-ui .pdf-document-information-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
     padding-bottom: var(--pdf-ui-space-lg);
     border-bottom: 1px solid var(--pdf-ui-color-border);
   }
@@ -372,7 +398,7 @@
   }
   .pdf-default-ui .pdf-document-information-actions {
     display: flex;
-    justify-content: flex-end;
+    justify-content: center;
     padding-top: var(--pdf-ui-space-lg);
     border-top: 1px solid var(--pdf-ui-color-border);
   }
@@ -429,7 +455,6 @@
   }
   .pdf-default-ui :is(.pdf-print-setup, .pdf-document-information) .pdf-ui-button {
     color: var(--pdf-ui-color-fg);
-    background: transparent;
   }
   .pdf-default-ui .pdf-document-information-accept {
     min-width: 5rem;
@@ -473,6 +498,12 @@
   .pdf-default-ui .pdf-controls-toolbar-end {
     justify-content: flex-end;
   }
+  /* Shared button surfaces keep overlapping controls opaque without special
+     close-button backgrounds or duplicating consumer button/radius overrides. */
+  .pdf-default-ui
+    :is(.pdf-menu-panel, .pdf-search-panel, .pdf-print-setup, .pdf-document-information) {
+    --pdf-ui-internal-button-bg: var(--pdf-ui-color-surface);
+  }
   .pdf-default-ui .pdf-ui-button {
     display: inline-flex;
     align-items: center;
@@ -483,7 +514,7 @@
     border: 1px solid var(--pdf-ui-color-button-border);
     border-radius: var(--pdf-ui-radius-md);
     color: inherit;
-    background: transparent;
+    background: var(--pdf-ui-internal-button-bg, transparent);
     font: inherit;
     cursor: pointer;
     text-decoration: none;
@@ -493,7 +524,9 @@
   }
   .pdf-default-ui .pdf-ui-button:active {
     color: var(--pdf-ui-color-button-active);
-    background: var(--pdf-ui-color-button-hover-bg);
+    background:
+      linear-gradient(var(--pdf-ui-color-button-hover-bg), var(--pdf-ui-color-button-hover-bg)),
+      var(--pdf-ui-internal-button-bg, transparent);
   }
   .pdf-default-ui .pdf-ui-button:disabled,
   .pdf-default-ui .pdf-ui-button[aria-disabled="true"] {
@@ -503,7 +536,7 @@
   .pdf-default-ui .pdf-ui-button:disabled:active,
   .pdf-default-ui .pdf-ui-button[aria-disabled="true"]:active {
     color: inherit;
-    background: transparent;
+    background: var(--pdf-ui-internal-button-bg, transparent);
   }
   .pdf-default-ui .pdf-ui-button[aria-expanded="true"] {
     color: var(--pdf-ui-color-accent-fg);
@@ -516,6 +549,18 @@
   .pdf-default-ui .pdf-icon-button {
     width: var(--pdf-ui-control-size);
     padding: var(--pdf-ui-icon-button-padding);
+  }
+  /* The real corner control and inert reservations use the same intrinsic icon,
+     padding and border sizing, including multi-value consumer padding. */
+  .pdf-default-ui :is(.pdf-close-rail > .pdf-icon-button, .pdf-close-placeholder) {
+    box-sizing: border-box;
+    width: auto;
+    min-width: var(--pdf-ui-control-size);
+    flex: 0 0 auto;
+  }
+  .pdf-default-ui .pdf-close-placeholder {
+    visibility: hidden;
+    pointer-events: none;
   }
   .pdf-default-ui .pdf-ui-icon {
     display: inline-block;
@@ -614,9 +659,6 @@
   }
 
   @media (hover: hover) {
-    .pdf-default-ui :is(.pdf-print-setup, .pdf-document-information) .pdf-ui-button:hover {
-      background: var(--pdf-ui-color-button-hover-bg);
-    }
     .pdf-default-ui .pdf-print-setup .pdf-print-submit:hover {
       background: color-mix(in srgb, var(--pdf-ui-color-accent) 82%, var(--pdf-ui-color-fg));
     }
@@ -735,15 +777,24 @@
     margin-inline: auto;
   }
   .pdf-default-ui .pdf-menu-panel {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--pdf-ui-space-lg);
+    display: block;
     min-height: 0;
     /* The percentage is the controls height; leave a gap above and below the menu. */
     max-block-size: calc(100cqh - 100% - var(--pdf-ui-space-lg) - var(--pdf-ui-space-lg));
     overflow: auto;
     overscroll-behavior: contain;
+    padding: 0;
+  }
+  .pdf-default-ui .pdf-menu-panel > .pdf-close-layout {
     padding: var(--pdf-ui-space-lg);
+  }
+  .pdf-default-ui .pdf-menu-panel .pdf-close-content {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--pdf-ui-space-lg);
+  }
+  .pdf-default-ui .pdf-menu-panel .pdf-close-rail {
+    inset-block-start: var(--pdf-ui-space-lg);
+    justify-self: start;
   }
   .pdf-default-ui .pdf-menu-panel fieldset {
     grid-column: 1 / -1;
@@ -1413,7 +1464,7 @@
     }
   }
   @container pdfjs-viewer (max-width: 18rem) {
-    .pdf-default-ui .pdf-menu-panel {
+    .pdf-default-ui .pdf-menu-panel .pdf-close-content {
       grid-template-columns: minmax(0, 1fr);
     }
   }
@@ -1450,7 +1501,9 @@
   }
   @media (hover: hover) {
     .pdf-default-ui .pdf-ui-button:hover {
-      background: var(--pdf-ui-color-button-hover-bg);
+      background:
+        linear-gradient(var(--pdf-ui-color-button-hover-bg), var(--pdf-ui-color-button-hover-bg)),
+        var(--pdf-ui-internal-button-bg, transparent);
     }
     .pdf-default-ui
       .pdf-sidebar
@@ -1467,7 +1520,7 @@
     }
     .pdf-default-ui .pdf-ui-button:disabled:hover,
     .pdf-default-ui .pdf-ui-button[aria-disabled="true"]:hover {
-      background: transparent;
+      background: var(--pdf-ui-internal-button-bg, transparent);
     }
   }
   @media (prefers-reduced-motion: reduce) {

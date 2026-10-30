@@ -2024,6 +2024,362 @@ for (const { width, height, extensionHeight } of [
   });
 }
 
+for (const colorScheme of ["light", "dark"] as const) {
+  test(`shared button surfaces keep disabled hover and active untinted ${colorScheme}`, async ({
+    page,
+  }) => {
+    await page.emulateMedia({ colorScheme });
+    await page.evaluate(() => {
+      const host = document.createElement("section");
+      host.id = "surface-probe";
+      host.className = "pdf-default-ui";
+      host.style.cssText = "position: fixed; inset: 0; z-index: 10000; background: white";
+      for (const name of [
+        "pdf-menu-panel",
+        "pdf-search-panel",
+        "pdf-print-setup",
+        "pdf-document-information",
+        "pdf-controls-toolbar",
+      ]) {
+        const surface = document.createElement("div");
+        surface.className = name;
+        surface.setAttribute("open", "");
+        surface.style.cssText =
+          "display: block; position: static; padding: 8px; margin: 0; max-height: none; transform: none";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "pdf-ui-button";
+        button.textContent = "Ordinary button";
+        surface.append(button);
+        host.append(surface);
+      }
+      const boundary = document.createElement("section");
+      boundary.setAttribute("data-pdfjs-viewer-root", "");
+      boundary.append(host);
+      document.body.append(boundary);
+    });
+    for (const name of [
+      "pdf-menu-panel",
+      "pdf-search-panel",
+      "pdf-print-setup",
+      "pdf-document-information",
+      "pdf-controls-toolbar",
+    ]) {
+      const button = page.locator(`#surface-probe .${name} > button`);
+      const base = await button.evaluate(button => getComputedStyle(button).backgroundColor);
+      if (name === "pdf-controls-toolbar") expect(base).toBe("rgba(0, 0, 0, 0)");
+      else expect(base).not.toBe("rgba(0, 0, 0, 0)");
+      await button.hover();
+      await expect(button).toHaveCSS("background-color", base);
+      await expect(button).not.toHaveCSS("background-image", "none");
+      for (const attribute of ["aria-disabled", "disabled"]) {
+        await button.evaluate(
+          (button, attribute) => button.setAttribute(attribute, "true"),
+          attribute,
+        );
+        await expect(button).toHaveCSS("background-color", base);
+        await expect(button).toHaveCSS("background-image", "none");
+        await page.mouse.down();
+        await expect(button).toHaveCSS("background-color", base);
+        await expect(button).toHaveCSS("background-image", "none");
+        await page.mouse.up();
+        await button.evaluate((button, attribute) => button.removeAttribute(attribute), attribute);
+      }
+      await page.mouse.move(0, 0);
+    }
+  });
+}
+
+for (const surface of ["menu", "print", "information"] as const) {
+  for (const direction of ["ltr", "rtl"] as const) {
+    test(`corner intrinsic footprint ${surface} ${direction} narrow wrapping and tap @mobile`, async ({
+      page,
+      hasTouch,
+    }) => {
+      await page.setViewportSize({ width: 390, height: 700 });
+      const root = page.locator("#primary .pdf-default-ui");
+      await root.evaluate((root, direction) => root.setAttribute("dir", direction), direction);
+      const activate = async (selector: string) => {
+        if (hasTouch) await root.locator(selector).tap();
+        else await root.locator(selector).click();
+      };
+      await activate(".pdf-menu-toggle-btn");
+      if (surface !== "menu")
+        await activate(surface === "print" ? ".pdf-print-btn" : ".pdf-document-information-btn");
+      const panel = root.locator(
+        surface === "menu"
+          ? ".pdf-menu-panel"
+          : surface === "print"
+            ? ".pdf-print-setup"
+            : ".pdf-document-information",
+      );
+      await expect(panel).toBeVisible();
+      await panel.evaluate(async panel => {
+        await Promise.all(panel.getAnimations().map(animation => animation.finished));
+      });
+      if (surface === "menu")
+        await panel.evaluate(panel => {
+          (panel as HTMLElement).style.inlineSize = "180px";
+        });
+      // Cover both the reported font-only failure and asymmetric four-value padding.
+      for (const padding of ["0.2rem", "11px 17px 19px 13px"]) {
+        await root.evaluate((root, padding) => {
+          const style = (root as HTMLElement).style;
+          style.setProperty("--pdf-ui-font-size", "32px");
+          style.setProperty("--pdf-ui-control-size", "2rem");
+          style.setProperty("--pdf-ui-icon-button-padding", padding);
+          style.setProperty("--pdf-ui-radius-md", "0px");
+        }, padding);
+        const geometry = await panel.evaluate(panel => {
+          const close = panel.querySelector(".pdf-close-rail > button")!.getBoundingClientRect();
+          const placeholder = panel
+            .querySelector(".pdf-close-placeholder")!
+            .getBoundingClientRect();
+          const icon = panel.querySelector(".pdf-close-rail .pdf-ui-icon")!.getBoundingClientRect();
+          const overlaps = [
+            ...panel.querySelectorAll(
+              ".pdf-close-content button, .pdf-close-content a, .pdf-close-content h2",
+            ),
+          ]
+            .filter(element => {
+              const box = element.getBoundingClientRect();
+              return (
+                box.width > 0 &&
+                box.height > 0 &&
+                box.left < close.right - 0.5 &&
+                box.right > close.left + 0.5 &&
+                box.top < close.bottom - 0.5 &&
+                box.bottom > close.top + 0.5
+              );
+            })
+            .map(element => element.className);
+          return {
+            close: { width: close.width, height: close.height },
+            placeholder: { width: placeholder.width, height: placeholder.height },
+            iconFits:
+              icon.left >= close.left &&
+              icon.right <= close.right &&
+              icon.top >= close.top &&
+              icon.bottom <= close.bottom,
+            overlaps,
+          };
+        });
+        expect(geometry.close.height).toBeGreaterThan(32);
+        expect(geometry.placeholder.width).toBeCloseTo(geometry.close.width, 1);
+        expect(geometry.placeholder.height).toBeCloseTo(geometry.close.height, 1);
+        expect(geometry.iconFits).toBe(true);
+        expect(geometry.overlaps).toEqual([]);
+      }
+      await panel.locator(".pdf-close-content").evaluate(content => {
+        const tall = document.createElement("div");
+        tall.style.height = "1800px";
+        tall.style.gridColumn = "1 / -1";
+        content.append(tall);
+      });
+      await panel.evaluate(panel => {
+        panel.scrollTop = panel.scrollHeight;
+      });
+      const close = panel.locator(".pdf-close-rail > button");
+      // High-DPR WebKit rounds fractional icon bounds in intersection reports.
+      await expect(close).toBeInViewport({ ratio: 0.999 });
+      if (hasTouch) await close.tap();
+      else await close.click();
+      await expect(panel).toBeHidden();
+    });
+  }
+}
+
+// Exercise real scrolling without focusing close, which could hide a broken sticky layout.
+for (const surface of ["menu", "print", "information"] as const) {
+  for (const direction of ["ltr", "rtl"] as const) {
+    test(`sticky corner close ${surface} ${direction} keeps its full scroll range and treatment`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: direction === "rtl" ? 390 : 1000, height: 700 });
+      await page.emulateMedia({
+        reducedMotion: "no-preference",
+        colorScheme: direction === "rtl" ? "dark" : "light",
+      });
+      const root = page.locator("#primary");
+      await root
+        .locator(".pdf-default-ui")
+        .evaluate((root, direction) => root.setAttribute("dir", direction), direction);
+      await root.locator(".pdf-menu-toggle-btn").click();
+      if (surface !== "menu") {
+        await root
+          .locator(surface === "print" ? ".pdf-print-btn" : ".pdf-document-information-btn")
+          .click();
+      }
+      const panel = root.locator(
+        surface === "menu"
+          ? ".pdf-menu-panel"
+          : surface === "print"
+            ? ".pdf-print-setup"
+            : ".pdf-document-information",
+      );
+      await expect(panel).toBeVisible();
+      await panel.evaluate(async panel => {
+        await Promise.all(panel.getAnimations().map(animation => animation.finished));
+      });
+      if (surface === "menu" && direction === "rtl")
+        await panel.evaluate(panel => {
+          (panel as HTMLElement).style.inlineSize = "180px";
+        });
+      await panel.locator(".pdf-close-content").evaluate(content => {
+        const tall = document.createElement("div");
+        tall.style.height = "1800px";
+        tall.style.gridColumn = "1 / -1";
+        tall.textContent = "Long content for scroll-range coverage";
+        content.append(tall);
+      });
+      const close = panel.locator(".pdf-close-rail > button");
+      expect(
+        await close.evaluate(
+          button =>
+            button ===
+            button
+              .closest(".pdf-menu-panel, dialog")!
+              .querySelector("button, input, select, summary, a[href]"),
+        ),
+      ).toBe(true);
+      if (surface === "print") {
+        expect(await close.evaluate(button => (button as HTMLButtonElement).form?.method)).toBe(
+          "dialog",
+        );
+      }
+      if (surface === "information") {
+        expect(
+          await panel.evaluate(panel => {
+            const button = panel
+              .querySelector(".pdf-document-information-accept")!
+              .getBoundingClientRect();
+            const dialog = panel.getBoundingClientRect();
+            return Math.abs(
+              button.left +
+                button.width / 2 -
+                dialog.left -
+                panel.clientLeft -
+                panel.clientWidth / 2,
+            );
+          }),
+        ).toBeLessThan(1);
+      }
+      const decoration = () =>
+        close.evaluate(button => {
+          const style = getComputedStyle(button);
+          return {
+            opacity: style.opacity,
+            background: style.backgroundColor,
+            transform: style.transform,
+            blur: style.backdropFilter,
+            shadow: style.boxShadow,
+          };
+        });
+      await page.mouse.move(0, 0);
+      await panel.evaluate(panel => {
+        panel.scrollTop = 0;
+      });
+      const originalDecoration = await decoration();
+      expect(originalDecoration.shadow).not.toBe("none");
+      expect(originalDecoration.opacity).toBe("1");
+      expect(originalDecoration.blur).toBe("none");
+      expect(originalDecoration.transform).toBe("none");
+      expect(
+        await close.evaluate(button => {
+          const bounds = button.getBoundingClientRect();
+          return [
+            ...button
+              .closest(".pdf-menu-panel, dialog")!
+              .querySelectorAll(
+                ".pdf-close-content button, .pdf-close-content a, .pdf-close-content h2",
+              ),
+          ]
+            .filter(element => {
+              const rect = element.getBoundingClientRect();
+              return (
+                rect.width > 0 &&
+                rect.height > 0 &&
+                rect.left < bounds.right - 0.5 &&
+                rect.right > bounds.left + 0.5 &&
+                rect.top < bounds.bottom - 0.5 &&
+                rect.bottom > bounds.top + 0.5
+              );
+            })
+            .map(element => element.className);
+        }),
+      ).toEqual([]);
+      const initialTop = await close.evaluate(
+        button =>
+          button.getBoundingClientRect().top -
+          button.closest(".pdf-menu-panel, dialog")!.getBoundingClientRect().top,
+      );
+      for (const fraction of [0.5, 1, 0]) {
+        await panel.evaluate((panel, fraction) => {
+          panel.scrollTop = (panel.scrollHeight - panel.clientHeight) * fraction;
+        }, fraction);
+        await expect
+          .poll(() =>
+            panel.evaluate(
+              (panel, fraction) =>
+                Math.abs(panel.scrollTop - (panel.scrollHeight - panel.clientHeight) * fraction),
+              fraction,
+            ),
+          )
+          .toBeLessThan(1);
+        await expect(close).toBeInViewport({ ratio: 1 });
+        const bounds = await close.evaluate(button => {
+          const scroll = button.closest(".pdf-menu-panel, dialog")!;
+          const b = button.getBoundingClientRect();
+          const p = scroll.getBoundingClientRect();
+          return {
+            top: b.top - p.top,
+            bottom: p.bottom - b.bottom,
+            left: b.left - p.left,
+            right: p.right - b.right,
+          };
+        });
+        expect(bounds.top).toBeGreaterThanOrEqual(0);
+        expect(bounds.top).toBeCloseTo(initialTop, 0);
+        expect(bounds.bottom).toBeGreaterThanOrEqual(0);
+        expect(
+          (surface === "menu") === (direction === "ltr") ? bounds.left : bounds.right,
+        ).toBeLessThan(45);
+        expect(await decoration()).toEqual(originalDecoration);
+      }
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await panel.evaluate(panel => {
+        panel.scrollTop = panel.scrollHeight;
+      });
+      const before = await panel.evaluate(panel => panel.scrollTop);
+      expect(before).toBeGreaterThan(500);
+      expect(await decoration()).toEqual(originalDecoration);
+      await expect(close).toBeInViewport({ ratio: 1 });
+      const surfaceColor = await panel.evaluate(panel => getComputedStyle(panel).backgroundColor);
+      await expect(close).toHaveCSS("background-color", surfaceColor);
+      await expect(close.locator("..")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await root.locator(".pdf-default-ui").evaluate(root => {
+        (root as HTMLElement).style.setProperty("--pdf-ui-color-surface", "rgb(51, 68, 85)");
+      });
+      await expect(panel).toHaveCSS("background-color", "rgb(51, 68, 85)");
+      await expect(close).toHaveCSS("background-color", "rgb(51, 68, 85)");
+      await close.hover();
+      await expect(close).toHaveCSS("background-color", "rgb(51, 68, 85)");
+      await expect(close).not.toHaveCSS("background-image", "none");
+      await page.mouse.down();
+      await expect(close).toHaveCSS("background-color", "rgb(51, 68, 85)");
+      // A normal consumer button rule must also govern close, without a colored
+      // or rounded wrapper showing outside the customized button.
+      await page.addStyleTag({
+        content: "#primary .pdf-ui-button { background: rgb(91, 72, 53); border-radius: 0; }",
+      });
+      await expect(close).toHaveCSS("background-color", "rgb(91, 72, 53)");
+      await expect(close).toHaveCSS("border-radius", "0px");
+      await page.mouse.up();
+      await expect(panel).toBeHidden();
+    });
+  }
+}
+
 test("print conditional hidden state never reserves default dialog layout", async ({ page }) => {
   const range = page.locator("#primary .pdf-print-range-wrap");
   await expect(range).toHaveAttribute("hidden", "");
@@ -6278,20 +6634,25 @@ test("custom UI setup identifies the sole required document-container hook", asy
     .toContain("ui: 'custom' requires .pdf-container below rootEl or a uiBindings.container");
 });
 
-test("UI discovery enforces unique typed hooks and complete scoped print schemas", async ({
-  page,
-}) => {
-  await expect(page.evaluate(() => window.fixture.probeUiDiscoveryContracts())).resolves.toEqual({
-    duplicateRejected: true,
-    wrongTypeRejected: true,
-    directWins: true,
-    ignoredPrintSchema: true,
-    mappingPreserved: true,
-    schemaMissingRejected: true,
-    formContainmentRejected: true,
-    containmentRejected: true,
+for (const variant of ["default", "custom"] as const) {
+  test(`UI discovery ${variant} enforces unique typed hooks and complete scoped print schemas`, async ({
+    page,
+  }) => {
+    await expect(
+      page.evaluate(variant => window.fixture.probeUiDiscoveryContracts(variant), variant),
+    ).resolves.toEqual({
+      duplicateRejected: true,
+      wrongTypeRejected: true,
+      directWins: true,
+      ignoredPrintSchema: true,
+      cornerBindingsPreserved: true,
+      mappingPreserved: true,
+      schemaMissingRejected: true,
+      formContainmentRejected: true,
+      containmentRejected: true,
+    });
   });
-});
+}
 
 test("custom UI works with only a document container", async ({ page }) => {
   await expect(page.evaluate(() => window.fixture.probeMinimalCustomUi())).resolves.toEqual({

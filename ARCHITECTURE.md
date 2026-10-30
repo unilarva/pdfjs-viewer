@@ -455,6 +455,13 @@ The optional document-information action and dialog are controlled by
 information bindings or stable information-dialog hooks; they call the facade's detached metadata
 query and own markup, translation, formatting, and lifecycle. Generated UI therefore remains
 downstream of and optional to the metadata model and public API.
+Generated default and custom variants share `.pdf-close-layout` wrappers; the default theme
+alone styles them as grid overlays for menu and modal close buttons:
+the full-height `.pdf-close-content` and close-first `.pdf-close-rail` share one grid area.
+The rail is sticky within the complete content, not a short header, and its close button
+has a constant subtle shadow. Inert icon placeholders share the close button's intrinsic
+sizing to reserve its footprint in headers and wrapping menu actions. This is default-theme presentation,
+with no scroll listeners, runtime state, or changes to custom UI hook contracts.
 Document loading and first rendering use one optional native `.pdf-document-progress`
 element. Print preparation uses a separate native `.pdf-print-progress` element owned by
 `ViewerPrintSetup`; the two indicators share semantic markup but not lifecycle state.

@@ -16,6 +16,44 @@ import {
 import { PDFJS_VIEWER_UI_HOOKS } from "../../src/viewer-contracts.js";
 import { discoverViewerUi } from "../../src/viewer-ui-discovery.js";
 
+for (const variant of ["default", "custom"] as const) {
+  test(`corner close rails ${variant} precede full content and preserve dialog form semantics`, () => {
+    const html = renderPdfjsViewerUi({
+      id: "corners",
+      variant,
+      labels: { close: '<Close & "back">' },
+    });
+    assert.equal((html.match(/class="pdf-close-rail"/g) ?? []).length, 3);
+    for (const hook of [
+      "pdf-menu-close-btn",
+      "pdf-print-close",
+      "pdf-document-information-close",
+    ]) {
+      assert.match(
+        html,
+        new RegExp(
+          `<div class="pdf-close-rail"><button type="button" class="pdf-ui-button pdf-icon-button ${hook}" title="&lt;Close &amp; &quot;back&quot;&gt;" aria-label="&lt;Close &amp; &quot;back&quot;&gt;">.*?</button></div><div class="pdf-close-content">`,
+        ),
+      );
+    }
+    assert.match(
+      html,
+      /<form method="dialog" autocomplete="off" class="pdf-close-layout"><div class="pdf-close-rail">/,
+    );
+    assert.match(html, /type="submit" class="pdf-ui-button pdf-print-submit"/);
+    assert.doesNotMatch(html, /class="pdf-menu-primary-actions">[^]*?pdf-menu-close-btn/);
+    assert.equal(
+      (
+        html.match(
+          /class="pdf-ui-button pdf-icon-button pdf-close-placeholder" aria-hidden="true"/g,
+        ) ?? []
+      ).length,
+      3,
+    );
+    assert.doesNotMatch(html, /<(?:button|a)[^>]*pdf-close-placeholder/);
+  });
+}
+
 test("print More settings uses a reusable native disclosure with escaped text", () => {
   const html = renderPdfjsViewerUi({
     id: "print",

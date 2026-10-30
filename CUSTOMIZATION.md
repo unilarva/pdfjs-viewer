@@ -254,6 +254,10 @@ The default theme responds to the viewer element's own size through named contai
 embedding it in a narrow region works independently of the page viewport. Top-layer dialogs remain
 viewport-constrained. Custom UI integrations own their responsive control and sidebar layout.
 
+Default dialog and menu close buttons remain visible while scrolling. Menu, search, and dialog
+buttons use `--pdf-ui-color-surface` as their opaque base; standard button background and
+border-radius overrides apply to close buttons too.
+
 The viewer writes geometry variables such as `--pdf-page-scale`, `--scale-factor`,
 `--user-unit`, and `--total-scale-factor` on page wrappers. Consumers may read them for
 scale-aware decoration but must not assign or remove them.

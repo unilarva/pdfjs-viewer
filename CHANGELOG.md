@@ -4,6 +4,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Keep default dialog and menu close buttons visible while scrolling.
+
 ## 0.9.0
 
 - Added read-only display page replacements through `preparePageSource()` and
