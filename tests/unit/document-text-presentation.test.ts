@@ -538,56 +538,155 @@ test("failed text builder admission releases its font retain without leaving a r
   }
 });
 
-test("default TextLayer cancellation waits for upstream worker stream cancellation, not its early render rejection", async () => {
-  const dom = platform();
-  const container = new TextNode();
-  container.root = true;
-  const font = fonts();
-  const render = deferred();
-  const drain = deferred();
-  const cancelStarted = deferred();
-  const stream = new ReadableStream({
-    cancel() {
-      cancelStarted.resolve();
-      return drain.promise;
-    },
-  });
-  class RuntimeTextLayer {
-    readonly textDivs: HTMLSpanElement[] = [];
-    readonly textContentItemsStr: string[] = [];
-    readonly reader: ReadableStreamDefaultReader;
-    constructor(options: { textContentSource: ReadableStream }) {
-      this.reader = options.textContentSource.getReader();
+for (const ending of ["chunks-to-eof", "crossing-final-eof", "read-error"] as const) {
+  test(`default TextLayer cancellation drains admitted reads through ${ending} without raw cancellation`, async () => {
+    const dom = platform();
+    const container = new TextNode();
+    container.root = true;
+    const font = fonts();
+    const render = deferred();
+    const readsStarted = [deferred(), deferred(), deferred()];
+    let controller!: ReadableStreamDefaultController<unknown>;
+    let rawCancels = 0;
+    let reads = 0;
+    let inFlight = 0;
+    let peakReads = 0;
+    let lockReleases = 0;
+    let sourceReleases = 0;
+    let ended = false;
+    let settled = false;
+    const published: unknown[] = [];
+    const stream = new ReadableStream({
+      start(value) {
+        controller = value;
+      },
+    });
+    const rawReader = stream.getReader();
+    const reader = {
+      read() {
+        reads++;
+        inFlight++;
+        peakReads = Math.max(peakReads, inFlight);
+        readsStarted[reads - 1]?.resolve();
+        const promise = rawReader.read();
+        void promise.then(
+          () => inFlight--,
+          () => inFlight--,
+        );
+        return promise;
+      },
+      cancel() {
+        rawCancels++;
+        // Model the upstream lost-CANCEL-ACK race: this promise can never settle.
+        return new Promise<void>(() => {});
+      },
+      releaseLock() {
+        lockReleases++;
+        rawReader.releaseLock();
+      },
+    };
+    let task!: RuntimeTextLayer;
+    const cancellations: Promise<void>[] = [];
+    class RuntimeTextLayer {
+      readonly textDivs: HTMLSpanElement[] = [];
+      readonly textContentItemsStr: string[] = [];
+      readonly reader: ReadableStreamDefaultReader;
+      constructor(options: { textContentSource: ReadableStream }) {
+        task = this;
+        this.reader = options.textContentSource.getReader();
+      }
+      render() {
+        void this.reader
+          .read()
+          .then(chunk => {
+            if (!chunk.done) published.push(chunk.value);
+          })
+          .catch(() => {});
+        return render.promise;
+      }
+      cancel() {
+        cancellations.push(this.reader.cancel());
+        render.reject(new Error("TextLayer render revoked before physical EOF"));
+      }
     }
-    render() {
-      void this.reader.read().catch(() => {});
-      return render.promise;
-    }
-    cancel() {
-      void this.reader.cancel().catch(() => {});
-      render.reject(new Error("TextLayer render revoked before worker cancellation settles"));
-    }
-  }
-  const owner = new DocumentTextPresentation({
-    container: container as unknown as HTMLElement,
-    TextLayer: RuntimeTextLayer as never,
-  });
-  owner.setMode(true);
-  owner.setViewportPages([7]);
-  try {
+    const owner = new DocumentTextPresentation({
+      container: container as unknown as HTMLElement,
+      TextLayer: RuntimeTextLayer as never,
+    });
+    owner.setMode(true);
+    owner.setViewportPages([7]);
     const ctx = context(container, 7, source(font.owner));
-    const pending = owner.present({ ...ctx, page: { streamTextContent: () => stream } as never });
-    owner.invalidatePages(new Set([7]));
-    await cancelStarted.promise;
-    await Promise.resolve();
-    await Promise.resolve();
-    assert.equal(font.state.released, 0, "worker cancellation is still physically pending");
-    drain.resolve();
-    await pending;
-    assert.equal(font.state.released, 1);
-  } finally {
-    drain.resolve();
-    owner.destroy();
-    dom.restore();
-  }
-});
+    const pending = owner
+      .present({
+        ...ctx,
+        page: {
+          streamTextContent(params: unknown) {
+            assert.equal(params, PDFJS_TEXT_CONTENT_PARAMS);
+            return { getReader: () => reader };
+          },
+        } as never,
+      })
+      .finally(() => {
+        // Model the renderer's physical page use: release only after presentation settles.
+        sourceReleases++;
+        settled = true;
+      });
+    try {
+      await readsStarted[0].promise;
+      if (ending === "crossing-final-eof") {
+        // The worker finishes just before logical cancellation observes the final read.
+        controller.close();
+        ended = true;
+      }
+      owner.invalidatePages(new Set([7]));
+      task.cancel();
+      task.cancel();
+      assert.equal(rawCancels, 0);
+      assert.equal(sourceReleases, 0);
+      assert.equal(settled, false);
+      assert.equal(font.state.released, 0);
+      await assert.rejects(render.promise, /revoked before physical EOF/);
+      if (ending !== "crossing-final-eof") {
+        assert.equal(
+          sourceReleases,
+          0,
+          "display rejection cannot release a physically active page",
+        );
+        assert.equal(font.state.released, 0);
+      }
+      if (ending === "chunks-to-eof") {
+        controller.enqueue({ items: ["late chunk"], styles: {} });
+        await readsStarted[1].promise;
+        controller.enqueue({ items: ["another late chunk"], styles: {} });
+        await readsStarted[2].promise;
+        assert.equal(sourceReleases, 0, "discarded chunks are not physical EOF");
+        assert.equal(font.state.released, 0);
+        controller.close();
+        ended = true;
+      } else if (ending === "read-error") {
+        controller.error(new Error("upstream text extraction failed"));
+        ended = true;
+      }
+      await pending;
+      await Promise.all(cancellations);
+      assert.equal(rawCancels, 0);
+      assert.equal(peakReads, 1, "logical cancellations share one drain of the in-flight read");
+      if (ending === "chunks-to-eof")
+        assert.equal(reads, 3, "one drain consumes each late chunk and EOF");
+      assert.equal(lockReleases, 1);
+      assert.equal(stream.locked, false);
+      assert.equal(sourceReleases, 1);
+      assert.equal(font.state.released, 1);
+      assert.deepEqual(published, []);
+      assert.equal((ctx.lease.wrapper as unknown as TextNode).childNodes.length, 0);
+      owner.destroy();
+      assert.equal(font.state.released, 1);
+      assert.equal(sourceReleases, 1);
+    } finally {
+      if (!ended) controller.close();
+      owner.destroy();
+      await pending;
+      dom.restore();
+    }
+  });
+}

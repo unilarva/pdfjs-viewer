@@ -86,6 +86,7 @@
     "test:pack": "node ./scripts/test-pack-candidate.mjs",
     "test:browser": "node ./scripts/playwright-run.mjs --project=chromium --project=firefox",
     "test:browser:all": "node ./scripts/playwright-run.mjs",
+    "test:browser:qualified": "node ./scripts/test-pdfjs-browser-matrix.mjs",
     "test:browser:firefox": "node ./scripts/playwright-run.mjs --project=firefox",
     "test:browser:chromium": "node ./scripts/playwright-run.mjs --project=chromium",
     "test:browser:firefox:non-csp": "node ./scripts/playwright-run.mjs --project=firefox --grep-invert=@csp",
@@ -113,7 +114,7 @@
     "format:check": "prettier --check ."
   },
   "peerDependencies": {
-    "pdfjs-dist": "6.4.299"
+    "pdfjs-dist": "6.4.299 || 6.5.438"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
@@ -121,7 +122,7 @@
     "css-loader": "^7.1.5",
     "esbuild": "^0.28.2",
     "mini-css-extract-plugin": "^2.10.2",
-    "pdfjs-dist": "6.4.299",
+    "pdfjs-dist": "6.5.438",
     "postcss": "8.5.31",
     "postcss-selector-parser": "7.1.7",
     "prettier": "^3.9.10",

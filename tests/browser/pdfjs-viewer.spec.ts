@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2022-2026 Lari Natri <lari.natri@iki.fi>
 // SPDX-License-Identifier: Apache-2.0
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 const CSSOM_DPR_RATIO_EPSILON = 1e-5;
 
@@ -2884,6 +2884,81 @@ test("real AnnotationLayer keeps package classes and core geometry in headless U
   });
 });
 
+for (const rotation of [90, 180, 270]) {
+  for (const direction of ["ltr", "rtl"]) {
+    test(`NoRotate annotations preserve rect anchors and popup translations at ${rotation} degrees (${direction}) @mobile`, async ({
+      page,
+    }) => {
+      await page.evaluate(
+        async ({ rotation, direction }) => {
+          document.querySelector<HTMLElement>("#primary [data-pdfjs-viewer-root]")!.dir = direction;
+          const data = window.fixture.pageSources.makePdf({
+            labels: ["NoRotate annotations"],
+            rotation,
+            noRotateAnnotations: true,
+          });
+          await window.fixture.primary.load({ type: "data", data });
+        },
+        { rotation, direction },
+      );
+      const layer = page.locator("#primary .pdf-annotation-layer").first();
+      await expect(layer).toHaveAttribute("data-main-rotation", String(rotation));
+      const ordinary = layer.locator(".freeTextAnnotation.norotate");
+      const popup = layer.locator(".popupAnnotation.norotate");
+      await expect(ordinary).toHaveCount(1);
+      await expect(popup).toHaveCount(1);
+      await ordinary.focus();
+      await page.keyboard.press("Enter");
+      await expect(popup).toBeVisible();
+
+      const geometry = await layer.evaluate((element, rotation) => {
+        const ordinary = element.querySelector<HTMLElement>(".freeTextAnnotation.norotate")!;
+        const popup = element.querySelector<HTMLElement>(".popupAnnotation.norotate")!;
+        const ordinaryStyle = getComputedStyle(ordinary);
+        const popupStyle = getComputedStyle(popup);
+        const matrix = (value: DOMMatrix) => [value.a, value.b, value.c, value.d, value.e, value.f];
+        const counterRotation = new DOMMatrix().rotate(360 - rotation);
+        const width = parseFloat(popupStyle.width);
+        const height = parseFloat(popupStyle.height);
+        const popupExpected = counterRotation.translate(
+          rotation === 90 || rotation === 180 ? -width : 0,
+          rotation === 180 || rotation === 270 ? -height : 0,
+        );
+        // Independently map the PDF rect's top-left (200, 540) through /Rotate.
+        // The page is 612 x 792 PDF units; NoRotate keeps the 120 x 40 rect upright.
+        const page = element.parentElement!.getBoundingClientRect();
+        const scaleX = page.width / (rotation === 180 ? 612 : 792);
+        const scaleY = page.height / (rotation === 180 ? 792 : 612);
+        const [x, y] = rotation === 90 ? [540, 200] : rotation === 180 ? [412, 540] : [252, 412];
+        const rect = ordinary.getBoundingClientRect();
+        return {
+          direction: getComputedStyle(element).direction,
+          ordinary: matrix(new DOMMatrix(ordinaryStyle.transform)),
+          ordinaryExpected: matrix(counterRotation),
+          popup: matrix(new DOMMatrix(popupStyle.transform)),
+          popupExpected: matrix(popupExpected),
+          anchorDelta: [rect.x - (page.x + x * scaleX), rect.y - (page.y + y * scaleY)],
+          sizeDelta: [rect.width - 120 * scaleX, rect.height - 40 * scaleY],
+          size: [rect.width, rect.height, width, height],
+        };
+      }, rotation);
+      expect(geometry.direction).toBe(direction);
+      expect(geometry.size.every(value => value > 0)).toBe(true);
+      geometry.ordinary.forEach((value, index) =>
+        expect(value).toBeCloseTo(geometry.ordinaryExpected[index], 5),
+      );
+      geometry.popup.forEach((value, index) =>
+        expect(value).toBeCloseTo(geometry.popupExpected[index], 3),
+      );
+      // PDF.js rounds layer dimensions down to device pixels, unlike the fractional wrapper.
+      for (const value of [...geometry.anchorDelta, ...geometry.sizeDelta])
+        expect(Math.abs(value)).toBeLessThan(1);
+      await page.keyboard.press("Escape");
+      await expect(popup).toBeHidden();
+    });
+  }
+}
+
 test("rich read-only annotations enforce action policy, popup a11y, OCG, zoom, and attachment cleanup", async ({
   page,
 }) => {
@@ -3004,6 +3079,35 @@ test("rich read-only annotations enforce action policy, popup a11y, OCG, zoom, a
 test("AcroForms are viewer-isolated, stateful across virtualization, resettable, and exportable", async ({
   page,
 }) => {
+  const expectButtonAppearance = async (widget: Locator, checked: boolean) => {
+    await expect(widget.locator("input")).toBeChecked({ checked });
+    const mark = widget.locator('canvas[data-canvas-name="checked"]');
+    await expect(mark).toHaveCSS("display", checked ? "block" : "none");
+    expect(
+      await mark.evaluate((canvas: HTMLCanvasElement) => {
+        const context = canvas.getContext("2d")!;
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        const unchecked = canvas.parentElement!.querySelector<HTMLCanvasElement>(
+          'canvas[data-canvas-name="unchecked"]',
+        );
+        const offPixels = unchecked
+          ?.getContext("2d")!
+          .getImageData(0, 0, unchecked.width, unchecked.height).data;
+        // Appearance marks need not intersect a fixed crop. Compare complete state rasters;
+        // an omitted blank off-state is equivalent to a transparent bitmap.
+        return {
+          painted: pixels.some((value, index) => index % 4 === 3 && value > 0),
+          distinctFromUnchecked: pixels.some((value, index) => value !== (offPixels?.[index] ?? 0)),
+        };
+      }),
+    ).toEqual({ painted: true, distinctFromUnchecked: true });
+    // NeedAppearances may regenerate a blank unchecked state without any canvas.
+    // Every emitted off-state appearance must still switch with the live control.
+    const uncheckedDisplays = await widget
+      .locator('[data-canvas-name="unchecked"]')
+      .evaluateAll(canvases => canvases.map(canvas => getComputedStyle(canvas).display));
+    expect(uncheckedDisplays.every(display => display === (checked ? "none" : "block"))).toBe(true);
+  };
   await page.evaluate(() => window.fixture.addAcroFormViewers());
   const first = page.locator("#form-viewer-a");
   const second = page.locator("#form-viewer-b");
@@ -3023,17 +3127,10 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
   await expect(firstText).toHaveValue("Loaded");
   await expect(secondText).toHaveValue("Loaded");
   await expect(thirdText).toHaveValue("Loaded");
-  await expect(first.locator(".buttonWidgetAnnotation.checkBox input")).toBeChecked();
+  const checkboxWidget = first.locator(".buttonWidgetAnnotation.checkBox");
+  await expectButtonAppearance(checkboxWidget, true);
   const pageOneRadioWidget = first.locator(".buttonWidgetAnnotation.radioButton");
-  await expect(pageOneRadioWidget.locator("input")).toBeChecked();
-  await expect(pageOneRadioWidget.locator('[data-canvas-name="checked"]')).toHaveCSS(
-    "display",
-    "block",
-  );
-  await expect(pageOneRadioWidget.locator('[data-canvas-name="unchecked"]')).toHaveCSS(
-    "display",
-    "none",
-  );
+  await expectButtonAppearance(pageOneRadioWidget, true);
   const appearanceTextWidget = first.locator(".textWidgetAnnotation.hasOwnCanvas");
   await expect(appearanceTextWidget).toHaveCount(1);
   await expect(appearanceTextWidget.locator("input, textarea")).toBeHidden();
@@ -3130,6 +3227,7 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
   await expect(secondText).toHaveValue("Loaded");
 
   await first.locator(".buttonWidgetAnnotation.checkBox input").uncheck();
+  await expectButtonAppearance(checkboxWidget, false);
   await first.locator(".buttonWidgetAnnotation.radioButton input").first().check();
   await first.locator(".choiceWidgetAnnotation select").nth(0).selectOption("three");
   await first.locator(".choiceWidgetAnnotation select").nth(1).selectOption("beta");
@@ -3224,15 +3322,7 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
   const pageTwoButton = first.locator(
     '.pdf-page[data-page="2"] .buttonWidgetAnnotation.pushButton > a',
   );
-  await expect(pageTwoRadio).not.toBeChecked();
-  await expect(pageTwoRadioWidget.locator('[data-canvas-name="checked"]')).toHaveCSS(
-    "display",
-    "none",
-  );
-  await expect(pageTwoRadioWidget.locator('[data-canvas-name="unchecked"]')).toHaveCSS(
-    "display",
-    "block",
-  );
+  await expectButtonAppearance(pageTwoRadioWidget, false);
   await pageTwoRadio.evaluate((control: HTMLInputElement) => {
     control.disabled = true;
   });
@@ -3253,14 +3343,7 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
     .locator('.pdf-page[data-page="2"] .choiceWidgetAnnotation select')
     .selectOption(["green"]);
   await pageTwoRadio.check();
-  await expect(pageTwoRadioWidget.locator('[data-canvas-name="checked"]')).toHaveCSS(
-    "display",
-    "block",
-  );
-  await expect(pageTwoRadioWidget.locator('[data-canvas-name="unchecked"]')).toHaveCSS(
-    "display",
-    "none",
-  );
+  await expectButtonAppearance(pageTwoRadioWidget, true);
 
   const exports = await page.evaluate(async () => {
     const viewers = (window as Window & { formViewers?: { first: typeof window.fixture.primary } })
@@ -3278,6 +3361,8 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
       detached,
       secondCallerUnaffected: one.ok && two.ok && one.data[0] !== two.data[0],
       reopenedSharedText: reopened.sharedText,
+      reopenedCheckbox: reopened.agree,
+      reopenedRadio: reopened.choice,
       dirtyAfterExport: viewers.first.state.formDirty,
     };
   });
@@ -3290,6 +3375,8 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
     "Viewer A value",
   ]);
   expect(exports.dirtyAfterExport).toBe(true);
+  expect(exports.reopenedCheckbox).toEqual(["Off"]);
+  expect(exports.reopenedRadio.filter(value => value !== undefined)).toEqual(["B", "B"]);
 
   const saved = await page.evaluate(async () => {
     const viewers = (window as Window & { formViewers?: { first: typeof window.fixture.primary } })
@@ -3336,6 +3423,7 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
   await expect(
     first.locator('.pdf-page[data-page="2"] .buttonWidgetAnnotation.radioButton input'),
   ).not.toBeChecked();
+  await expectButtonAppearance(pageTwoRadioWidget, false);
   await expect(
     first.locator('.pdf-page[data-page="2"] .choiceWidgetAnnotation select'),
   ).toHaveValues(["red"]);
@@ -3345,9 +3433,14 @@ test("AcroForms are viewer-isolated, stateful across virtualization, resettable,
     viewers.first.navigateToPage(1);
   });
   await expect(first.locator(".buttonWidgetAnnotation.checkBox input")).toBeChecked();
+  await expectButtonAppearance(checkboxWidget, true);
   await expect(
     first.locator('.pdf-page[data-page="1"] .buttonWidgetAnnotation.radioButton input'),
   ).toBeChecked();
+  await expectButtonAppearance(
+    first.locator('.pdf-page[data-page="1"] .buttonWidgetAnnotation.radioButton'),
+    true,
+  );
   await expect(first.locator(".choiceWidgetAnnotation select").nth(0)).toHaveValue("two");
   await expect(first.locator(".choiceWidgetAnnotation select").nth(1)).toHaveValue("alpha");
   await first
@@ -5903,7 +5996,7 @@ test("rapid native selection changes coalesce to one geometry frame", async ({ p
     window.fixture.primary.zoomTo(0.25);
     window.fixture.primary.setTextSelectionMode(true);
   });
-  await expect(root.locator(".pdf-text-layer span").first()).toBeAttached();
+  await expect(root.locator(".pdf-text-layer .endOfContent").first()).toBeAttached();
   const result = await page.evaluate(async () => {
     const counters = { geometry: 0, replacements: 0 };
     const originalRects = Range.prototype.getClientRects;
@@ -5920,11 +6013,15 @@ test("rapid native selection changes coalesce to one geometry frame", async ({ p
     try {
       const node = document.querySelector("#primary .pdf-text-layer span")?.firstChild;
       if (!node) throw new Error("Missing selection coalescing node");
+      const selectionChanged = new Promise<void>(resolve =>
+        document.addEventListener("selectionchange", () => resolve(), { once: true }),
+      );
       for (let offset = 2; offset <= 12; offset++) {
         document
           .getSelection()
           ?.setBaseAndExtent(node, 1, node, Math.min(offset, node.textContent?.length ?? 0));
       }
+      await selectionChanged;
       await new Promise<void>(resolve =>
         requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
       );
@@ -5934,8 +6031,8 @@ test("rapid native selection changes coalesce to one geometry frame", async ({ p
       Element.prototype.replaceChildren = originalReplace;
     }
   });
-  expect(result.replacements).toBeLessThanOrEqual(1);
-  expect(result.geometry).toBeLessThanOrEqual(1);
+  expect(result.replacements).toBe(1);
+  expect(result.geometry).toBe(1);
 });
 
 test("selection redraw is limited to page-local partitions that changed", async ({ page }) => {
@@ -5945,7 +6042,7 @@ test("selection redraw is limited to page-local partitions that changed", async 
     window.fixture.primary.setTextSelectionMode(true);
   });
   await expect(
-    root.locator('.pdf-page[data-page="3"] .pdf-text-layer span').first(),
+    root.locator('.pdf-page[data-page="3"] .pdf-text-layer .endOfContent'),
   ).toBeAttached();
   await page.evaluate(() => {
     const first = document.querySelector(
@@ -5981,9 +6078,13 @@ test("selection redraw is limited to page-local partitions that changed", async 
       return originalReplace.apply(this, nodes);
     };
     try {
+      const selectionChanged = new Promise<void>(resolve =>
+        document.addEventListener("selectionchange", () => resolve(), { once: true }),
+      );
       document
         .getSelection()
         ?.setBaseAndExtent(first, 1, third, Math.min(14, third.textContent?.length ?? 0));
+      await selectionChanged;
       await new Promise<void>(resolve =>
         requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
       );
@@ -7715,7 +7816,11 @@ test.describe("@mobile mobile embedded viewer behavior", () => {
       .tap();
     await expect.poll(() => page.evaluate(() => window.fixture.primary.state.currentPage)).toBe(2);
 
-    await page.evaluate(() => window.fixture.primary.load("/acroform-fixture.pdf"));
+    await page.evaluate(() =>
+      window.fixture.primary.load("/acroform-fixture.pdf", {
+        documentOptions: { standardFontDataUrl: "/standard_fonts/" },
+      }),
+    );
     await expect(page.locator("#primary")).toHaveAttribute("data-status", "ready");
     const text = page.locator("#primary .textWidgetAnnotation input").first();
     const checkbox = page.locator("#primary .buttonWidgetAnnotation.checkBox input").first();

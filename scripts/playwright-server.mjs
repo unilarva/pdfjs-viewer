@@ -10,24 +10,25 @@ import { fileURLToPath } from "node:url";
 import { makeHintedFontPdf } from "./hinted-font-fixture.mjs";
 import { makeOcgBenchmarkFixture } from "./ocg-benchmark-fixture.mjs";
 
+// Serves browser fixtures with display, worker, and font assets from one PDF.js installation.
 const packageDir = path.resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.resolve(
   packageDir,
   process.env.PLAYWRIGHT_DIST_DIR ?? ".playwright-dist/default",
 );
 const legacyPdfjs = process.env.PDFJS_VIEWER_TEST_LEGACY === "1";
+const pdfjsRoot = process.env.PDFJS_VIEWER_TEST_PDFJS_ROOT
+  ? path.resolve(process.env.PDFJS_VIEWER_TEST_PDFJS_ROOT)
+  : dirname(fileURLToPath(import.meta.resolve("pdfjs-dist/package.json")));
 const ocgBenchmark = process.env.PDFJS_VIEWER_OCG_BENCHMARK === "1";
 // Explicit file opt-in only; never copy consumer documents into package fixtures.
 const benchmarkPdf =
   ocgBenchmark && process.env.PDFJS_VIEWER_BENCHMARK_PDF
     ? await readFile(path.resolve(process.env.PDFJS_VIEWER_BENCHMARK_PDF))
     : null;
-const pdfWorkerPath = fileURLToPath(
-  import.meta.resolve(
-    legacyPdfjs
-      ? "pdfjs-dist/legacy/build/pdf.worker.min.mjs"
-      : "pdfjs-dist/build/pdf.worker.min.mjs",
-  ),
+const pdfWorkerPath = path.join(
+  pdfjsRoot,
+  legacyPdfjs ? "legacy/build/pdf.worker.min.mjs" : "build/pdf.worker.min.mjs",
 );
 const port = Number.parseInt(process.env.PORT ?? "4179", 10);
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -48,11 +49,18 @@ await build({
     ),
   ],
   bundle: true,
-  alias: {
-    ...(legacyPdfjs ? { "pdfjs-dist/build/pdf.mjs": "pdfjs-dist/legacy/build/pdf.mjs" } : {}),
-  },
-  plugins:
-    ocgBenchmark && process.env.PDFJS_VIEWER_BENCHMARK_MODULE
+  plugins: [
+    {
+      name: "selected-pdfjs-installation",
+      setup(builder) {
+        builder.onResolve({ filter: /^pdfjs-dist(?:\/|$)/ }, ({ path: specifier }) => {
+          let subpath = specifier === "pdfjs-dist" ? "build/pdf.mjs" : specifier.slice(11);
+          if (legacyPdfjs && subpath === "build/pdf.mjs") subpath = "legacy/build/pdf.mjs";
+          return { path: path.join(pdfjsRoot, subpath) };
+        });
+      },
+    },
+    ...(ocgBenchmark && process.env.PDFJS_VIEWER_BENCHMARK_MODULE
       ? [
           {
             name: "frozen-benchmark-module",
@@ -63,7 +71,8 @@ await build({
             },
           },
         ]
-      : [],
+      : []),
+  ],
   format: "esm",
   platform: "browser",
   target: ["es2022"],
@@ -356,7 +365,14 @@ const hintedFontPdfs = new Map(
   await Promise.all(
     ["regular", "bold", "italic", "transparent", "group"].map(async variant => [
       variant,
-      await makeHintedFontPdf(variant),
+      await makeHintedFontPdf(
+        variant,
+        path.join(
+          pdfjsRoot,
+          "standard_fonts",
+          `LiberationSans-${variant === "bold" ? "Bold" : variant === "italic" ? "Italic" : "Regular"}.ttf`,
+        ),
+      ),
     ]),
   ),
 );
@@ -392,6 +408,24 @@ createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   if (url.pathname === "/health") {
     res.end("ok");
+    return;
+  }
+  if (url.pathname.startsWith("/standard_fonts/")) {
+    const name = url.pathname.slice("/standard_fonts/".length);
+    if (!/^[A-Za-z0-9_-]+\.(?:pfb|ttf)$/.test(name)) {
+      res.writeHead(404).end();
+      return;
+    }
+    try {
+      const data = await readFile(path.join(pdfjsRoot, "standard_fonts", name));
+      res.setHeader(
+        "Content-Type",
+        name.endsWith(".ttf") ? "font/ttf" : "application/octet-stream",
+      );
+      res.end(data);
+    } catch {
+      res.writeHead(404).end();
+    }
     return;
   }
   if (url.pathname === "/external-benchmark.pdf" && benchmarkPdf) {

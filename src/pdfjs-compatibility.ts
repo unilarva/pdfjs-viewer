@@ -406,7 +406,7 @@ export function startPdfPageRenderTask(
   let restoreFactory: (() => void) | null = null;
   let installed = false;
   if (adaptContext) {
-    // Qualified 6.4 captures canvasFactory synchronously in each InternalRenderTask.
+    // Qualified PDF.js releases capture canvasFactory synchronously in each InternalRenderTask.
     // Scope only that capture, then restore the transport before asynchronous work.
     // Scratch/transparency contexts consequently keep the same font policy/DPR.
     try {

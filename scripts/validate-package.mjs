@@ -251,13 +251,13 @@ const expectedEverythingCommands = [
   "test:compatibility",
   "build",
   "validate:dist",
-  "test:browser",
-  "test:browser:mobile:chromium",
-  "test:browser:mobile:firefox",
-  "test:browser:webkit:docker",
-  "test:browser:mobile:webkit:docker",
+  "test:browser:qualified",
   "test:pack",
 ];
+expect(
+  pkg.scripts?.["test:browser:qualified"] === "node ./scripts/test-pdfjs-browser-matrix.mjs",
+  "test:browser:qualified must test the exact peer union with standard and legacy builds",
+);
 expect(
   JSON.stringify(TEST_EVERYTHING_COMMANDS) === JSON.stringify(expectedEverythingCommands),
   "test:everything command manifest must contain the exact complete package gate",
@@ -284,6 +284,7 @@ for (const [path, description] of [
   ["scripts/test-pack-candidate.mjs", "single-candidate package gate"],
   ["scripts/test-everything.mjs", "complete local test orchestrator"],
   ["scripts/test-everything-commands.mjs", "complete local test command manifest"],
+  ["scripts/test-pdfjs-browser-matrix.mjs", "qualified PDF.js browser matrix"],
   ["scripts/demo-host.mjs", "demo host and policy configuration"],
   ["scripts/demo-pdf.mjs", "demo sample PDF generator"],
   ["scripts/demo-server.mjs", "demo server"],

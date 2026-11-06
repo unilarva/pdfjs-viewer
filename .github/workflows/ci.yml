@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: npm ci
-      - run: npm run "test:browser:${{ matrix.script }}"
+      - run: npm run test:browser:qualified -- "${{ matrix.script }}"
         env:
           HOME: /root
       - if: failure()

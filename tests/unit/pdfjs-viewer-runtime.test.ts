@@ -141,7 +141,7 @@ test("failed worker global installation rolls back globals, lease, and owned wor
 
 test("PDF.js version policy freezes qualified releases and rejects unsupported defaults", () => {
   assert.equal(Object.isFrozen(PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS), true);
-  assert.deepEqual(PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS, ["6.4.299"]);
+  assert.deepEqual(PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS, ["6.4.299", "6.5.438"]);
   for (const version of PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS) {
     const pdfjs = pdfjsGlobals("previous.js", null);
     pdfjs.version = version;
@@ -153,7 +153,7 @@ test("PDF.js version policy freezes qualified releases and rejects unsupported d
     candidate.version = version;
     assert.throws(
       () => new PdfjsViewerRuntime({ pdfjs: candidate, workerPort: worker() }),
-      /qualified releases \(6\.4\.299\)/,
+      /qualified releases \(6\.4\.299, 6\.5\.438\)/,
     );
   }
   assert.throws(
@@ -178,7 +178,7 @@ test("unqualified PDF.js admission logs but does not bypass structural runtime c
     logger: entry => logs.push(entry),
   });
   assert.equal(logs[0]?.event, "unqualified-pdfjs-version");
-  assert.deepEqual(logs[0]?.details?.qualifiedVersions, ["6.4.299"]);
+  assert.deepEqual(logs[0]?.details?.qualifiedVersions, ["6.4.299", "6.5.438"]);
   runtime.destroy();
   assert.throws(
     () =>
@@ -344,9 +344,9 @@ test("deferred auxiliary release preserves external global mutations", () => {
   assert.equal(pdfjs.GlobalWorkerOptions.workerPort, external);
 });
 
-test("real PDF.js 6.4.299 cached host wrappers survive final runtime release", async () => {
+test("real qualified PDF.js cached host wrappers survive final runtime release", async () => {
   const realPdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  assert.equal(realPdfjs.version, "6.4.299");
+  assert.ok(PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS.some(version => version === realPdfjs.version));
   let terminations = 0;
   const listeners = new Set<unknown>();
   const port = {

@@ -7,10 +7,6 @@ export const TEST_EVERYTHING_COMMANDS = Object.freeze([
   "test:compatibility",
   "build",
   "validate:dist",
-  "test:browser",
-  "test:browser:mobile:chromium",
-  "test:browser:mobile:firefox",
-  "test:browser:webkit:docker",
-  "test:browser:mobile:webkit:docker",
+  "test:browser:qualified",
   "test:pack",
 ]);

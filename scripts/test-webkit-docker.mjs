@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 
+// Runs desktop/mobile WebKit in the matching image, forwarding selected qualification assets.
 const packageDir = resolve(import.meta.dirname, "..");
 let project = "webkit";
 const forwardedArgs = [];
@@ -79,6 +80,14 @@ const dependencyVolumeArgs = containerInstall
       ...(packageRelativePath ? ["-v", `${containerPackageDir}/node_modules`] : []),
     ]
   : [];
+const qualificationArgs = process.env.PDFJS_VIEWER_TEST_PDFJS_ROOT
+  ? [
+      "-v",
+      `${resolve(process.env.PDFJS_VIEWER_TEST_PDFJS_ROOT)}:/pdfjs-qualification:ro`,
+      "-e",
+      "PDFJS_VIEWER_TEST_PDFJS_ROOT=/pdfjs-qualification",
+    ]
+  : [];
 const testCommand = [
   "node",
   "./scripts/playwright-run.mjs",
@@ -104,6 +113,9 @@ const result = spawnSync(
     ...userArgs,
     "-e",
     "HOME=/tmp",
+    "-e",
+    `PDFJS_VIEWER_TEST_LEGACY=${process.env.PDFJS_VIEWER_TEST_LEGACY ?? "0"}`,
+    ...qualificationArgs,
     "-v",
     `${dependencyRoot}:/work`,
     ...dependencyVolumeArgs,

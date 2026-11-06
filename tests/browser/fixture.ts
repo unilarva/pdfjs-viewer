@@ -1042,7 +1042,10 @@ window.fixture = {
     };
   },
   async readAcroFormValues(data) {
-    const task = PDFJS.getDocument({ data: Uint8Array.from(data) });
+    const task = PDFJS.getDocument({
+      data: Uint8Array.from(data),
+      standardFontDataUrl: "/standard_fonts/",
+    });
     try {
       const pdf = await task.promise;
       const fields = await pdf.getFieldObjects();
@@ -1097,7 +1100,13 @@ window.fixture = {
         features: { search: false, outline: false, thumbnails: true, forms: true },
         logger: entry => logs.push(entry),
       });
-      return { viewer, ready, load: viewer.load("/acroform-fixture.pdf") };
+      return {
+        viewer,
+        ready,
+        load: viewer.load("/acroform-fixture.pdf", {
+          documentOptions: { standardFontDataUrl: "/standard_fonts/" },
+        }),
+      };
     };
     const first = create("form-viewer-a");
     const second = create("form-viewer-b");
@@ -1738,7 +1747,9 @@ window.fixture = {
     try {
       await entered;
       printPermissions = "high";
-      await viewer.load("/acroform-fixture.pdf?stale-permission=b");
+      await viewer.load("/acroform-fixture.pdf?stale-permission=b", {
+        documentOptions: { standardFontDataUrl: "/standard_fonts/" },
+      });
       await initialLoad;
       const inputDeadline = performance.now() + 2_000;
       let inputBefore = host.querySelector<HTMLInputElement>(".textWidgetAnnotation input");
@@ -3012,7 +3023,9 @@ window.fixture = {
         return { status: "adapter-completed" };
       },
     });
-    const load = await viewer.load("/acroform-fixture.pdf");
+    const load = await viewer.load("/acroform-fixture.pdf", {
+      documentOptions: { standardFontDataUrl: "/standard_fonts/" },
+    });
     if (!load.ok) throw new Error("Print adapter fixture did not load");
     await new Promise<void>((resolve, reject) => {
       if (viewer.state.status === "ready") {
@@ -5640,6 +5653,15 @@ window.fixture = {
       const canvasRect = canvas.getBoundingClientRect();
       const pageRect = page.getBoundingClientRect();
       const close = (left: number, right: number) => Math.abs(left - right) < 1;
+      const scale =
+        Number(page.style.getPropertyValue("--scale-factor")) *
+        Number(page.style.getPropertyValue("--user-unit"));
+      // PDF.js rounds this 612 x 792 fixture's layer down to the published CSS-pixel grid.
+      // The fractional page wrapper can round up to the next pixel during browser layout.
+      const roundX = parseFloat(page.style.getPropertyValue("--scale-round-x"));
+      const roundY = parseFloat(page.style.getPropertyValue("--scale-round-y"));
+      const expectedWidth = Math.floor((612 * scale) / roundX) * roundX;
+      const expectedHeight = Math.floor((792 * scale) / roundY) * roundY;
       return {
         runtimeLayerClass: layer.classList.contains("annotationLayer"),
         packageLayerClass: layer.classList.contains("pdf-annotation-link-layer"),
@@ -5647,8 +5669,8 @@ window.fixture = {
         layerMatchesPage:
           close(layerRect.left, pageRect.left) &&
           close(layerRect.top, pageRect.top) &&
-          close(layerRect.width, pageRect.width) &&
-          close(layerRect.height, pageRect.height),
+          layerRect.width === expectedWidth &&
+          layerRect.height === expectedHeight,
         canvasCoversPage:
           close(canvasRect.left, pageRect.left) &&
           close(canvasRect.top, pageRect.top) &&

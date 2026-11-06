@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const packageDir = resolve(import.meta.dirname, "..");
+const pdfjsRoot = process.env.PDFJS_VIEWER_TEST_PDFJS_ROOT;
 const nodeModulesDir = join(packageDir, "node_modules");
 await mkdir(nodeModulesDir, { recursive: true });
 const outputDir = await mkdtemp(join(nodeModulesDir, ".pdfjs-viewer-unit-"));
@@ -25,6 +26,22 @@ try {
         format: "esm",
         target: ["node22"],
         packages: "external",
+        plugins: pdfjsRoot
+          ? [
+              {
+                name: "qualified-pdfjs-installation",
+                setup(builder) {
+                  builder.onResolve({ filter: /^pdfjs-dist(?:\/|$)/ }, ({ path }) => ({
+                    path: resolve(
+                      pdfjsRoot,
+                      path === "pdfjs-dist" ? "build/pdf.mjs" : path.slice("pdfjs-dist/".length),
+                    ),
+                    external: true,
+                  }));
+                },
+              },
+            ]
+          : [],
       });
     }),
   );

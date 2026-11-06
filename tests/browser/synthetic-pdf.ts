@@ -10,6 +10,8 @@ export interface SyntheticPdfOptions {
   userUnit?: number;
   links?: readonly { target: number; kind: "named" | "numeric" | "reference" }[];
   annotationSubtype?: "Text" | "Widget";
+  /** Emit a NoRotate free-text annotation and its explicit NoRotate popup. */
+  noRotateAnnotations?: boolean;
   /** Keep the colored rectangle visible for View usage but hidden for Print usage. */
   printHidden?: boolean;
 }
@@ -26,6 +28,8 @@ export function makeSyntheticPdf(options: SyntheticPdfOptions): Uint8Array {
   const links = options.links ?? [];
   const annotations = links.map((_, index) => annotationStart + index);
   if (options.annotationSubtype) annotations.push(annotationStart + links.length);
+  const noRotateStart = annotationStart + annotations.length;
+  if (options.noRotateAnnotations) annotations.push(noRotateStart, noRotateStart + 1);
   const ocg = annotationStart + annotations.length;
   const objects = [
     `<< /Type /Catalog /Pages 2 0 R /Names << /Dests << /Names [(section:two) [${pages[1] ?? pages[0]} 0 R /Fit]] >> >>${options.printHidden ? ` /OCProperties << /OCGs [${ocg} 0 R] /D << /Order [${ocg} 0 R] /ON [${ocg} 0 R] /AS [<< /Event /View /Category [/View] /OCGs [${ocg} 0 R] >> << /Event /Print /Category [/Print] /OCGs [${ocg} 0 R] >>] >> >>` : ""} >>`,
@@ -52,6 +56,11 @@ export function makeSyntheticPdf(options: SyntheticPdfOptions): Uint8Array {
   if (options.annotationSubtype)
     objects.push(
       `<< /Type /Annot /Subtype /${options.annotationSubtype} /Rect [300 600 320 620] /Contents (Unsupported auxiliary annotation) >>`,
+    );
+  if (options.noRotateAnnotations)
+    objects.push(
+      `<< /Type /Annot /Subtype /FreeText /Rect [200 500 320 540] /F 16 /DA (/Helv 12 Tf 0 g) /Contents (NoRotate anchor) /Popup ${noRotateStart + 1} 0 R >>`,
+      `<< /Type /Annot /Subtype /Popup /Rect [330 500 480 580] /F 16 /Parent ${noRotateStart} 0 R >>`,
     );
   if (options.printHidden)
     objects.push(

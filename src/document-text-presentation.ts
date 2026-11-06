@@ -216,24 +216,30 @@ export class DocumentTextPresentation {
           div,
           async render({ viewport, images, textContentParams }) {
             const reader = builderOptions.pdfPage.streamTextContent(textContentParams).getReader();
-            const pending = new Set<Promise<unknown>>();
-            // TextLayer.cancel rejects render immediately. Keep its upstream stream
-            // cancellation/read promises admitted until the PDF.js worker settles them.
-            const track = <T>(promise: Promise<T>): Promise<T> => {
-              pending.add(promise);
-              void promise.then(
-                () => pending.delete(promise),
-                () => pending.delete(promise),
-              );
-              return promise;
+            let cancelled = false;
+            let reading: ReturnType<typeof reader.read> | null = null;
+            let drain: Promise<void> | null = null;
+            // PDF.js can lose a CANCEL acknowledgement racing with stream CLOSE.
+            // Drain admitted extraction to EOF/error instead, retaining the page use.
+            const drainReader = (): Promise<void> => {
+              cancelled = true;
+              return (drain ??= (async () => {
+                if (reading) await reading;
+                while (!(await reader.read()).done) {
+                  // Discard remaining chunks without publishing cancelled text.
+                }
+              })().catch(() => {}));
             };
             const textContentSource = new ReadableStream({
               async pull(controller) {
-                const chunk = await track(reader.read());
+                if (cancelled) return;
+                const chunk = await (reading = reader.read());
+                reading = null;
+                if (cancelled) return;
                 if (chunk.done) controller.close();
                 else controller.enqueue(chunk.value);
               },
-              cancel: reason => track(reader.cancel(reason)),
+              cancel: drainReader,
             });
             let task: InstanceType<typeof options.TextLayer> | undefined;
             try {
@@ -242,8 +248,7 @@ export class DocumentTextPresentation {
               builderOptions.highlighter.setTextMapping(task.textDivs, task.textContentItemsStr);
               await task.render();
             } finally {
-              await track(reader.cancel()).catch(() => {});
-              while (pending.size) await Promise.allSettled([...pending]);
+              await drainReader();
               reader.releaseLock();
               if (task) tasks.delete(task);
             }

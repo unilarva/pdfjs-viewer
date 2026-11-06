@@ -1724,7 +1724,7 @@ export class DocumentRenderer {
       const render = startPdfPageRenderTask(
         use.page,
         {
-          // PDF.js 6.4 ignores canvasContext when a canvas is supplied. Explicit
+          // Qualified PDF.js ignores canvasContext when a canvas is supplied. Explicit
           // context rendering preserves our owned adapter and its original canvas.
           canvas: canvasContext === drawing ? canvas : null,
           canvasContext,
@@ -2000,14 +2000,7 @@ export class DocumentRenderer {
         if (previous && previous !== output) this.#releaseAnnotationOwner(previous);
         const canvas = context.lease.canvas;
         const drawing = this.#allocateCanvas(canvas, budget.bufferWidth, budget.bufferHeight);
-        drawing.setTransform(
-          fonts ? 1 : budget.renderDpr,
-          0,
-          0,
-          fonts ? 1 : budget.renderDpr,
-          0,
-          0,
-        );
+        drawing.setTransform(1, 0, 0, 1, 0, 0);
         drawing.imageSmoothingEnabled = true;
         const canvasContext = fonts?.context(drawing, budget.renderDpr) ?? drawing;
         const render = startPdfPageRenderTask(
@@ -2016,7 +2009,8 @@ export class DocumentRenderer {
             canvas: canvasContext === drawing ? canvas : null,
             canvasContext,
             viewport,
-            ...(fonts ? { transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0] } : {}),
+            // PDF.js needs the output scale for separate widget appearance canvases too.
+            transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0],
             intent: "display",
             annotationMode,
             annotationCanvasMap,
@@ -2059,14 +2053,7 @@ export class DocumentRenderer {
         temporary = context.lease.canvas.ownerDocument.createElement("canvas");
         const drawing = this.#allocateCanvas(temporary, budget.bufferWidth, budget.bufferHeight);
         if (!this.#scheduler.recordOffscreenAllocation(operation, budget.pixelCount)) return;
-        drawing.setTransform(
-          fonts ? 1 : budget.renderDpr,
-          0,
-          0,
-          fonts ? 1 : budget.renderDpr,
-          0,
-          0,
-        );
+        drawing.setTransform(1, 0, 0, 1, 0, 0);
         drawing.imageSmoothingEnabled = true;
         const canvasContext = fonts?.context(drawing, budget.renderDpr) ?? drawing;
         const render = startPdfPageRenderTask(
@@ -2075,7 +2062,7 @@ export class DocumentRenderer {
             canvas: canvasContext === drawing ? temporary : null,
             canvasContext,
             viewport,
-            ...(fonts ? { transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0] } : {}),
+            transform: [budget.renderDpr, 0, 0, budget.renderDpr, 0, 0],
             intent: "display",
             annotationMode,
             annotationCanvasMap,

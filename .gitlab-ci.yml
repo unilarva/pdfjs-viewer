@@ -62,7 +62,7 @@ browser:
             mobile:webkit,
           ]
   script:
-    - npm run "test:browser:${BROWSER_GATE}"
+    - npm run test:browser:qualified -- "${BROWSER_GATE}"
 
 exact-pack:
   stage: package

@@ -70,8 +70,8 @@ and demo commands belong to the
   Automated mobile projects exercise desktop engine binaries with a touch-capable narrow viewport;
   they are synthetic interaction regressions, not physical Android/iOS browser qualification.
   Native OS selection handles and system print UI remain browser-owned.
-- Exact `pdfjs-dist 6.4.299`, installed by the consuming application. This is the currently
-  qualified release; each release's `peerDependencies` declaration is
+- Exact `pdfjs-dist 6.4.299` or `6.5.438`, installed by the consuming application.
+  Each viewer release's `peerDependencies` declaration is
   authoritative. This package does not bundle PDF.js, its worker, fonts, CMaps, ICC data,
   or WASM assets.
 - A bundler or browser setup that supports ESM. There is no CommonJS build.
@@ -102,7 +102,7 @@ review the license obligations appropriate to their distribution model.
 ### 1. Install dependencies
 
 ```sh
-npm install --save-exact @unilarva/pdfjs-viewer pdfjs-dist@6.4.299
+npm install --save-exact @unilarva/pdfjs-viewer pdfjs-dist@6.5.438
 ```
 
 `pdfjs-dist` is a peer dependency. Keep the API and worker from the same installed
@@ -114,9 +114,13 @@ describes the display API module required by `PdfjsViewerRuntimeOptions.pdfjs`.
 `PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS` is the frozen public list of exact PDF.js
 releases qualified by this package. Runtime construction defaults to
 `pdfjsVersionPolicy: "qualified-only"` and rejects every other version. The peer
-dependency likewise pins `6.4.299`, never `6.4.*` or an open range: PDF.js patch
+dependency likewise lists `6.4.299 || 6.5.438`, never `6.4.*` or an open range: PDF.js patch
 releases can change underdocumented DOM, CSS, and private surfaces used by forms,
 annotations, XFA, optional content, and printing.
+
+Both standard and legacy builds are supported. PDF.js 6.5 renderer workers are
+not used: page drawing stays on the main thread under the viewer's raster-memory,
+cancellation, and font policies. The matching parsing worker is still required.
 
 An application may deliberately use a package-manager peer override and pass
 `pdfjsVersionPolicy: "allow-unqualified"` after completing its own qualification:
@@ -358,7 +362,7 @@ JavaScript MIME type. Pin CDN URLs to the exact installed `pdfjs-dist` version.
 ```ts
 const runtime = new PdfjsViewerRuntime({
   pdfjs,
-  workerSrc: "https://static.example.com/pdfjs/6.4.299/pdf.worker.min.mjs",
+  workerSrc: "https://static.example.com/pdfjs/6.5.438/pdf.worker.min.mjs",
 });
 const viewer = new PdfjsViewer({ rootEl, runtime });
 await viewer.load(pdfUrl);
@@ -772,6 +776,8 @@ Provide `standardFontDataUrl` when rendering XFA or PDFs that depend on PDF stan
 Without matching standard-font data, PDF.js falls back to browser fonts; changed font metrics
 can wrap or overlap text in fixed-layout forms. The package demo serves `pdfjs-dist/standard_fonts`
 at `./standard_fonts/` as an integration example.
+This also includes fonts used to regenerate checkbox/radio appearances: unavailable symbol-font
+fallbacks can leave checked marks blank in some browsers.
 
 For an interactive password prompt, return a password from `passwordProvider`. Returning
 `null` cancels loading. The reason distinguishes a missing password from a rejected one:

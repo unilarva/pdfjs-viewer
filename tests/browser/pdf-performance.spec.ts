@@ -111,7 +111,7 @@ for (const pageNo of pages)
       const report = {
         schemaVersion: 1,
         browser: { project: testInfo.project.name, version: browser.version() },
-        pdfjsVersion: "6.4.299",
+        pdfjsVersion: await page.evaluate(() => window.ocgBenchmark.pdfjsVersion),
         pageNo,
         fontRendering,
         concurrency: Number(concurrency ?? 3),

@@ -283,7 +283,7 @@ export function validateDocumentOptions(
   }
 }
 
-/** Separates the package password callback and derives PDF.js XFA loading only from feature policy. */
+/** Separates password handling and derives package-owned PDF.js loading policies. */
 export function pdfjsDocumentLoadOptions(
   options: PdfjsViewerDocumentOptions,
   enableXfa: boolean,
@@ -293,6 +293,7 @@ export function pdfjsDocumentLoadOptions(
   pdfjsOptions: Readonly<
     Omit<PdfjsViewerDocumentOptions, "passwordProvider"> & {
       enableXfa: boolean;
+      disableWorkerRendering: true;
       fontExtraProperties?: true;
     }
   >;
@@ -304,6 +305,8 @@ export function pdfjsDocumentLoadOptions(
     pdfjsOptions: Object.freeze({
       ...pdfjsOptions,
       enableXfa,
+      // Raster admission, physical settlement, and font contexts remain main-thread owned.
+      disableWorkerRendering: true,
       ...(geometricFonts && options.disableFontFace !== true
         ? { fontExtraProperties: true as const }
         : {}),

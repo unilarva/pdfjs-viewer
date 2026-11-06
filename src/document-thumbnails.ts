@@ -803,7 +803,7 @@ export class DocumentThumbnails {
       if (!context) throw new Error("Thumbnail canvas 2D context is unavailable");
       operation.renderWidth = operation.item.width;
       operation.renderHeight = operation.item.height;
-      context.setTransform(fonts ? 1 : budget.dpr, 0, 0, fonts ? 1 : budget.dpr, 0, 0);
+      context.setTransform(1, 0, 0, 1, 0, 0);
       context.imageSmoothingEnabled = true;
       const canvasContext = fonts?.context(context, budget.dpr) ?? context;
       const printAnnotationStorage =
@@ -818,7 +818,7 @@ export class DocumentThumbnails {
         {
           canvas: canvasContext === context ? temporary : null,
           canvasContext,
-          ...(fonts ? { transform: [budget.dpr, 0, 0, budget.dpr, 0, 0] } : {}),
+          transform: [budget.dpr, 0, 0, budget.dpr, 0, 0],
           viewport: renderViewport,
           intent: "display",
           annotationMode,

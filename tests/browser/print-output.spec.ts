@@ -1026,10 +1026,19 @@ for (const interruption of ["abort", "load", "map", "child", "form"] as const) {
   }) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => {
+      if (
+        message.type() === "warning" &&
+        /standardFontDataUrl|Cannot load system font: ZapfDingbats/.test(message.text())
+      )
+        errors.push(message.text());
+    });
     await setup(page, { input: "url", provider: "absent", legacyDeferred: true });
     if (interruption === "form") {
       const loaded = await page.evaluate(() =>
-        window.printOutputTest.viewer.load("/acroform-fixture.pdf"),
+        window.printOutputTest.viewer.load("/acroform-fixture.pdf", {
+          documentOptions: { standardFontDataUrl: "/standard_fonts/" },
+        }),
       );
       expect(loaded.ok).toBe(true);
       await page.evaluate(() => window.printOutputTest.viewer.setActive(true));

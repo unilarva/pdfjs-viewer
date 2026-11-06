@@ -903,7 +903,14 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    constrained output downward. The scalar render DPR is the planning, rendering, diagnostics, and
    reuse identity. Integer coverage is a backing-store fact only and is never resolved again as a
    later quality target. PDF.js receives the same uniform X/Y transform in temporary and direct
-   paths, preventing quantization from stretching page content. Retained placeholders remain charged
+   paths, preventing quantization from stretching page content. Native and geometric main/thumbnail
+   rendering use identity destination contexts and explicit PDF.js output-scale transforms;
+   pre-scaling only the context would hide HiDPI scaling from separate widget appearances.
+   Known upstream limitation in both qualified releases: separate widget appearance canvases
+   can omit `/UserUnit` from their backing-store dimensions, clipping appearances when
+   `/UserUnit > 1` despite correct page geometry. This predates the upgrade and is not fixed
+   by the shared output-DPR correction.
+   Retained placeholders remain charged
    alongside the full temporary raster that replaces them. The scheduler installs the immutable
    plan and admits operation requirements. The renderer captures the renderer document ID, exact
    surface lease, and immutable main raster state. The facade installs main and thumbnail state as
@@ -1165,6 +1172,13 @@ application-selected standard or legacy display API and can fail before runtime 
 is established. No package path requires or writes that global. The facade supplies the
 same resolved PDF.js module to document loading, worker globals, and text presentation;
 tests and custom builder injection remain the only alternate adapter boundary.
+Logical cancellation stops text publication immediately, but the default adapter retains
+its admitted page use while draining the underlying text reader to EOF/error. Both qualified
+PDF.js releases can lose a stream-cancellation acknowledgement when cancellation crosses
+the final stream close. The adapter therefore never cancels that underlying reader or waits
+for its acknowledgement; one shared drain serializes with an in-flight pull and discards
+remaining chunks. Residual extraction may continue after cancellation, without buffering
+the whole page or releasing document/worker ownership before physical settlement.
 Builder completion and owner presentation completion are separate lifecycle states. A text
 builder may finish after its renderer context becomes stale; that preserves its reusable DOM and
 mapping but does not mark the page presented. Only a current context may index the mapping,
@@ -1883,8 +1897,8 @@ annotation security and persistence, page-DOM virtualization, and multi-document
 
 ### Publication Boundary
 
-This package release qualifies only `pdfjs-dist 6.4.299`, without older-version compatibility
-scaffolding. The public frozen version set and ordered
+This package release qualifies exact `pdfjs-dist 6.4.299` and `6.5.438` through one shared
+implementation, without version-specific compatibility scaffolding. The public frozen version set and ordered
 exact peer union are mechanically kept identical; compatibility installers and CI iterate the peer
 union, while the package development pin selects its newest entry. `pdfjs-compatibility.ts`
 is the complete owner for all PDF.js compatibility casts and capability checks. CI exercises every
@@ -1893,6 +1907,18 @@ and fails on missing `TextLayer`, `AnnotationLayer`, `XfaLayer`, `AnnotationStor
 `OptionalContentConfig.fromSerializable`, page display methods, or incompatible annotation modes.
 Compatibility tests install that exact peer independently for both module trees. The peer range
 must not widen until the same matrix passes for every newly admitted release.
+
+The 2026-11-05 qualification retained both releases after all four version/build
+combinations passed desktop and mobile Chromium, Firefox, and Docker WebKit,
+including CSP and native/geometric font tests: 5,852 browser passes and 232 existing
+optional/engine skips, with no failures. Shared source unit tests and strict installed
+consumers also passed against both peers. Physical system-print dialogs and private-PDF
+opt-in diagnostics were not requalified; existing device-print policy was not widened.
+
+PDF.js 6.5 renderer workers are deliberately disabled in all package-owned document
+loads, including auxiliary display sources. The existing main-thread raster owners,
+context/font adaptation, memory admission, and physical-settlement policy remain
+authoritative. The parsing worker configuration and peer-dependency model are unchanged.
 
 Generated browser UI is constructed through `createPdfjsViewerUi()` using element, attribute,
 text-node, and append operations. The SSR-only `renderPdfjsViewerUi()` returns an escaped string,
@@ -1967,8 +1993,8 @@ together. Every retained release must still pass qualification.
 2. Before editing package policy, run isolated candidate capability and CSS checks for both
    builds. The third argument is an
    intentional candidate and may be outside the peer set:
-   `node ./scripts/test-pdfjs-compatibility.mjs standard 6.4.299` and
-   `node ./scripts/test-pdfjs-compatibility.mjs legacy 6.4.299`. With no third argument,
+   `node ./scripts/test-pdfjs-compatibility.mjs standard 6.5.438` and
+   `node ./scripts/test-pdfjs-compatibility.mjs legacy 6.5.438`. With no third argument,
    the command subprocesses every exact version in the peer union. A passing command proves
    only the capabilities, return-shape assertions, manifest entries, and sentinels that the
    scripts currently encode; it does not establish that those checks remain complete for the
@@ -2091,9 +2117,28 @@ npm run test:browser
 
 After the browser installation, `npm run test:everything` is the single complete local package
 gate. It runs source validation, both qualified PDF.js compatibility builds, the package build and
-installed-consumer checks, desktop Chromium/Firefox including CSP, mobile Chromium/Firefox,
+installed-consumer checks for every exact peer, desktop Chromium/Firefox including CSP, mobile Chromium/Firefox,
 desktop/mobile WebKit through Docker, and the exact publishable-tarball gate. It intentionally
 requires Docker and does not install browsers or system dependencies itself.
+
+`npm run test:browser:qualified` installs each exact peer into isolated temporary storage
+and runs that complete browser matrix with both standard and legacy display/worker/font
+assets. An optional existing browser-script suffix, for example
+`npm run test:browser:qualified -- chromium:non-csp`, selects one engine group for CI.
+Ordinary browser commands continue using the development pin. The internal
+`PDFJS_VIEWER_TEST_PDFJS_ROOT` override also lets unit tests exercise a selected installation.
+
+Installed-consumer qualification production-bundles real PDF.js display modules and
+matching workers with Vite and Webpack, rather than testing package UI imports alone.
+Emitted Webpack JavaScript is scanned for local `file://` URLs. Known upstream
+[issue 22429](https://github.com/mozilla/pdf.js/issues/22429) embeds build-machine paths
+at Node-only `createRequire` and Emscripten worker initialization sites in both retained
+PDF.js releases. Only recognized Node-canvas/polyfill and Emscripten bootstrap expressions
+at their exact URL offsets are exempted, with expected per-kind occurrence counts; repeated
+sites, missing sites, unrelated assignments, and other local URLs fail qualification.
+Recognized sites still produce explicit not-path-clean warnings. Successful browser loading does not eliminate this
+privacy/reproducibility limitation. Do not disable `import.meta` rewriting globally as
+an unqualified workaround for classic-script output.
 
 Use `npm run test:browser:chromium` for a fast check, `npm run test:browser:mobile:chromium`,
 `npm run test:browser:mobile:firefox`, and `npm run test:browser:mobile:webkit` for the

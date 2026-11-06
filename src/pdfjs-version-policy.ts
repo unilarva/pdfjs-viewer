@@ -12,7 +12,7 @@
  */
 
 /** Exact PDF.js releases qualified by this package release. */
-export const PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS = Object.freeze(["6.4.299"] as const);
+export const PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS = Object.freeze(["6.4.299", "6.5.438"] as const);
 
 /** PDF.js runtime version admission policy. */
 export type PdfjsViewerPdfjsVersionPolicy = "qualified-only" | "allow-unqualified";

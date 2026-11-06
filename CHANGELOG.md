@@ -4,6 +4,11 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 
 ## Unreleased
 
+- Support exact PDF.js 6.5.438 alongside 6.4.299 with matching standard or legacy
+  parsing workers; rendering remains on the main thread.
+- Correct rotated annotation geometry, including RTL and non-rotating popup anchors, and HiDPI
+  form appearances.
+- Release closed documents reliably when text-stream cancellation races with completion.
 - Keep default dialog and menu close buttons visible while scrolling.
 
 ## 0.9.0

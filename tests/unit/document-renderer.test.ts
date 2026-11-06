@@ -1491,9 +1491,7 @@ test("detail reuses the exact base viewport with a clipped transform and no pres
     assert.equal(detail.annotationMode, params[0].annotationMode);
     const canvas = detail.canvas as unknown as FakeCanvas;
     assert.ok(canvas.width <= 512 && canvas.height <= 512);
-    assert.ok(
-      detail.transform![0] > (params[0].canvasContext as unknown as FakeContext).transforms[0][0],
-    );
+    assert.ok(detail.transform![0] > params[0].transform![0]);
     const wrapper = lease.wrapper as unknown as FakeWrapper;
     assert.equal(wrapper.children[0], canvas);
     assert.equal(canvas.attributes["aria-hidden"], "true");
@@ -1642,7 +1640,8 @@ test("detail allocation failure downshifts within bounded attempts without losin
     const fakePage = page({ value: 0 });
     fakePage.render = params => {
       renders++;
-      if (params.transform) throw new Error("unsupported detail allocation");
+      if (params.annotationCanvasMap === undefined)
+        throw new Error("unsupported detail allocation");
       return {
         promise: Promise.resolve(),
         cancel: () => {},
@@ -1688,7 +1687,8 @@ test("sufficient base quality and exhausted mandatory memory skip optional detai
       );
       renderer.reconcile(detailView());
       await flush();
-      assert.ok(params.every(param => !param.transform));
+      assert.ok(params.length > 0);
+      assert.ok(params.every(param => param.annotationCanvasMap instanceof Map));
       assert.equal(renderer.snapshot().detailBytes, 0);
       await Promise.allSettled(renderer.resetDocument());
     }
@@ -1878,7 +1878,7 @@ test("profile changes inside detail diagnostics reconcile against the new canvas
     );
     renderer.reconcile(detailView());
     await flush();
-    const details = params.filter(param => param.transform);
+    const details = params.filter(param => param.annotationCanvasMap === undefined);
     assert.ok(switched && details.length > 0);
     assert.ok(
       details.every(
@@ -1927,7 +1927,7 @@ test("memory-constrained detail recovers quality after another visible page leav
     };
     renderer.reconcile(snapshot);
     await flush();
-    const first = params.find(param => param.transform)!;
+    const first = params.find(param => param.annotationCanvasMap === undefined)!;
     assert.ok(first);
     const oldDpr = first.transform![0];
     renderer.reconcile({
@@ -1936,7 +1936,7 @@ test("memory-constrained detail recovers quality after another visible page leav
       visiblePageRegions: new Map([[1, region]]),
     });
     await flush();
-    const last = params.filter(param => param.transform).at(-1)!;
+    const last = params.filter(param => param.annotationCanvasMap === undefined).at(-1)!;
     assert.ok(last.transform![0] > oldDpr * 1.25);
     assert.ok(
       renderer.snapshot().committedBytes +
@@ -2016,8 +2016,15 @@ test("pending visible detail reserves the next slot ahead of offscreen prefetch"
     await settle();
     assert.equal(params.length, 1, "prefetch cannot claim the detail slot during debounce");
     await flush();
-    assert.ok(params[1].transform, "detail is the next raster after initial visible output");
-    assert.ok(!params[2].transform, "offscreen prefetch resumes after visible detail");
+    assert.equal(
+      params[1].annotationCanvasMap,
+      undefined,
+      "detail is the next raster after initial visible output",
+    );
+    assert.ok(
+      params[2].annotationCanvasMap instanceof Map,
+      "offscreen prefetch resumes after visible detail",
+    );
     await Promise.allSettled(renderer.resetDocument());
   });
 });
@@ -2195,7 +2202,9 @@ test("mandatory annotation admission waits for cancelled detail's physical settl
     const renderFirst = first.render.bind(first);
     first.render = parameters => {
       const task = renderFirst(parameters);
-      return parameters.transform ? ({ ...task, cancel: () => {} } as typeof task) : task;
+      return parameters.annotationCanvasMap === undefined
+        ? ({ ...task, cancel: () => {} } as typeof task)
+        : task;
     };
     const limitBytes = 4 * 1024 * 1024;
     let secondRenders = 0;
@@ -2576,12 +2585,12 @@ test("reset reentered at detail task creation keeps its canvas alive until physi
       maxCanvasDimension: 512,
     });
     fakePage.render = params => {
-      if (params.transform) {
+      if (params.annotationCanvasMap === undefined) {
         detailCanvas = params.canvas!;
         renderer.resetDocument();
       }
       return {
-        promise: params.transform ? pending.promise : Promise.resolve(),
+        promise: params.annotationCanvasMap === undefined ? pending.promise : Promise.resolve(),
         cancel: () => {},
       } as unknown as import("pdfjs-dist").RenderTask;
     };
@@ -3588,6 +3597,8 @@ test("fractional viewport geometry is resolved once at one uniform render DPR", 
     assert.equal(lease.wrapper.style.height, "664.0000189239998px");
     const context = renderParams[0]!.canvasContext as unknown as FakeContext;
     assert.deepEqual(context.transforms[0], [1, 0, 0, 1, 0, 0]);
+    assert.deepEqual(renderParams[0]!.transform, [1, 0, 0, 1, 0, 0]);
+    assert.ok(renderParams[0]!.annotationCanvasMap instanceof Map);
     const attached = (lease.canvas as unknown as FakeCanvas).context;
     assert.deepEqual(attached.transforms, [[1, 0, 0, 1, 0, 0]]);
     assert.equal(attached.imageSmoothingEnabled, false);
@@ -3621,7 +3632,9 @@ test("direct rendering uses the same uniform render DPR geometry", async () => {
       renderParams[0]!.canvasContext,
       canvas.context as unknown as CanvasRenderingContext2D,
     );
-    assert.deepEqual(canvas.context.transforms, [[1.25, 0, 0, 1.25, 0, 0]]);
+    assert.deepEqual(canvas.context.transforms, [[1, 0, 0, 1, 0, 0]]);
+    assert.deepEqual(renderParams[0]!.transform, [1.25, 0, 0, 1.25, 0, 0]);
+    assert.ok(renderParams[0]!.annotationCanvasMap instanceof Map);
     assert.equal(canvas.context.imageSmoothingEnabled, true);
     assert.deepEqual({ width: canvas.width, height: canvas.height }, { width: 2501, height: 2000 });
   });
@@ -3661,8 +3674,12 @@ test("canvas-constrained temporary and direct renders retain one uniform transfo
     const temporaryContext = temporary.renderParams[0]!.canvasContext as unknown as FakeContext;
     const directCanvas = direct.lease.canvas as unknown as FakeCanvas;
     const renderDpr = 3162 / 5000;
-    assert.deepEqual(temporaryContext.transforms, [[renderDpr, 0, 0, renderDpr, 0, 0]]);
-    assert.deepEqual(directCanvas.context.transforms, [[renderDpr, 0, 0, renderDpr, 0, 0]]);
+    assert.deepEqual(temporaryContext.transforms, [[1, 0, 0, 1, 0, 0]]);
+    assert.deepEqual(directCanvas.context.transforms, [[1, 0, 0, 1, 0, 0]]);
+    assert.deepEqual(temporary.renderParams[0]!.transform, [renderDpr, 0, 0, renderDpr, 0, 0]);
+    assert.deepEqual(direct.renderParams[0]!.transform, [renderDpr, 0, 0, renderDpr, 0, 0]);
+    assert.ok(temporary.renderParams[0]!.annotationCanvasMap instanceof Map);
+    assert.ok(direct.renderParams[0]!.annotationCanvasMap instanceof Map);
     assert.deepEqual(
       { width: directCanvas.width, height: directCanvas.height },
       { width: 3162, height: 3162 },
@@ -3732,7 +3749,8 @@ test("reentrant geometry observation prevents stale-plan rendering", async () =>
     assert.equal(reconciled, true);
     assert.equal(renderParams.length, 1);
     const context = renderParams[0]!.canvasContext as unknown as FakeContext;
-    assert.deepEqual(context.transforms, [[2, 0, 0, 2, 0, 0]]);
+    assert.deepEqual(context.transforms, [[1, 0, 0, 1, 0, 0]]);
+    assert.deepEqual(renderParams[0]!.transform, [2, 0, 0, 2, 0, 0]);
   });
 });
 

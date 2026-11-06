@@ -3,6 +3,8 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS } from "../../src/pdfjs-version-policy.js";
 import {
   ANNOTATION_STORAGE_CAPABILITIES,
   asPdfjsAnnotationStorage,
@@ -22,6 +24,8 @@ import {
   validatePdfjsDocumentCapabilities,
   writePdfjsWorkerPort,
 } from "../../src/pdfjs-compatibility.js";
+
+const qualifiedContract = `qualified contract \\(${PDFJS_VIEWER_QUALIFIED_PDFJS_VERSIONS.join(", ").replaceAll(".", "\\.")}\\)`;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -130,10 +134,104 @@ test("unknown or frozen canvas factory internals use native context rendering ra
   assert.equal((seen as { canvas: unknown }).canvas, canvas);
 });
 
+test("render-scoped canvas factories forward and bind getNoAlphaContext during asynchronous initialization", async () => {
+  const initialized = deferred<void>();
+  const canvas = {} as HTMLCanvasElement;
+  const native = { canvas } as CanvasRenderingContext2D;
+  class CanvasFactory {
+    #context = native;
+    create() {
+      return { canvas, context: this.#context };
+    }
+    getNoAlphaContext(target: HTMLCanvasElement) {
+      assert.equal(target, canvas);
+      return this.#context;
+    }
+  }
+  const original = new CanvasFactory();
+  const transport = { canvasFactory: original };
+  let adapted = 0;
+  const page = {
+    _transport: transport,
+    render() {
+      const captured = transport.canvasFactory;
+      assert.notEqual(captured, original);
+      return {
+        promise: initialized.promise.then(() => {
+          // PDF.js 6.5 obtains a native no-alpha root context after task creation.
+          const getNoAlphaContext = captured.getNoAlphaContext;
+          assert.equal(getNoAlphaContext, captured.getNoAlphaContext);
+          assert.equal(getNoAlphaContext(canvas), native);
+          assert.notEqual(captured.create().context, native);
+        }),
+        cancel() {},
+      };
+    },
+  } as unknown as import("pdfjs-dist").PDFPageProxy;
+  const render = startPdfPageRenderTask(page, {} as never, undefined, context => {
+    adapted++;
+    assert.equal(context, native);
+    return { canvas } as CanvasRenderingContext2D;
+  });
+  assert.equal(transport.canvasFactory, original);
+  assert.equal(adapted, 0);
+  initialized.resolve();
+  await render.promise;
+  assert.equal(adapted, 1);
+});
+
+test("NoRotate CSS qualification enforces corrected local anchors independently of upstream transforms", async () => {
+  const { PDFJS_CSS_COMPATIBILITY_MANIFEST, validatePdfjsCssCompatibility } = await import(
+    `${process.cwd()}/scripts/pdfjs-css-compatibility.mjs`
+  );
+  const localCss = await readFile(`${process.cwd()}/src/core.css`, "utf8");
+  const annotation = PDFJS_CSS_COMPATIBILITY_MANIFEST.find(
+    (entry: { category: string }) => entry.category === "annotation",
+  );
+  const manifest = [annotation];
+  const upstreamBase = annotation.upstream
+    .map(([selector, property, value]: string[]) => `${selector} { ${property}: ${value}; }`)
+    .join("\n");
+  for (const version of ["6.4.299", "6.5.438"]) {
+    const upstreamCss = `${upstreamBase}\n.annotationLayer[data-main-rotation="90"] .norotate { transform: ${version === "6.4.299" ? "rotate(270deg) translateX(-100%)" : "rotate(270deg)"}; }`;
+    const input = {
+      upstreamCss,
+      localCss,
+      runtimeSource: annotation.sentinels.join(" "),
+      version,
+      manifest,
+    };
+    validatePdfjsCssCompatibility(input);
+    for (const [rotation, counterRotation, translation] of [
+      [90, 270, "translateX(-100%)"],
+      [180, 180, "translate(-100%, -100%)"],
+      [270, 90, "translateY(-100%)"],
+    ] as const) {
+      const selector = `.pdf-annotation-layer[data-main-rotation="${rotation}"] .norotate`;
+      for (const override of [
+        `${selector} { transform: rotate(${counterRotation}deg) ${translation}; }`,
+        `${selector}.popupAnnotation { transform: rotate(${counterRotation}deg); }`,
+      ])
+        assert.throws(
+          () => validatePdfjsCssCompatibility({ ...input, localCss: `${localCss}\n${override}` }),
+          /annotation: local selector .*norotate.* requires transform:/,
+        );
+    }
+    assert.throws(
+      () =>
+        validatePdfjsCssCompatibility({
+          ...input,
+          localCss: `${localCss}\n.pdf-annotation-layer { inset: 0; }`,
+        }),
+      /annotation: local selector .*pdf-annotation-layer.* requires inset:/,
+    );
+  }
+});
+
 test("reports capability-specific qualified incompatibilities", () => {
   assert.throws(
     () => validatePdfjsDisplayCapabilities({}, { text: true }),
-    /qualified contract \(6\.4\.299\) display module is missing TextLayer/,
+    new RegExp(`${qualifiedContract} display module is missing TextLayer`),
   );
   assert.throws(
     () =>
@@ -141,13 +239,13 @@ test("reports capability-specific qualified incompatibilities", () => {
         {},
         { attachments: false, forms: false, layers: false, print: false },
       ),
-    /qualified contract \(6\.4\.299\) PDFDocumentProxy is missing cleanup\(\)/,
+    new RegExp(`${qualifiedContract} PDFDocumentProxy is missing cleanup\\(\\)`),
   );
   const candidate = storage();
   delete (candidate as Partial<typeof candidate>).getEditor;
   assert.throws(
     () => assertAnnotationStorage(candidate as never),
-    /qualified contract \(6\.4\.299\) AnnotationStorage is missing getEditor\(\)/,
+    new RegExp(`${qualifiedContract} AnnotationStorage is missing getEditor\\(\\)`),
   );
   assert.equal(ANNOTATION_STORAGE_CAPABILITIES.includes("setValue"), true);
   const methods = [
@@ -227,7 +325,7 @@ test("rejects annotation callback slots that cannot be restored", () => {
   Object.defineProperty(source, "onSetModified", { get: () => null, configurable: true });
   assert.throws(
     () => installAnnotationStorageCallbacks(source as never, () => {}),
-    /qualified contract \(6\.4\.299\) AnnotationStorage.*callback slots/,
+    new RegExp(`${qualifiedContract} AnnotationStorage.*callback slots`),
   );
   const editorSource = storage();
   Object.defineProperty(editorSource, "onAnnotationEditor", {
@@ -254,7 +352,7 @@ test("clones optional-content configurations only through the static qualified s
   });
   assert.throws(
     () => clonePdfjsOptionalContentConfig({}, {}),
-    /qualified contract \(6\.4\.299\) OptionalContentConfig is missing fromSerializable\(\)/,
+    new RegExp(`${qualifiedContract} OptionalContentConfig is missing fromSerializable\\(\\)`),
   );
 });
 
@@ -354,6 +452,48 @@ test("starts the exact render task synchronously and preserves abort settlement 
       ),
     { name: "AbortError" },
   );
+});
+
+test("abort during asynchronous render initialization waits for physical task settlement", async () => {
+  const initialization = deferred<void>();
+  let cancelled = false;
+  let initialized = false;
+  let cancels = 0;
+  const failure = new Error("cancelled before graphics initialization");
+  const task = {
+    promise: initialization.promise.then(() => {
+      initialized = true;
+      if (cancelled) throw failure;
+    }),
+    cancel() {
+      cancels++;
+      cancelled = true;
+    },
+  } as import("pdfjs-dist").RenderTask;
+  const page = { render: () => task } as unknown as import("pdfjs-dist").PDFPageProxy;
+  const controller = new AbortController();
+  const render = startPdfPageRenderTask(page, {} as never, controller.signal);
+  let settled = false;
+  const rejected = assert.rejects(render.promise, { name: "AbortError" });
+  void render.promise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  controller.abort();
+  await Promise.resolve();
+  assert.equal(cancels, 1);
+  assert.equal(initialized, false);
+  assert.equal(settled, false);
+  initialization.resolve();
+  await rejected;
+  assert.equal(initialized, true);
+  assert.equal(settled, true);
+  controller.abort();
+  assert.equal(cancels, 1);
 });
 
 test("preserves genuine render failures", async () => {

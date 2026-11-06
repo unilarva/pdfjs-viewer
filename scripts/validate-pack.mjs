@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2022-2026 Lari Natri <lari.natri@iki.fi>
 // SPDX-License-Identifier: Apache-2.0
 
+// Audit one publishable tarball and probe clean installations of every packed exact peer.
+
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -16,10 +18,6 @@ import { parseExactPdfjsVersionUnion } from "./pdfjs-version-manifest.mjs";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const suppliedTarball = process.argv[2] ? resolve(process.argv[2]) : null;
-const packageManifest = JSON.parse(await readFile(resolve(packageDir, "package.json"), "utf8"));
-const pdfjsVersion = parseExactPdfjsVersionUnion(packageManifest.peerDependencies["pdfjs-dist"]).at(
-  -1,
-);
 const workspace = await mkdtemp(resolve(tmpdir(), "pdfjs-viewer-pack-"));
 const npmEnv = { ...process.env, npm_config_cache: resolve(tmpdir(), "kilo/npm-cache") };
 // With geometric fonts and recent default UI updates, the distribution measures
@@ -91,6 +89,7 @@ try {
       `Packed size budget exceeded: ${packedBytes}/${MAX_PACKED_BYTES} bytes packed, ${unpackedBytes}/${MAX_UNPACKED_BYTES} bytes unpacked`,
     );
   const pkg = JSON.parse(await readFile(resolve(packedDir, "package.json"), "utf8"));
+  const qualifiedVersions = parseExactPdfjsVersionUnion(pkg.peerDependencies["pdfjs-dist"]);
   if (pkg.license !== "Apache-2.0" || pkg.publishConfig?.provenance !== true)
     throw new Error("Packed license/provenance metadata is incomplete");
   if (
@@ -141,41 +140,46 @@ try {
     )
       throw new Error(`${mapFile} does not embed every original source`);
   }
-  const consumer = resolve(workspace, "consumer");
-  await mkdir(consumer);
-  await writeFile(
-    resolve(consumer, "package.json"),
-    JSON.stringify({ private: true, type: "module" }),
-  );
-  execFileSync(
-    "npm",
-    ["install", "--ignore-scripts", "--no-package-lock", tarball, `pdfjs-dist@${pdfjsVersion}`],
-    { cwd: consumer, stdio: "inherit", env: npmEnv },
-  );
-  const installed = resolve(consumer, "node_modules/@unilarva/pdfjs-viewer");
-  const installedPdfjs = JSON.parse(
-    await readFile(resolve(consumer, "node_modules/pdfjs-dist/package.json"), "utf8"),
-  );
-  if (installedPdfjs.version !== pdfjsVersion)
-    throw new Error(`Packed install resolved unqualified pdfjs-dist ${installedPdfjs.version}`);
-  await writeFile(
-    resolve(consumer, "probe.mjs"),
-    `import * as packageRoot from "@unilarva/pdfjs-viewer"; const missing = ${JSON.stringify(rootApiManifest.values)}.filter(name => !(name in packageRoot)); if (missing.length) throw new Error(\`Packed root is missing runtime exports: \${missing.join(", ")}\`);`,
-  );
-  execFileSync(process.execPath, ["probe.mjs"], { cwd: consumer, stdio: "inherit", env: npmEnv });
-  const consumerRequire = createRequire(resolve(consumer, "probe.cjs"));
-  for (const entry of privateEmittedSourceEntries) {
-    const stem = entry.slice("src/".length, -".ts".length);
-    let rejected = false;
-    try {
-      consumerRequire.resolve(`@unilarva/pdfjs-viewer/${stem}`);
-    } catch (error) {
-      rejected = error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED";
+  for (const pdfjsVersion of qualifiedVersions) {
+    const consumer = resolve(workspace, `consumer-${pdfjsVersion}`);
+    await mkdir(consumer);
+    await writeFile(
+      resolve(consumer, "package.json"),
+      JSON.stringify({ private: true, type: "module" }),
+    );
+    execFileSync(
+      "npm",
+      ["install", "--ignore-scripts", "--no-package-lock", tarball, `pdfjs-dist@${pdfjsVersion}`],
+      { cwd: consumer, stdio: "inherit", env: npmEnv },
+    );
+    const installed = resolve(consumer, "node_modules/@unilarva/pdfjs-viewer");
+    const installedPdfjs = JSON.parse(
+      await readFile(resolve(consumer, "node_modules/pdfjs-dist/package.json"), "utf8"),
+    );
+    if (installedPdfjs.version !== pdfjsVersion)
+      throw new Error(
+        `Packed install resolved pdfjs-dist ${installedPdfjs.version}, expected ${pdfjsVersion}`,
+      );
+    await writeFile(
+      resolve(consumer, "probe.mjs"),
+      `import * as packageRoot from "@unilarva/pdfjs-viewer"; const missing = ${JSON.stringify(rootApiManifest.values)}.filter(name => !(name in packageRoot)); if (missing.length) throw new Error(\`Packed root is missing runtime exports: \${missing.join(", ")}\`);`,
+    );
+    execFileSync(process.execPath, ["probe.mjs"], { cwd: consumer, stdio: "inherit", env: npmEnv });
+    const consumerRequire = createRequire(resolve(consumer, "probe.cjs"));
+    for (const entry of privateEmittedSourceEntries) {
+      const stem = entry.slice("src/".length, -".ts".length);
+      let rejected = false;
+      try {
+        consumerRequire.resolve(`@unilarva/pdfjs-viewer/${stem}`);
+      } catch (error) {
+        rejected = error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED";
+      }
+      if (!rejected) throw new Error(`Packed install exposed private package subpath ${stem}`);
     }
-    if (!rejected) throw new Error(`Packed install exposed private package subpath ${stem}`);
+    if ((await readdir(resolve(installed, "dist"))).length === 0)
+      throw new Error("Packed installation is incomplete");
+    console.log(`Exact tarball installation passes with pdfjs-dist ${pdfjsVersion}.`);
   }
-  if ((await readdir(resolve(installed, "dist"))).length === 0)
-    throw new Error("Packed installation is incomplete");
   console.log(
     `Exact tarball and packed install are valid (${packedBytes} bytes packed, ${unpackedBytes} bytes unpacked).`,
   );

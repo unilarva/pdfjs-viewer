@@ -94,7 +94,10 @@ class Canvas extends Element {
   }
   readonly context = {
     imageSmoothingEnabled: false,
-    setTransform() {},
+    transforms: [] as number[][],
+    setTransform(...values: number[]) {
+      this.transforms.push(values);
+    },
   };
   getContext(): typeof this.context {
     return this.context;
@@ -1024,7 +1027,7 @@ for (const diagnostics of [false, true]) {
 test("thumbnail revisions preserve ready pixels and lazily refresh with explicit display configuration", async () => {
   const platform = installTestPlatform(
     tag => (tag === "canvas" ? new Canvas() : new Element()) as unknown as HTMLElement,
-    { IntersectionObserver: undefined, ResizeObserver: undefined },
+    { IntersectionObserver: undefined, ResizeObserver: undefined, devicePixelRatio: 1.25 },
   );
   try {
     const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
@@ -1085,7 +1088,17 @@ test("thumbnail revisions preserve ready pixels and lazily refresh with explicit
     const list = container.children[0];
     const item = list.children[0];
     const firstCanvas = item.children[0].children[0] as Canvas;
-    assert.ok(firstCanvas.width > 0);
+    assert.deepEqual(params[0].transform, [1.25, 0, 0, 1.25, 0, 0]);
+    assert.equal(params[0].canvas, firstCanvas as unknown as HTMLCanvasElement);
+    assert.equal(
+      params[0].canvasContext,
+      firstCanvas.context as unknown as CanvasRenderingContext2D,
+    );
+    assert.deepEqual(firstCanvas.context.transforms, [[1, 0, 0, 1, 0, 0]]);
+    assert.deepEqual(
+      { width: firstCanvas.width, height: firstCanvas.height },
+      { width: 125, height: 150 },
+    );
 
     assert.equal(
       thumbnails.setRasterState({
@@ -1117,6 +1130,10 @@ test("thumbnail revisions preserve ready pixels and lazily refresh with explicit
     assert.equal(params.length, 2);
     assert.equal(params[1].optionalContentConfigPromise, optionalContentConfigPromise);
     assert.equal(params[1].printAnnotationStorage, printSnapshots[1]);
+    assert.deepEqual(params[1].transform, params[0].transform);
+    assert.deepEqual((params[1].canvas as unknown as Canvas).context.transforms, [
+      [1, 0, 0, 1, 0, 0],
+    ]);
     assert.equal(printSnapshots.length, 2);
     assert.notEqual(item.children[0].children[0], firstCanvas);
     thumbnails.destroy();

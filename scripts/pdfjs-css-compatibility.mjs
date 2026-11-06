@@ -76,6 +76,7 @@ export const PDFJS_CSS_COMPATIBILITY_MANIFEST = Object.freeze([
       rule(".annotationLayer", "color-scheme", "only light"),
       rule(".annotationLayer section", "position", "absolute"),
       rule(".annotationLayer section", "box-sizing", "border-box"),
+      rule(".annotationLayer section", "transform-origin", "0 0"),
       rule(
         ".annotationLayer section:has(div.annotationContent) canvas.annotationContent",
         "display",
@@ -100,9 +101,42 @@ export const PDFJS_CSS_COMPATIBILITY_MANIFEST = Object.freeze([
     ],
     local: [
       rule(".pdf-annotation-layer", "position", "absolute"),
+      rule(".pdf-annotation-layer", "inset", "0 auto auto 0"),
       rule(".pdf-annotation-layer", "color-scheme", "only light"),
       rule(".pdf-annotation-layer section", "position", "absolute"),
       rule(".pdf-annotation-layer section", "box-sizing", "border-box"),
+      rule(".pdf-annotation-layer section", "transform-origin", "0 0"),
+      rule(
+        '.pdf-annotation-layer[data-main-rotation="90"]',
+        "transform",
+        "rotate(90deg) translateY(-100%)",
+      ),
+      rule(
+        '.pdf-annotation-layer[data-main-rotation="180"]',
+        "transform",
+        "rotate(180deg) translate(-100%, -100%)",
+      ),
+      rule(
+        '.pdf-annotation-layer[data-main-rotation="270"]',
+        "transform",
+        "rotate(270deg) translateX(-100%)",
+      ),
+      // Local semantics include the upstream NoRotate fix, even for older qualified CSS.
+      ...[
+        [90, 270, "translateX(-100%)"],
+        [180, 180, "translate(-100%, -100%)"],
+        [270, 90, "translateY(-100%)"],
+      ].flatMap(([rotation, counterRotation, translation]) => {
+        const selector = `.pdf-annotation-layer[data-main-rotation="${rotation}"] .norotate`;
+        return [
+          rule(selector, "transform", `rotate(${counterRotation}deg)`),
+          rule(
+            `${selector}.popupAnnotation`,
+            "transform",
+            `rotate(${counterRotation}deg) ${translation}`,
+          ),
+        ];
+      }),
       rule(
         ".pdf-annotation-layer section:has(div.annotationContent) canvas.annotationContent",
         "display",
@@ -132,12 +166,18 @@ export const PDFJS_CSS_COMPATIBILITY_MANIFEST = Object.freeze([
       "popupTriggerArea",
       "fileAttachmentAnnotation",
       "annotationContent",
+      "norotate",
     ],
     divergences: [
       {
         id: "annotation-markup-wrapper",
         reason:
           "Package markup wraps interactive PDF.js output for feature policy and safe controls.",
+      },
+      {
+        id: "annotation-norotate-anchor",
+        reason:
+          "Ordinary NoRotate annotations anchor at their rect's top-left; only popups retain translations, including with older upstream CSS that translates both.",
       },
     ],
   },

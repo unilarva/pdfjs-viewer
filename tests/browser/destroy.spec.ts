@@ -3,14 +3,32 @@
 
 import { expect, test } from "@playwright/test";
 import { build } from "esbuild";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {} from "./destroy-fixture";
 
 let fixture: string;
 test.beforeAll(async () => {
+  // Match the server's selected display build and worker, including qualification installs.
+  const pdfjsRoot = process.env.PDFJS_VIEWER_TEST_PDFJS_ROOT
+    ? resolve(process.env.PDFJS_VIEWER_TEST_PDFJS_ROOT)
+    : dirname(fileURLToPath(import.meta.resolve("pdfjs-dist/package.json")));
   const result = await build({
     entryPoints: [fileURLToPath(new URL("./destroy-fixture.ts", import.meta.url))],
     bundle: true,
+    plugins: [
+      {
+        name: "selected-pdfjs-installation",
+        setup(builder) {
+          builder.onResolve({ filter: /^pdfjs-dist(?:\/|$)/ }, ({ path: specifier }) => {
+            let subpath = specifier === "pdfjs-dist" ? "build/pdf.mjs" : specifier.slice(11);
+            if (process.env.PDFJS_VIEWER_TEST_LEGACY === "1" && subpath === "build/pdf.mjs")
+              subpath = "legacy/build/pdf.mjs";
+            return { path: join(pdfjsRoot, subpath) };
+          });
+        },
+      },
+    ],
     write: false,
     format: "esm",
     platform: "browser",

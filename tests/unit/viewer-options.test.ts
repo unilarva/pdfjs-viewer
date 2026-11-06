@@ -484,12 +484,18 @@ test("PDF.js XFA loading is derived solely from form feature policy", () => {
   assert.deepEqual(disabled.pdfjsOptions, {
     verbosity: 1,
     enableXfa: false,
+    disableWorkerRendering: true,
   });
   assert.deepEqual(enabled.pdfjsOptions, {
     verbosity: 1,
     enableXfa: true,
+    disableWorkerRendering: true,
   });
   assert.throws(() => pdfjsDocumentLoadOptions({ enableXfa: true } as never, false), /enableXfa/);
+  assert.throws(
+    () => pdfjsDocumentLoadOptions({ disableWorkerRendering: false } as never, false),
+    /disableWorkerRendering/,
+  );
 });
 
 test("opt-in font geometry retains converted font data without overriding explicit outline rendering", () => {

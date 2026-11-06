@@ -7,6 +7,7 @@ import * as PDFJS from "pdfjs-dist";
 declare global {
   interface Window {
     ocgBenchmark: {
+      pdfjsVersion: string;
       viewer: PdfjsViewer;
       logs: Array<{ at: number; entry: Readonly<PdfjsViewerLogEntry> }>;
       rasters: Map<number, HTMLCanvasElement>;
@@ -266,4 +267,10 @@ async function profilePage(
     await task.destroy();
   }
 }
-window.ocgBenchmark = { viewer, logs, rasters: new Map(), profilePage };
+window.ocgBenchmark = {
+  pdfjsVersion: PDFJS.version,
+  viewer,
+  logs,
+  rasters: new Map(),
+  profilePage,
+};
