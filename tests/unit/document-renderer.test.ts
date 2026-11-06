@@ -4735,6 +4735,289 @@ for (const motion of ["forward", "stationary"] as const) {
   });
 }
 
+test("expanded visible demand revokes oversized work and keeps physical canvas peaks within budget", async () => {
+  const canvases = new Set<FakeCanvas>();
+  let peak = 0;
+  const sample = () => {
+    peak = Math.max(
+      peak,
+      [...canvases].reduce((bytes, canvas) => bytes + canvas.width * canvas.height * 4, 0),
+    );
+  };
+  const createCanvas = () => {
+    const canvas = new FakeCanvas();
+    let width = 0;
+    let height = 0;
+    Object.defineProperties(canvas, {
+      width: {
+        get: () => width,
+        set(value: number) {
+          width = value;
+          sample();
+        },
+      },
+      height: {
+        get: () => height,
+        set(value: number) {
+          height = value;
+          sample();
+        },
+      },
+    });
+    canvases.add(canvas);
+    return canvas;
+  };
+  await withDetailDocument(
+    async flush => {
+      const surfaces = new Surfaces();
+      const pages = [1, 2, 3, 4, 5, 6];
+      for (const pageNo of pages) surfaces.register(pageNo, createCanvas());
+      const pending = deferred<void>();
+      const starts: Array<{ pageNo: number; canvas: HTMLCanvasElement }> = [];
+      let cancelled = 0;
+      const renderer = new DocumentRenderer(surfaces, "test", {
+        ...settings,
+        allowVisibleDirectRendering: false,
+      });
+      renderer.beginDocument({
+        getPage: async (pageNo: number) => ({
+          ...page({ value: 0 }, () => null, { width: 1000, height: 1000 }),
+          render: (params: Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]) => {
+            starts.push({ pageNo, canvas: params.canvas! });
+            return {
+              promise: starts.length === 1 ? pending.promise : Promise.resolve(),
+              cancel: () => cancelled++,
+            };
+          },
+        }),
+      } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+      const initial: RenderViewSnapshot = {
+        ...view(2),
+        rows: pages.map(pageNo => [pageNo]),
+        rowBounds: pages.map((_, index) => ({ top: index * 1000, bottom: (index + 1) * 1000 })),
+        viewport: { top: 0, height: 1000 },
+        pageBaseSizes: new Map(pages.map(pageNo => [pageNo, { width: 1000, height: 1000 }])),
+        fallbackPageSize: { width: 1000, height: 1000 },
+      };
+      renderer.reconcile(initial);
+      await flush();
+      assert.equal(starts.length, 1);
+      const stale = starts[0].canvas;
+      assert.equal(stale.width, 2000);
+      renderer.reconcile({
+        ...initial,
+        viewport: { top: 0, height: 6000 },
+        visibleRange: { first: 0, last: 5, center: 2 },
+      });
+      await flush();
+      assert.equal(cancelled, 1);
+      assert.equal(starts.length, 1, "reduced concurrency retains the cancelled physical slot");
+      assert.equal(renderer.snapshot().settlingRenderCount, 1);
+      assert.equal(renderer.snapshot().activeTemporaryBytes, 16_000_000);
+      assert.equal(stale.width, 2000, "cancel does not release a still-owned raster");
+      pending.resolve();
+      for (let pass = 0; pass < 12; pass++) await flush();
+      assert.equal(stale.width, 0);
+      assert.equal(renderer.snapshot().renderedPageCount, 6);
+      assert.equal(renderer.snapshot().settlingRenderCount, 0);
+      assert.equal(renderer.snapshot().reservationBytes, 0);
+      assert.equal(starts.length, 7, "each page finishes once at the revised target");
+      assert.ok(pages.every(pageNo => surfaces.leaseFor(pageNo)!.canvas.width === 1094));
+      assert.ok(peak <= settings.memoryLimitMiB * 1024 * 1024, `physical canvas peak ${peak}`);
+      await Promise.all(renderer.resetDocument());
+      assert.ok([...canvases].every(canvas => canvas.width === 0 && canvas.height === 0));
+    },
+    () => createCanvas() as unknown as Element,
+  );
+});
+
+test("a lower raster budget revokes pending acquisition before oversized allocation", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    const canvas = surfaces.register(1).canvas;
+    const acquisition = deferred<import("pdfjs-dist").PDFPageProxy>();
+    const params: Array<Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]> = [];
+    const proxy = page({ value: 0 }, () => null, { renderParams: params });
+    let acquisitions = 0;
+    const renderer = new DocumentRenderer(surfaces, "test", {
+      ...settings,
+      maxConcurrentRenders: 1,
+    });
+    renderer.beginDocument({
+      getPage: () => (++acquisitions === 1 ? acquisition.promise : Promise.resolve(proxy)),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    renderer.reconcile(view(2));
+    await settle();
+    renderer.reconcile(view(1));
+    assert.equal(renderer.snapshot().authoritativeRenderCount, 0);
+    assert.equal(renderer.snapshot().settlingRenderCount, 1);
+    assert.equal(renderer.snapshot().activeTemporaryBytes, 0);
+    acquisition.resolve(proxy);
+    for (let pass = 0; pass < 4; pass++) await settle();
+    assert.equal(params.length, 1);
+    assert.deepEqual([params[0].canvas!.width, params[0].canvas!.height], [0, 0]);
+    assert.deepEqual([canvas.width, canvas.height], [100, 120]);
+    assert.equal(renderer.snapshot().renderedPageCount, 1);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("temporary work loses authority when revised demand only budgets direct rendering", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    const leases = [surfaces.register(1), surfaces.register(2)];
+    const pending = deferred<void>();
+    const starts: Array<{ pageNo: number; canvas: HTMLCanvasElement }> = [];
+    let cancelled = 0;
+    const renderer = new DocumentRenderer(surfaces, "test", {
+      ...settings,
+      memoryLimitMiB: 0.11,
+      allowDprReduction: false,
+    });
+    renderer.beginDocument({
+      getPage: async (pageNo: number) => ({
+        ...page({ value: 0 }),
+        render: (params: Parameters<import("pdfjs-dist").PDFPageProxy["render"]>[0]) => {
+          starts.push({ pageNo, canvas: params.canvas! });
+          return {
+            promise: starts.length === 1 ? pending.promise : Promise.resolve(),
+            cancel: () => cancelled++,
+          };
+        },
+      }),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    const initial = {
+      ...view(),
+      rows: [[1], [2]],
+      rowBounds: [
+        { top: 0, bottom: 120 },
+        { top: 120, bottom: 240 },
+      ],
+    };
+    renderer.reconcile(initial);
+    await settle();
+    assert.notEqual(starts[0].canvas, leases[0].canvas);
+    renderer.reconcile({ ...initial, visibleRange: { first: 0, last: 1, center: 0 } });
+    await settle();
+    assert.equal(cancelled, 1);
+    assert.equal(starts.length, 1);
+    assert.equal(renderer.snapshot().activeTemporaryBytes, 48_000);
+    pending.resolve();
+    for (let pass = 0; pass < 6; pass++) await settle();
+    assert.equal(renderer.snapshot().renderedPageCount, 2);
+    assert.equal(starts.length, 3);
+    assert.ok(starts.slice(1).every(start => start.canvas === leases[start.pageNo - 1].canvas));
+    assert.equal(renderer.snapshot().activeTemporaryBytes, 0);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("equal-rounded DPR reductions preserve pending work and committed higher-quality output", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    const first = surfaces.register(1).canvas as unknown as FakeCanvas;
+    const second = surfaces.register(2).canvas;
+    const pending = deferred<void>();
+    const starts: number[] = [];
+    let cancelled = 0;
+    const renderer = new DocumentRenderer(surfaces, "test", settings);
+    renderer.beginDocument({
+      getPage: async (pageNo: number) => ({
+        ...page({ value: 0 }),
+        render: () => {
+          starts.push(pageNo);
+          return {
+            promise: pageNo === 2 ? pending.promise : Promise.resolve(),
+            cancel: () => cancelled++,
+          };
+        },
+      }),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    const initial = {
+      ...view(2),
+      rows: [[1], [2]],
+      rowBounds: [
+        { top: 0, bottom: 120 },
+        { top: 120, bottom: 240 },
+      ],
+    };
+    renderer.reconcile(initial);
+    await settle();
+    renderer.reconcile({
+      ...initial,
+      devicePixelRatio: 1.004,
+      visibleRange: { first: 0, last: 1, center: 0 },
+    });
+    await settle();
+    renderer.reconcile({
+      ...initial,
+      devicePixelRatio: 1.002,
+      visibleRange: { first: 0, last: 1, center: 0 },
+    });
+    await settle();
+    assert.equal(cancelled, 0, "both DPRs allocate the same 101 by 121 raster");
+    assert.equal(renderer.snapshot().authoritativeRenderCount, 1);
+    pending.resolve();
+    for (let pass = 0; pass < 3; pass++) await settle();
+    assert.deepEqual(starts, [1, 2]);
+    assert.deepEqual([first.width, first.height, first.context.drawCount], [200, 240, 1]);
+    assert.deepEqual([second.width, second.height], [101, 121]);
+    assert.equal(renderer.snapshot().renderedPageCount, 2);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
+test("a raster budget downgrade leaves unrelated canvas-constrained work authoritative", async () => {
+  await withFakeDocument(async () => {
+    const surfaces = new Surfaces();
+    surfaces.register(1);
+    surfaces.register(2);
+    const pending = [deferred<void>(), deferred<void>()];
+    const starts: number[] = [];
+    const cancelled: number[] = [];
+    const renderer = new DocumentRenderer(surfaces, "test", {
+      ...settings,
+      maxCanvasDimension: 1000,
+    });
+    renderer.beginDocument({
+      getPage: async (pageNo: number) => ({
+        ...page({ value: 0 }, () => null, pageNo === 2 ? { width: 1000, height: 1000 } : {}),
+        render: () => {
+          starts.push(pageNo);
+          return {
+            promise: starts.length <= 2 ? pending[pageNo - 1].promise : Promise.resolve(),
+            cancel: () => cancelled.push(pageNo),
+          };
+        },
+      }),
+    } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+    const initial = {
+      ...view(2),
+      rows: [[1, 2]],
+      pageBaseSizes: new Map([
+        [1, { width: 100, height: 120 }],
+        [2, { width: 1000, height: 1000 }],
+      ]),
+    };
+    renderer.reconcile(initial);
+    await settle();
+    renderer.reconcile({ ...initial, devicePixelRatio: 1 });
+    assert.deepEqual(cancelled, [1]);
+    assert.equal(renderer.snapshot().authoritativeRenderCount, 1);
+    assert.equal(renderer.snapshot().settlingRenderCount, 1);
+    pending[1].resolve();
+    await settle();
+    assert.equal(renderer.snapshot().renderedPageCount, 1);
+    pending[0].resolve();
+    for (let pass = 0; pass < 4; pass++) await settle();
+    assert.deepEqual(starts, [1, 2, 1]);
+    assert.equal(renderer.snapshot().renderedPageCount, 2);
+    assert.equal(surfaces.leaseFor(1)!.canvas.width, 100);
+    assert.equal(surfaces.leaseFor(2)!.canvas.width, 1000);
+    await Promise.all(renderer.resetDocument());
+  });
+});
+
 test("settling temporary memory delays canonical work instead of lowering its DPR", async () => {
   await withFakeDocument(async () => {
     const surfaces = new Surfaces();

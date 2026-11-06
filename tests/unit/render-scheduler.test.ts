@@ -401,6 +401,7 @@ test("result sufficiency ignores execution strategy and uses epsilon-aware DPR",
   const requirement = {
     scale: 1,
     renderDpr: operation.requirement.renderDpr + 5e-7,
+    useDirectCanvas: false,
     rasterState: operation.requirement.rasterState,
   };
   assert.equal(renderOperationSatisfies(operation, requirement), true);

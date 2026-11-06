@@ -919,7 +919,11 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    by the shared output-DPR correction.
    Retained placeholders remain charged
    alongside the full temporary raster that replaces them. The scheduler installs the immutable
-   plan and admits operation requirements. The renderer captures the renderer document ID, exact
+   plan and admits operation requirements. On replanning, the renderer also checks unfinished base
+   work against the new rounded raster cost and direct/temporary strategy. Oversized operations
+   lose authority before new admission; their physical buffers and slots remain owned until
+   settlement. Committed higher-quality reuse is separate and remains charged at its actual cost.
+   The renderer captures the renderer document ID, exact
    surface lease, and immutable main raster state. The facade installs main and thumbnail state as
    one admission-suspended transaction, giving future layer/form owners one atomic handoff.
    `maxBufferViewportHeights` is one total CSS-distance budget measured against the current

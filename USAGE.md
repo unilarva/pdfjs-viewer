@@ -550,7 +550,10 @@ limit nearby speculative work. These constraints are cumulative. Visible pages r
 even when a configured limit is too small to represent them.
 
 Replacement planning includes the retained bitmap, temporary rendering, and the attached commit
-copy, not just final settled pixels. For zoom replacements, the planner reserves the larger old/new
+copy, not just final settled pixels. When demand changes, unfinished renders that exceed their
+revised allocation targets are cancelled and retried; their buffers remain charged until settlement.
+Already committed higher-quality output stays reusable at its actual cost.
+For zoom replacements, the planner reserves the larger old/new
 allocation per page, with full old/temporary/commit-copy overlap for concurrent replacements, rather
 than assuming every old and new page coexist. This avoids unnecessary reduced-quality first passes
 and immediate rerenders of spreads while preserving the best base quality the constraints permit.

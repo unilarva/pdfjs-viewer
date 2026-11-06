@@ -11,6 +11,7 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 - Release closed documents reliably when text-stream cancellation races with completion.
 - Avoid unnecessary low-quality base renders and immediate quality-upgrade rerenders when zooming
   spreads, while preserving replacement-buffer memory headroom.
+- Cancel unfinished page renders that exceed revised allocation targets when visible demand changes.
 - Keep default dialog and menu close buttons visible while scrolling.
 
 ## 0.9.0

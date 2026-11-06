@@ -2666,6 +2666,11 @@ export interface PdfjsViewerRenderingProfilePolicy {
  *     visible base rendering is never preempted. Pending detail keeps its next
  *     admission slot ahead of prefetch, including during its movement debounce.
  *
+ * Revised plans cancel unfinished base renders whose rounded backing-store cost
+ * or temporary-buffer strategy exceeds the new page allocation. Cancelled resources
+ * remain charged until physical settlement; retries use the revised allocation.
+ * Already committed higher-quality output remains reusable at its actual cost.
+ *
  * Detail crops reuse the exact committed rotated PDF.js viewport with a clipped
  * uniform DPR/translation transform. Viewport changes are debounced, covering
  * crops are reused, and transient zoom transforms existing imagery without

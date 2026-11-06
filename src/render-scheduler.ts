@@ -60,10 +60,11 @@ interface RenderOperationRequirement {
   readonly rasterState: MainRasterState;
 }
 
-/** Current semantic output requirements used to validate admitted work. */
+/** Current output requirements and allocation strategy used to validate admitted work. */
 interface CurrentRenderRequirement {
   readonly scale: number;
   readonly renderDpr: number;
+  readonly useDirectCanvas: boolean;
   readonly rasterState: MainRasterState;
 }
 
@@ -260,6 +261,7 @@ export class RenderScheduler {
     return Object.freeze({
       scale: context.scale,
       renderDpr,
+      useDirectCanvas: context.plan.directRenderPages.has(pageNo),
       rasterState: context.rasterState,
     });
   }

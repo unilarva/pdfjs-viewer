@@ -16,6 +16,8 @@
  * buffering and later viewport changes cannot move its completion target.
  * Evictable old-scale placeholders are removed before planning, while temporary
  * buffers from cancelled work gate admission rather than lowering canonical DPR.
+ * Unfinished rasters must fit revised page allocations; committed higher-quality
+ * output remains reusable at its actual accounted cost.
  *
  * Document reset and surface reflow invalidate operations synchronously before
  * cancellation callbacks or layout mutation. Every callback is treated as
@@ -2427,12 +2429,15 @@ export class DocumentRenderer {
     );
   }
 
+  /** Unfinished output needs both semantic sufficiency and budget-compatible execution. */
   #operationSatisfiesCurrent(operation: RenderOperation, resultDpr?: number): boolean {
     if (operation.kind === "detail") return this.#detailIsCurrent(operation);
     const requirement = this.#scheduler.currentRequirementFor(operation.pageNo);
     const context = this.#operationContexts.get(operation);
+    const view = this.#view;
     return (
       requirement != null &&
+      view != null &&
       context?.contentGeneration === this.#contentGenerationFor(operation.pageNo) &&
       this.#sourceIsCurrent(
         operation.pageNo,
@@ -2447,7 +2452,16 @@ export class DocumentRenderer {
           rasterState: operation.requirement.rasterState,
         },
         resultDpr,
-      )
+      ) &&
+      // Committed output is already charged at its actual size. An unfinished
+      // raster cannot borrow that reuse rule to outgrow a revised plan's target.
+      (operation.requirement.useDirectCanvas || !requirement.useDirectCanvas) &&
+      this.#rasterBytes(
+        operation.pageNo,
+        resultDpr ?? operation.requirement.renderDpr,
+        view,
+        operation.requirement,
+      ) <= this.#rasterBytes(operation.pageNo, requirement.renderDpr, view)
     );
   }
 
@@ -3341,14 +3355,22 @@ export class DocumentRenderer {
     return row != null && row >= view.visibleRange.first && row <= view.visibleRange.last;
   }
 
-  #rasterBytes(pageNo: number, dpr: number, view: RenderViewSnapshot): number {
+  /** Resolves rounded raster cost with either current or captured admission limits. */
+  #rasterBytes(
+    pageNo: number,
+    dpr: number,
+    view: RenderViewSnapshot,
+    limits: Readonly<
+      Pick<PdfjsViewerRenderingProfileSettings, "maxCanvasPixels" | "maxCanvasDimension">
+    > = this.#settings,
+  ): number {
     const size = view.pageBaseSizes.get(pageNo) ?? view.fallbackPageSize;
     const raster = resolveRasterDimensions(
       size.width * view.scale,
       size.height * view.scale,
       dpr,
-      this.#settings.maxCanvasPixels,
-      this.#settings.maxCanvasDimension,
+      limits.maxCanvasPixels,
+      limits.maxCanvasDimension,
     );
     return raster.width * raster.height * 4;
   }
