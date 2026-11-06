@@ -9,6 +9,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
 - Correct rotated annotation geometry, including RTL and non-rotating popup anchors, and HiDPI
   form appearances.
 - Release closed documents reliably when text-stream cancellation races with completion.
+- Avoid unnecessary low-quality base renders and immediate quality-upgrade rerenders when zooming
+  spreads, while preserving replacement-buffer memory headroom.
 - Keep default dialog and menu close buttons visible while scrolling.
 
 ## 0.9.0

@@ -380,6 +380,46 @@ test("@mobile details are unnecessary at native resolution and obey a constraine
   }
 });
 
+test("@mobile high-zoom spread replacements render each base once before detail within the memory budget", async ({
+  page,
+}) => {
+  await page.evaluate(() => window.fixture.createDetailViewer(12));
+  await page.evaluate(() => window.fixture.detailViewer!.setPageLayout("double"));
+  await zoom(page, 8);
+  const start = await page.evaluate(() => window.fixture.logs.length);
+  await zoom(page, 9);
+  await checkCrop(page);
+  // Cover both detail debounce and scroll-idle replanning after the first crop commits.
+  await page.waitForTimeout(250);
+  const result = await page.evaluate(start => {
+    const events = window.fixture.logs.slice(start).filter(entry => entry.viewerId === "detail");
+    const starts = events.filter(entry => entry.event === "page-render-started");
+    const detailStart = events.findIndex(entry => entry.event === "detail-render-started");
+    return {
+      starts: starts.map(entry => ({
+        page: entry.details?.pageNo,
+        scale: entry.details?.scale,
+        pixels: Number(entry.details?.bufferWidth) * Number(entry.details?.bufferHeight),
+        strategy: entry.details?.commitStrategy,
+      })),
+      detailStarts: events.filter(entry => entry.event === "detail-render-started").length,
+      baseAfterDetail: events
+        .slice(detailStart)
+        .some(entry => entry.event === "page-render-completed"),
+      peak: window.fixture.detailAllocationPeakBytes,
+    };
+  }, start);
+  expect(result.starts.map(entry => entry.page).sort()).toEqual([1, 2]);
+  for (const entry of result.starts) {
+    expect(entry.scale).toBe(9);
+    expect(entry.strategy).toBe("temporary-canvas");
+    expect(entry.pixels).toBeGreaterThan(750_000 * 0.99);
+  }
+  expect(result.detailStarts).toBe(1);
+  expect(result.baseAfterDetail).toBe(false);
+  expect(result.peak).toBeLessThanOrEqual(12 * 1024 * 1024);
+});
+
 test("@mobile a tight memory profile retains its base fallback without oversized allocations", async ({
   page,
 }) => {

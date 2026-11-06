@@ -15,7 +15,7 @@
  * or directional motion policy. Keeping this policy pure makes its ordering and
  * pressure behavior directly testable.
  * Placeholder/direct transitional occupancy enters as fixed bytes; per-page
- * placeholder identity additionally preserves safe replacement and exact transition peaks.
+ * placeholder identity bounds old/new overlap by the admitted replacement concurrency.
  * Transitional output never becomes desired or retained output. See the
  * [architecture guide](../ARCHITECTURE.md) for the authoritative rendering procedure.
  *
@@ -341,6 +341,14 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
       ? Math.max(plannedBytes, allocatedBytes)
       : plannedBytes;
   };
+  /** Old placeholder bytes remain charged until that page's replacement commits. */
+  const placeholderBytes = (page: number): number => {
+    const bytes = input.fixedReplacementPageBytes?.get(page) ?? 0;
+    return Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
+  };
+  /** With the old allocation already fixed, reserve the larger old/new attached store. */
+  const additionalPageBytes = (page: number, targetBytes: number): number =>
+    Math.max(0, targetBytes - placeholderBytes(page));
   const fallbackRowHeight = (rowIndex: number): number =>
     Math.max(
       1,
@@ -406,7 +414,7 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
     const bytes = rasterBytes(page, raster);
     pageRenderDprs.set(page, raster.renderDpr);
     desiredPageBytes.set(page, bytes);
-    desiredSteadyBytes += bytes;
+    desiredSteadyBytes += additionalPageBytes(page, bytes);
     if (raster.canvasLimited) canvasLimitPages.add(page);
   }
   const memoryLimitPages = new Set<number>();
@@ -438,13 +446,20 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
     // canvas here can evict that same output and create a render/evict loop.
     const committedDpr = input.committedPageRenderDprs.get(page);
     if (committedDpr != null && committedDpr + DPR_EPSILON >= targetDpr) return 0;
+    const oldPlaceholderBytes = placeholderBytes(page);
+    if (oldPlaceholderBytes > 0) {
+      // The attached envelope already includes max(old, new). Only active
+      // replacements additionally need old + temporary new + attached new.
+      return targetBytes + Math.min(oldPlaceholderBytes, targetBytes);
+    }
     const oldCommittedBytes = committedBytes(page);
     if (oldCommittedBytes > 0) return Math.max(targetBytes, oldCommittedBytes);
     return targetBytes;
   };
 
-  // Steady memory is attached output. Peak memory additionally includes the
-  // largest temporary buffers that may coexist at the chosen concurrency.
+  // Attached occupancy includes the larger old/new store for each placeholder,
+  // not every old store plus every future replacement. Peak additionally covers
+  // the largest active replacement overlaps allowed by the chosen concurrency.
   const steadyBytes = (): number => fixedOccupiedBytes + desiredSteadyBytes + retainedSteadyBytes;
   const temporaryPeakBytes = (additionalOverheads: readonly number[] = []): number =>
     [
@@ -466,7 +481,8 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
     let high = input.requestedDpr;
     const bytesAt = (candidateDpr: number): number => {
       let bytes = fixedOccupiedBytes;
-      for (const page of mandatoryPages) bytes += rasterBytes(page, rasterFor(page, candidateDpr));
+      for (const page of mandatoryPages)
+        bytes += additionalPageBytes(page, rasterBytes(page, rasterFor(page, candidateDpr)));
       return bytes;
     };
     if (bytesAt(low) <= limit) {
@@ -485,7 +501,7 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
       const bytes = rasterBytes(page, raster);
       pageRenderDprs.set(page, renderDpr);
       desiredPageBytes.set(page, bytes);
-      desiredSteadyBytes += bytes;
+      desiredSteadyBytes += additionalPageBytes(page, bytes);
       if (renderDpr < initialDpr - DPR_EPSILON) memoryLimitPages.add(page);
     }
     visibleDprReduced = memoryLimitPages.size > 0;
@@ -567,7 +583,7 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
         const bytes = rasterBytes(page, raster);
         pageRenderDprs.set(page, raster.renderDpr);
         desiredPageBytes.set(page, bytes);
-        desiredSteadyBytes += bytes;
+        desiredSteadyBytes += additionalPageBytes(page, bytes);
       }
     };
     let low = 0;
@@ -613,7 +629,7 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
       for (const page of pages) {
         const raster = rasterFor(page, dpr);
         const bytes = rasterBytes(page, raster);
-        steady += bytes;
+        steady += additionalPageBytes(page, bytes);
         const direct = !replacesCommittedPage(page);
         if (!direct) temporary.push(temporaryOverhead(page, bytes, raster.renderDpr));
       }
@@ -754,7 +770,10 @@ export function createRenderPlan(input: Readonly<RenderPlannerInput>): RenderPla
   const peak = steady + desiredTemporaryBytes;
   const visiblePlannedBytes =
     fixedOccupiedBytes +
-    [...visiblePages].reduce((sum, page) => sum + desiredPageBytes.get(page)!, 0);
+    [...visiblePages].reduce(
+      (sum, page) => sum + additionalPageBytes(page, desiredPageBytes.get(page)!),
+      0,
+    );
   return {
     desiredPages,
     admittedRowIndexes,

@@ -813,6 +813,12 @@ fits the retained/temporary/commit-copy transition rather than only the final se
 configured quality floor is preserved unless a per-canvas ceiling already lies below it; such pages
 can be fitted further down to one covered pixel. Reused committed output keeps its actual cost and
 needs no replacement reservation, so an unaffordable quality upgrade cannot force a memory overage.
+For old-scale placeholders, the attached envelope charges `max(oldBytes, targetBytes)` per desired
+page. Each active replacement adds `targetBytes + min(oldBytes, targetBytes)`, conservatively covering
+the old bitmap, temporary raster, and attached commit copy together. Only the largest overlaps allowed
+by concurrency are added; unrequested placeholders and unrelated occupancy remain fully charged.
+This avoids artificially lowering initial base quality by counting every old and new spread page
+simultaneously, without pinning quality or delaying detail rendering with a separate zoom policy.
 Queue admission remains separate from policy: the scheduler renders
 visible work first, favors the leading edge while scrolling, returns to center-out order when
 stationary, and may preempt only speculative work. `PdfjsViewerRenderingProfileSettings` TSDoc is the
@@ -891,10 +897,11 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    Vertical movement keeps direction active for 120 ms after its latest sample; idle
    expiry republishes the same viewport as stationary without repainting sufficient output.
 2. The planner exclusively selects each desired page's DPR and temporary- versus
-   attached-canvas execution strategy. Its peak estimate models the two real replacement
-   phases: old attached plus temporary output while PDF.js renders, then target attached
-   plus temporary output during synchronous copy. Old and target attached stores are not
-   double-counted as simultaneously live on the same surface. One shared raster-dimension resolver
+   attached-canvas execution strategy. Same-scale replacement peaks model old attached plus
+   temporary output while PDF.js renders, then target attached plus temporary output during
+   synchronous copy. Old-scale placeholders additionally retain a conservative old/temporary/copy
+   allowance for active replacements, bounded by concurrency; inactive pages charge the larger
+   old/new attached store instead of both. One shared raster-dimension resolver
    converts CSS geometry and target DPR into exact integer backing dimensions for planning,
    reservation, and execution. Near-integer products are normalized to PDF.js-compatible float
    precision before rounding so insignificant arithmetic residue cannot allocate a whole extra row
@@ -1047,8 +1054,10 @@ full-page canvas growth; the renderer stays device-agnostic and uses the selecte
    dimensions, current connected lease, and `committed` state. Preserving reflow reasserts the
    renderer-owned canvas presentation dimensions on the rebound exact lease. Execution strategy
    is not result identity. Equivalent plans and lower requirements do not repaint.
-8. Old-scale zoom output is explicit `placeholder` state. Its bytes consume fixed planner
-   headroom but cannot satisfy plans/readiness; grace expiry evicts it without scrolling.
+8. Old-scale zoom output is explicit `placeholder` state. Its bytes remain charged but cannot
+   satisfy plans/readiness. Per-page replacement accounting bounds old/new overlap by concurrency;
+   visible or explicitly pinned placeholders survive grace expiry until replacement commits or
+   they are no longer needed.
 9. The facade presents rendering progress only for a stable cohort containing the pages
    visible in the renderer document's first valid plan. Buffered pages do not delay readiness,
    and viewport or profile changes cannot replace or enlarge that cohort. Subsequent same-document

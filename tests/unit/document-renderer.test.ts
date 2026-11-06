@@ -262,10 +262,11 @@ async function withFakeDocument(run: () => Promise<void>): Promise<void> {
 
 async function withDetailDocument(
   run: (flush: () => Promise<void>) => Promise<void>,
+  createCanvas: () => Element = () => new FakeCanvas() as unknown as Element,
 ): Promise<void> {
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let nextTimer = 0;
-  const platform = installTestPlatform(() => new FakeCanvas() as unknown as Element, {
+  const platform = installTestPlatform(createCanvas, {
     setTimeout: ((callback: () => void, delay: number) => {
       timers.set(++nextTimer, { callback, delay });
       return nextTimer;
@@ -2092,6 +2093,119 @@ test("constrained high-zoom detail and buffered output settle without render-evi
     );
     await Promise.allSettled(renderer.resetDocument());
   });
+});
+
+test("high-zoom spread replaces each base once at canvas quality before rendering detail", async () => {
+  const canvases = new Set<FakeCanvas>();
+  let peak = 0;
+  const createCanvas = () => {
+    const canvas = new FakeCanvas();
+    let width = 0;
+    let height = 0;
+    const sample = () => {
+      peak = Math.max(
+        peak,
+        [...canvases].reduce((sum, item) => sum + item.width * item.height * 4, 0),
+      );
+    };
+    Object.defineProperties(canvas, {
+      width: {
+        get: () => width,
+        set: (value: number) => {
+          width = value;
+          sample();
+        },
+      },
+      height: {
+        get: () => height,
+        set: (value: number) => {
+          height = value;
+          sample();
+        },
+      },
+    });
+    canvases.add(canvas);
+    return canvas;
+  };
+  await withDetailDocument(
+    async flush => {
+      const surfaces = new Surfaces();
+      surfaces.register(1, createCanvas());
+      surfaces.register(2, createCanvas());
+      const events: Array<{ event: string; pageNo: number; dpr: number }> = [];
+      const limit = 12 * 1024 * 1024;
+      const renderer = new DocumentRenderer(
+        surfaces,
+        "test",
+        {
+          ...settings,
+          memoryLimitMiB: 12,
+          maxCanvasPixels: 750_000,
+          allowVisibleDirectRendering: false,
+        },
+        {
+          diagnostic: entry => {
+            if (
+              entry.event.startsWith("page-render-") ||
+              entry.event.startsWith("detail-render-")
+            ) {
+              events.push({
+                event: entry.event,
+                pageNo: Number(entry.details.pageNo),
+                dpr: Number(entry.details.renderDpr ?? entry.details.dpr),
+              });
+            }
+          },
+        },
+        window,
+      );
+      renderer.beginDocument({
+        getPage: async (pageNo: number) => ({ ...page({ value: 0 }), pageNumber: pageNo }),
+      } as unknown as import("pdfjs-dist").PDFDocumentProxy);
+      const spread = (scale: number): RenderViewSnapshot => ({
+        ...view(2, scale),
+        rows: [[1, 2]],
+        pageBaseSizes: new Map([1, 2].map(pageNo => [pageNo, { width: 100, height: 120 }])),
+        visiblePageRegions: new Map([[1, { x: 300, y: 350, width: 100, height: 120 }]]),
+      });
+      renderer.reconcile(spread(8));
+      for (let i = 0; i < 4; i++) await flush();
+      assert.equal(renderer.snapshot().detailCanvasCount, 1);
+      events.length = 0;
+
+      renderer.invalidateView({ retainPlaceholders: true, graceMs: 10_000 });
+      renderer.reconcile(spread(9));
+      for (let i = 0; i < 8; i++) await flush();
+      const starts = events.filter(entry => entry.event === "page-render-started");
+      assert.deepEqual(
+        starts.map(entry => entry.pageNo),
+        [1, 2],
+      );
+      assert.ok(
+        starts.every(entry => entry.dpr > 0.87),
+        "first base renders reach the canvas ceiling",
+      );
+      assert.equal(events.filter(entry => entry.event === "detail-render-started").length, 1);
+      const detailStart = events.findIndex(entry => entry.event === "detail-render-started");
+      assert.equal(
+        events.slice(detailStart).some(entry => entry.event === "page-render-completed"),
+        false,
+        "detail is not followed by another base commit",
+      );
+      assert.equal(renderer.snapshot().renderedPageCount, 2);
+      assert.equal(renderer.snapshot().placeholderPageCount, 0);
+      assert.equal(renderer.snapshot().detailCanvasCount, 1);
+      assert.equal(renderer.snapshot().admittedRenderCount, 0);
+      assert.equal(renderer.snapshot().activeTemporaryBytes, 0);
+      assert.ok(
+        peak <= limit,
+        `all canvas allocations, including temporary and commit-copy stores, fit: ${peak}`,
+      );
+      await Promise.allSettled(renderer.resetDocument());
+      assert.ok([...canvases].every(canvas => canvas.width === 0 && canvas.height === 0));
+    },
+    () => createCanvas() as unknown as Element,
+  );
 });
 
 test("independent presentation starts text while annotation never settles", async () => {

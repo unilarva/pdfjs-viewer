@@ -2600,9 +2600,10 @@ export interface PdfjsViewerRenderingProfilePolicy {
  *    `minRenderDpr`. Unsupported browser allocations also lower the observed
  *    per-page resolution ceiling through bounded retries, without changing CSS
  *    page geometry or repeatedly requesting the same unusable allocation.
- * 3. Estimate mandatory settled backing stores at four bytes per raster pixel,
- *    including known annotation canvases and fixed old-output occupancy. Reused
- *    higher-quality output keeps its actual allocation cost. If settled memory
+ * 3. Estimate mandatory attached backing stores at four bytes per raster pixel,
+ *    including known annotation canvases and unrelated fixed occupancy. Planned
+ *    old-scale replacements reserve the larger old/new allocation per page, not
+ *    both for every page. Reused higher-quality output keeps its actual cost. If this memory
  *    exceeds `memoryLimitMiB` and `allowDprReduction` is enabled, fit a common
  *    requested DPR no lower than `min(minRenderDpr, requestedDpr)`, then reapply
  *    each page's canvas and observed allocation ceilings.
@@ -2611,7 +2612,10 @@ export interface PdfjsViewerRenderingProfilePolicy {
  *    current target needs no replacement reservation. Reduce effective concurrency
  *    from `maxConcurrentRenders` toward one until the peak fits or concurrency
  *    reaches one; include the largest overlapping replacement overheads allowed
- *    by that concurrency.
+ *    by that concurrency. Each active old-scale replacement conservatively allows
+ *    its old bitmap plus both temporary and attached new output simultaneously.
+ *    This avoids unnecessary low-quality first passes followed by immediate upgrades
+ *    when a spread's placeholders are replaced, without freezing base quality.
  * 5. If the mandatory peak still exceeds the limit and `allowVisibleDirectRendering`
  *    is enabled, select eligible mandatory first renders largest-first for
  *    direct-to-attached rendering. This includes initial-readiness pages and is

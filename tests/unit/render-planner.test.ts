@@ -587,7 +587,7 @@ for (const [requestedDpr, allowVisibleDirectRendering] of [
     const plan = createRenderPlan(base);
     const dpr = plan.pageRenderDprs.get(1)!;
     assert.ok(plan.estimatedPeakBytes <= 5 * BYTES_PER_MIB);
-    assert.ok(plan.estimatedSteadyBytes > oldBytes, "fallback remains occupied");
+    assert.ok(plan.estimatedSteadyBytes >= oldBytes, "fallback remains occupied");
     assert.equal(plan.directRenderPages.has(1), false);
     assert.equal(plan.canvasLimitPages.has(1), true);
     assert.equal(plan.memoryLimitPages.has(1), true);
@@ -654,7 +654,7 @@ test("observed allocation ceilings below the quality floor still permit replacem
     }),
   );
   assert.ok(plan.pageRenderDprs.get(1)! < 0.7);
-  assert.ok(plan.estimatedSteadyBytes > oldBytes);
+  assert.ok(plan.estimatedSteadyBytes >= oldBytes);
   assert.ok(plan.estimatedPeakBytes <= 5 * BYTES_PER_MIB);
   assert.equal(plan.canvasLimitPages.has(1), true);
   assert.equal(plan.memoryLimitPages.has(1), true);
@@ -779,8 +779,144 @@ test("fixed placeholders remain allocated alongside their full temporary replace
   );
 
   assert.equal(plan.directRenderPages.has(1), false);
-  assert.equal(plan.estimatedSteadyBytes, 100_000);
+  assert.equal(plan.estimatedSteadyBytes, 60_000);
   assert.equal(plan.estimatedPeakBytes, 140_000);
+});
+
+test("high-zoom spread replacements select final canvas quality before either placeholder commits", () => {
+  const size = { width: 419.5, height: 595.2 };
+  const scale = 28.552254;
+  const old = resolveRasterDimensions(size.width * 32, size.height * 32, 1, 32_000_000, 8192);
+  const oldBytes = old.width * old.height * 4;
+  const target = resolveRasterDimensions(
+    size.width * scale,
+    size.height * scale,
+    1,
+    32_000_000,
+    8192,
+  );
+  const newBytes = target.width * target.height * 4;
+  const base = input({
+    rows: [[34, 35]],
+    visibleRange: { first: 0, last: 0 },
+    maxBufferViewportHeights: 0,
+    currentScale: scale,
+    fallbackPageSize: size,
+    fixedOccupiedBytes: oldBytes * 2,
+    fixedReplacementPageBytes: new Map([
+      [34, oldBytes],
+      [35, oldBytes],
+    ]),
+    settings: { ...input().settings, memoryLimitMiB: 512, maxCanvasPixels: 32_000_000 },
+  });
+  const initial = createRenderPlan(base);
+  assert.equal(initial.maxConcurrentRenders, 1, "reduce concurrency, not base quality");
+  assert.equal(initial.directRenderPages.size, 0);
+  assert.equal(initial.visibleDprReduced, false);
+  assert.ok(initial.estimatedPeakBytes <= 512 * BYTES_PER_MIB);
+  assert.deepEqual([...initial.pageRenderDprs.values()], [target.renderDpr, target.renderDpr]);
+
+  for (const committed of [[34], [35], [34, 35]]) {
+    const remaining = [34, 35].filter(page => !committed.includes(page));
+    const plan = createRenderPlan({
+      ...base,
+      fixedOccupiedBytes: remaining.length * oldBytes,
+      fixedReplacementPageBytes: new Map(remaining.map(page => [page, oldBytes])),
+      committedPageRenderDprs: new Map(committed.map(page => [page, target.renderDpr])),
+      committedPageBytes: new Map(committed.map(page => [page, newBytes])),
+    });
+    assert.deepEqual([...plan.pageRenderDprs], [...initial.pageRenderDprs]);
+    assert.equal(plan.visibleQualityUpgradeCount, 0);
+    assert.ok(plan.estimatedPeakBytes <= 512 * BYTES_PER_MIB);
+  }
+});
+
+test("placeholder peaks cover every concurrent replacement and commit-copy combination", () => {
+  const oldBytes = [60_000, 10_000, 90_000];
+  const newBytes = [44_000, 88_000, 22_000];
+  const otherBytes = 27_000;
+  for (const concurrency of [1, 2, 3]) {
+    const plan = createRenderPlan(
+      input({
+        rows: [[1, 2, 3]],
+        visibleRange: { first: 0, last: 0 },
+        maxBufferViewportHeights: 0,
+        pageBaseSizes: new Map([
+          [1, { width: 100, height: 100 }],
+          [2, { width: 100, height: 200 }],
+          [3, { width: 100, height: 50 }],
+        ]),
+        pageAdditionalBytes: new Map([
+          [1, 4000],
+          [2, 8000],
+          [3, 2000],
+        ]),
+        fixedOccupiedBytes: otherBytes + oldBytes.reduce((sum, bytes) => sum + bytes, 0),
+        fixedReplacementPageBytes: new Map([
+          [1, oldBytes[0]],
+          [2, oldBytes[1]],
+          [3, oldBytes[2]],
+          [99, 20_000],
+        ]),
+        settings: { ...input().settings, maxConcurrentRenders: concurrency },
+      }),
+    );
+    assert.equal(plan.maxConcurrentRenders, concurrency);
+    assert.equal(plan.directRenderPages.size, 0);
+    assert.deepEqual(
+      plan.desiredPages,
+      [1, 2, 3],
+      "unrequested placeholders stay fixed, not desired",
+    );
+    let peak = 0;
+    // Every page may still be old, have committed, or hold old + temporary + copy.
+    for (let state = 0; state < 27; state++) {
+      let remaining = state;
+      let active = 0;
+      let bytes = otherBytes;
+      for (let page = 0; page < 3; page++) {
+        const phase = remaining % 3;
+        remaining = Math.floor(remaining / 3);
+        if (phase === 2) active++;
+        bytes +=
+          phase === 0
+            ? oldBytes[page]
+            : phase === 1
+              ? newBytes[page]
+              : oldBytes[page] + 2 * newBytes[page];
+      }
+      if (active <= concurrency) {
+        assert.ok(bytes <= plan.estimatedPeakBytes, `concurrency ${concurrency}, state ${state}`);
+        peak = Math.max(peak, bytes);
+      }
+    }
+    assert.equal(
+      plan.estimatedPeakBytes,
+      peak,
+      "bound includes copies without charging inactive old/new pairs",
+    );
+  }
+});
+
+test("optional placeholder admission includes its overlap and leaves unrelated occupancy fixed", () => {
+  const plan = createRenderPlan(
+    input({
+      rows: [[1], [2], [3]],
+      visibleRange: { first: 0, last: 0 },
+      fixedOccupiedBytes: 60_000,
+      fixedReplacementPageBytes: new Map([[2, 60_000]]),
+      settings: {
+        ...input().settings,
+        memoryLimitMiB: 200_000 / BYTES_PER_MIB,
+        maxConcurrentRenders: 1,
+        allowDprReduction: false,
+      },
+    }),
+  );
+  assert.deepEqual(plan.desiredPages, [1, 2]);
+  assert.equal(plan.directRenderPages.has(2), false);
+  assert.equal(plan.estimatedSteadyBytes, 100_000);
+  assert.equal(plan.estimatedPeakBytes, 180_000);
 });
 
 test("retains nearby committed pages only while peak memory fits", () => {

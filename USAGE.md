@@ -550,7 +550,11 @@ limit nearby speculative work. These constraints are cumulative. Visible pages r
 even when a configured limit is too small to represent them.
 
 Replacement planning includes the retained bitmap, temporary rendering, and the attached commit
-copy, not just final settled pixels. When permitted, quality is reduced further after concurrency and
+copy, not just final settled pixels. For zoom replacements, the planner reserves the larger old/new
+allocation per page, with full old/temporary/commit-copy overlap for concurrent replacements, rather
+than assuming every old and new page coexist. This avoids unnecessary reduced-quality first passes
+and immediate rerenders of spreads while preserving the best base quality the constraints permit.
+When permitted, quality is reduced further after concurrency and
 direct-render fallback to fit that peak. Existing same-scale output is reused when an upgrade cannot
 fit. The configured `minRenderDpr` floor still applies unless canvas safety has already forced a lower
 effective DPR; memory fitting may reduce that constrained output further. Visible old-scale bitmaps
