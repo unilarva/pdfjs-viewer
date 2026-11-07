@@ -5392,11 +5392,7 @@ test("overlapping native range rectangles produce a non-overlapping selection mi
   const root = page.locator("#primary");
   await page.evaluate(() => window.fixture.primary.setTextSelectionMode(true));
   await expect(root.locator('.pdf-page[data-page="1"] .pdf-text-layer span').first()).toBeVisible();
-  const rectangles = await page.evaluate(async () => {
-    const text = document.querySelector(
-      '#primary .pdf-page[data-page="1"] .pdf-text-layer span',
-    )?.firstChild;
-    if (!text) throw new Error("Missing overlap test text");
+  const restoreClientRects = await page.evaluateHandle(() => {
     const original = Range.prototype.getClientRects;
     Range.prototype.getClientRects = function () {
       const rects = [...original.call(this)];
@@ -5418,32 +5414,42 @@ test("overlapping native range rectangles produce a non-overlapping selection mi
         ),
       ] as unknown as DOMRectList;
     };
-    try {
+    return () => {
+      Range.prototype.getClientRects = original;
+    };
+  });
+  try {
+    await page.evaluate(() => {
+      const text = document.querySelector(
+        '#primary .pdf-page[data-page="1"] .pdf-text-layer span',
+      )?.firstChild;
+      if (!text) throw new Error("Missing overlap test text");
       document
         .getSelection()
         ?.setBaseAndExtent(text, 0, text, Math.min(12, text.textContent?.length ?? 0));
-      await new Promise<void>(resolve =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      );
-      return [
-        ...document.querySelectorAll<HTMLElement>("#primary .pdf-text-selection-highlight"),
-      ].map(node => {
+    });
+    // Firefox can deliver selectionchange after two animation frames have elapsed.
+    const highlights = root.locator(".pdf-text-selection-highlight");
+    await expect.poll(() => highlights.count()).toBeGreaterThan(1);
+    const rectangles = await highlights.evaluateAll(nodes =>
+      nodes.map(node => {
         const rect = node.getBoundingClientRect();
         return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
-      });
-    } finally {
-      Range.prototype.getClientRects = original;
+      }),
+    );
+    expect(rectangles.length).toBeGreaterThan(1);
+    for (let index = 0; index < rectangles.length; index++) {
+      for (let other = index + 1; other < rectangles.length; other++) {
+        const a = rectangles[index];
+        const b = rectangles[other];
+        expect(
+          a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top,
+        ).toBe(true);
+      }
     }
-  });
-  expect(rectangles.length).toBeGreaterThan(1);
-  for (let index = 0; index < rectangles.length; index++) {
-    for (let other = index + 1; other < rectangles.length; other++) {
-      const a = rectangles[index];
-      const b = rectangles[other];
-      expect(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top).toBe(
-        true,
-      );
-    }
+  } finally {
+    await restoreClientRects.evaluate(restore => restore());
+    await restoreClientRects.dispose();
   }
 });
 
