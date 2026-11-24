@@ -5316,23 +5316,35 @@ test("mouse selection retains its last text endpoint while crossing a blank text
     };
   });
   const snapshot = () =>
-    page.evaluate(() => ({
-      text: document.getSelection()?.toString() ?? "",
-      highlights: [
-        ...document.querySelectorAll<HTMLElement>("#primary .pdf-text-selection-highlight"),
-      ].map(node => {
-        const rect = node.getBoundingClientRect();
-        return [rect.left, rect.top, rect.width, rect.height].map(value =>
-          Number(value.toFixed(2)),
-        );
-      }),
-    }));
+    page.evaluate(() => {
+      const selection = document.getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      const geometry = (rect: DOMRect) => [rect.left, rect.top, rect.width, rect.height];
+      return {
+        text: selection?.toString() ?? "",
+        nativeRects: [...(range?.getClientRects() ?? [])]
+          .filter(rect => rect.width > 0 && rect.height > 0)
+          .map(geometry),
+        highlights: [
+          ...document.querySelectorAll<HTMLElement>("#primary .pdf-text-selection-highlight"),
+        ].map(node => geometry(node.getBoundingClientRect())),
+      };
+    });
   await page.mouse.move(points.start.x, points.start.y);
   await page.mouse.down();
   await page.mouse.move(points.valid.x, points.valid.y, { steps: 8 });
-  await expect(root.locator(".pdf-text-selection-highlight")).not.toHaveCount(0);
-  const beforeGap = await snapshot();
-  expect(beforeGap.text).not.toBe("");
+  // A pending selectionchange/animation frame can leave the mirror showing an earlier drag step.
+  // Wait for it to reflect the final native range within this single text span.
+  let beforeGap = await snapshot();
+  await expect(async () => {
+    beforeGap = await snapshot();
+    expect(beforeGap.text).not.toBe("");
+    expect(beforeGap.nativeRects).toHaveLength(1);
+    expect(beforeGap.highlights).toHaveLength(1);
+    for (const [index, value] of beforeGap.nativeRects[0].entries()) {
+      expect(Math.abs(beforeGap.highlights[0][index] - value)).toBeLessThan(0.1);
+    }
+  }).toPass({ timeout: 5000 });
   await page.evaluate(() => {
     const original = Element.prototype.replaceChildren;
     (window as Window & { gapSelectionReplacements?: number }).gapSelectionReplacements = 0;
@@ -5360,8 +5372,14 @@ test("mouse selection retains its last text endpoint while crossing a blank text
       Element.prototype as Element & { __gapReplaceChildren?: typeof original }
     ).__gapReplaceChildren = original;
   });
-  await page.mouse.move(points.gap.x, points.gap.y, { steps: 8 });
-  await page.waitForTimeout(80);
+  // Jump straight to a blank hit so no interpolated move can still hit mapped text.
+  await page.mouse.move(points.gap.x, points.gap.y);
+  await page.evaluate(
+    () =>
+      new Promise<void>(resolve =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
   const inGap = await snapshot();
   const gapResult = await page.evaluate(() => {
     const prototype = Element.prototype as Element & {
@@ -5378,8 +5396,7 @@ test("mouse selection retains its last text endpoint while crossing a blank text
     if (target.gapMoveObserver) document.removeEventListener("mousemove", target.gapMoveObserver);
     return { replacements: count, cancelled: target.gapMouseMoveCancelled ?? false };
   });
-  expect(inGap.text).not.toBe("");
-  expect(inGap.highlights).toHaveLength(beforeGap.highlights.length);
+  expect(inGap).toEqual(beforeGap);
   expect(gapResult).toEqual({ replacements: 0, cancelled: true });
   await page.mouse.move(points.next.x, points.next.y, { steps: 8 });
   await page.mouse.up();
