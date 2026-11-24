@@ -6,6 +6,7 @@ export interface SyntheticPdfOptions {
   labels: readonly string[];
   color?: readonly [number, number, number];
   crop?: readonly [number, number, number, number];
+  pageCrops?: Readonly<Record<number, readonly [number, number, number, number]>>;
   rotation?: number;
   userUnit?: number;
   links?: readonly { target: number; kind: "named" | "numeric" | "reference" }[];
@@ -36,9 +37,10 @@ export function makeSyntheticPdf(options: SyntheticPdfOptions): Uint8Array {
     `<< /Type /Pages /Kids [${pages.map(id => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`,
   ];
   options.labels.forEach((label, index) => {
+    const crop = options.pageCrops?.[index + 1] ?? options.crop ?? [0, 0, 612, 792];
     const content = `${options.printHidden ? "/OC /Color BDC " : ""}${(options.color ?? [0.8, 0.1, 0.1]).join(" ")} rg 72 500 180 80 re f ${options.printHidden ? "EMC " : ""}0 g BT /F1 24 Tf 72 700 Td ${literal(label)} Tj ET`;
     objects.push(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [${(options.crop ?? [0, 0, 612, 792]).join(" ")}] /Rotate ${options.rotation ?? 0} /UserUnit ${options.userUnit ?? 1} /Resources << /Font << /F1 ${font} 0 R >>${options.printHidden ? ` /Properties << /Color ${ocg} 0 R >>` : ""} >> /Contents ${pages[index] + 1} 0 R${index === 0 && annotations.length ? ` /Annots [${annotations.map(id => `${id} 0 R`).join(" ")}]` : ""} >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /CropBox [${crop.join(" ")}] /Rotate ${options.rotation ?? 0} /UserUnit ${options.userUnit ?? 1} /Resources << /Font << /F1 ${font} 0 R >>${options.printHidden ? ` /Properties << /Color ${ocg} 0 R >>` : ""} >> /Contents ${pages[index] + 1} 0 R${index === 0 && annotations.length ? ` /Annots [${annotations.map(id => `${id} 0 R`).join(" ")}]` : ""} >>`,
       `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
     );
   });

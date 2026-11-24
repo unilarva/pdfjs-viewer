@@ -160,7 +160,10 @@ import {
   settleIndependentPresentations,
   type RenderPresentationContext,
 } from "./document-renderer.js";
-import { resolvePdfDestination as resolvePdfDestinationValue } from "./pdf-destinations.js";
+import {
+  pdfPointToViewportRatios,
+  resolvePdfDestination as resolvePdfDestinationValue,
+} from "./pdf-destinations.js";
 import {
   DEFAULT_RENDERING_PROFILE_POLICY,
   DEFAULT_RENDERING_PROFILE_SETTINGS,
@@ -218,6 +221,9 @@ import type {
   PdfjsViewerLayerPageDependenciesResult,
   PdfjsViewerPageOverlay,
   PdfjsViewerPageOverlayResult,
+  PdfjsViewerPagePoint,
+  PdfjsViewerPagePointHit,
+  PdfjsViewerPagePointNavigationResult,
   PdfjsViewerFormResetResult,
   PdfjsViewerDocumentVariant,
   PdfjsViewerDocumentDataOptions,
@@ -407,6 +413,8 @@ export class PdfjsViewer {
   #documentNavigation = new DocumentNavigation();
   #documentNavigationHistory = new DocumentNavigationHistory();
   #navigationIntentGeneration = 0;
+  #pagePointRequestOrder = 0;
+  #pagePointAdmissionBarrier = 0;
   #navigationCommitRevision = 0;
   #pendingExplicitNavigationIntent: Readonly<DocumentNavigationIntent> | null = null;
   #documentAttachmentsPresentation!: DocumentAttachmentsPresentation;
@@ -485,6 +493,8 @@ export class PdfjsViewer {
   #pageCountEl: HTMLElement | null = null;
   #navigationHistoryBackBtnEl: HTMLButtonElement | null = null;
   #navigationHistoryForwardBtnEl: HTMLButtonElement | null = null;
+  #deferredNavigationControls: Map<HTMLButtonElement, () => void> | undefined;
+  #pointNavigationFocus: HTMLButtonElement | null = null;
   #downloadBtnEl: HTMLAnchorElement | null = null;
   #downloadFilledDocumentBtnEl: HTMLButtonElement | null = null;
   #downloadFilledDocumentBusy = false;
@@ -1023,6 +1033,13 @@ export class PdfjsViewer {
         longPressMs: this.#behavior.longPressMs,
         callbacks: {
           canInteract: () => this.#canInteractWithDocument(),
+          setNavigationControlDisabled: (button, disabled) =>
+            this.#setNavigationControlDisabled(
+              button,
+              disabled,
+              this.#pointNavigationFocus === button,
+              true,
+            ),
           step: delta => this.#presentationStep(delta),
           jump: boundary =>
             this.#scrollToPage(
@@ -4260,6 +4277,168 @@ export class PdfjsViewer {
   }
 
   /**
+   * Hit-tests the visible page surface without installing any input handler or requesting rendering.
+   *
+   * @param clientX - Horizontal browser client coordinate in CSS pixels, e.g. `event.clientX`.
+   * @param clientY - Vertical browser client coordinate in CSS pixels, e.g. `event.clientY`.
+   * @returns A 1-based page and native PDF user-space point with its document token, or `null`
+   * for a miss or an unavailable page transform. Canvas pixel density does not affect the result.
+   */
+  public getPagePointAtClientPosition(
+    clientX: number,
+    clientY: number,
+  ): PdfjsViewerPagePointHit | null {
+    const documentId = this.#documentId;
+    if (documentId === null || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    const hit = this.#documentView.pageAtClientPosition(clientX, clientY);
+    if (!hit) return null;
+    const viewport = this.#documentRenderer.viewportForPagePoint(
+      hit.page,
+      this.#documentView.rotation,
+    );
+    if (!viewport || !(viewport.width > 0 && viewport.height > 0)) return null;
+    let [x, y] = viewport.convertToPdfPoint(
+      hit.xRatio * viewport.width,
+      hit.yRatio * viewport.height,
+    );
+    const canonical = this.#documentPageSources?.canonicalCropBoxFor(hit.page);
+    if (canonical) {
+      // A replacement can have slightly different edges. Keep the hit in the logical page's
+      // user space, matching forward navigation and overlays, even at the crop boundary.
+      const [left, bottom, right, top] = viewport.viewBox;
+      if (canonical[0] !== left || canonical[2] !== right)
+        x = canonical[0] + ((x - left) / (right - left)) * (canonical[2] - canonical[0]);
+      if (canonical[1] !== bottom || canonical[3] !== top)
+        y = canonical[1] + ((y - bottom) / (top - bottom)) * (canonical[3] - canonical[1]);
+    }
+    return Number.isFinite(x) && Number.isFinite(y) ? { documentId, page: hit.page, x, y } : null;
+  }
+
+  /**
+   * Jumps to a native PDF point, including on an offscreen page, without taking keyboard focus
+   * or changing zoom or layout. Uses explicit document navigation history when enabled outside
+   * presentation mode. Presentation mode jumps to the page's row without positioning within it.
+   *
+   * @param point - A 1-based page and finite native PDF user-space coordinates within its crop box.
+   * @param documentId - Token from the hit or the captured ready document.
+   * @returns The accepted target or a typed failure, including document replacement during the jump.
+   */
+  public async navigateToPagePoint(
+    point: Readonly<PdfjsViewerPagePoint>,
+    documentId: number,
+  ): Promise<PdfjsViewerPagePointNavigationResult> {
+    if (this.#destroyed) return { ok: false, reason: "destroyed" };
+    if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+    const pages = this.#documentPageUsage;
+    if (this.#status !== "ready" || !pages) return { ok: false, reason: "not-ready" };
+    const { page, x, y } = point ?? {};
+    if (
+      page === undefined ||
+      !Number.isSafeInteger(page) ||
+      page < 1 ||
+      page > this.#documentView.pageCount ||
+      x === undefined ||
+      !Number.isFinite(x) ||
+      y === undefined ||
+      !Number.isFinite(y)
+    )
+      return { ok: false, reason: "invalid-point" };
+
+    const order = ++this.#pagePointRequestOrder;
+    let navigation:
+      | Readonly<{
+          documentGeneration: number;
+          navigationGeneration: number;
+          departure: Readonly<DocumentLocation> | null;
+        }>
+      | undefined;
+    const failure = () => {
+      if (this.#destroyed) return "destroyed" as const;
+      if (documentId !== this.#documentId) return "stale-document" as const;
+      const current = navigation
+        ? this.#isCurrentNavigationIntent(navigation)
+        : order > this.#pagePointAdmissionBarrier;
+      return current ? null : ("cancelled" as const);
+    };
+    const viewports = new Map<number, PDFJS.PageViewport>();
+    try {
+      // Resolve the exact row before movement, even when its wrappers are still estimated.
+      // Recheck the row after acquisition in case layout changed while it was pending.
+      while (true) {
+        const reason = failure();
+        if (reason) return { ok: false, reason };
+        const row = this.#documentView.rowIndexForPage(page);
+        if (row === undefined) return { ok: false, reason: "unavailable-geometry" };
+        const missing = this.#documentView.rows[row].filter(pageNo => !viewports.has(pageNo));
+        if (!missing.length) break;
+        const uses = await this.#acquirePageUses(pages, missing);
+        try {
+          for (const [index, use] of uses.entries()) {
+            const viewport = use.page.getViewport({ scale: 1, rotation: use.page.rotate });
+            if (!(
+              Number.isFinite(viewport.width) &&
+              viewport.width > 0 &&
+              Number.isFinite(viewport.height) &&
+              viewport.height > 0
+            ))
+              return { ok: false, reason: failure() ?? "unavailable-geometry" };
+            viewports.set(missing[index], viewport);
+          }
+        } finally {
+          for (const use of uses) use.release();
+        }
+      }
+      const intrinsic = viewports.get(page)!;
+      const [left, bottom, right, top] = intrinsic.viewBox;
+      const xEpsilon = (right - left) * 1e-9;
+      const yEpsilon = (top - bottom) * 1e-9;
+      if (
+        x < left - xEpsilon ||
+        x > right + xEpsilon ||
+        y < bottom - yEpsilon ||
+        y > top + yEpsilon
+      )
+        return { ok: false, reason: "invalid-point" };
+
+      // Only a validated request supersedes existing navigation. The reserved order prevents
+      // an older, slower geometry lookup from taking over a newer accepted navigation.
+      navigation = this.#beginNavigationIntent(true, order);
+      const admissionFailure = failure();
+      if (admissionFailure) return { ok: false, reason: admissionFailure };
+      const viewport = intrinsic.clone({
+        rotation: (intrinsic.rotation + this.#documentView.rotation) % 360,
+      });
+      const ratios = pdfPointToViewportRatios(viewport, x, y);
+      if (!Number.isFinite(ratios.xRatio) || !Number.isFinite(ratios.yRatio))
+        return { ok: false, reason: "unavailable-geometry" };
+      const xRatio = this.#clamp(ratios.xRatio, 0, 1);
+      const yRatio = this.#clamp(ratios.yRatio, 0, 1);
+      this.#documentView.applyNavigationGeometry(viewports);
+      const beforeCommit = failure();
+      if (beforeCommit) return { ok: false, reason: beforeCommit };
+      this.#documentNavigation.selectResolvedDestination(this.#navigationHost(), {
+        pageNo: page,
+        xRatio,
+        yRatio,
+      });
+      const { moved, positioned } = this.#commitNavigationIntent(
+        navigation,
+        { page, xRatio, yRatio, usePosition: true, smooth: false, preservePoint: true },
+        true,
+        true,
+      );
+      if (this.#destroyed) return { ok: false, reason: "destroyed" };
+      if (documentId !== this.#documentId) return { ok: false, reason: "stale-document" };
+      if (!moved && !this.#presentationMode && this.#isCurrentNavigationIntent(navigation))
+        this.#documentView.preserveNavigationPoint(page, xRatio, yRatio);
+      return { ok: true, page, positioned };
+    } catch (error) {
+      const reason = failure();
+      return reason ? { ok: false, reason } : { ok: false, reason: "error", error };
+    }
+  }
+
+  /**
    * Scroll to a named destination inside the PDF (e.g. an internal link target).
    *
    * Programmatic navigation uses the same sticky-target behavior as outline
@@ -5518,6 +5697,8 @@ export class PdfjsViewer {
   /** Applies owner transaction side effects that remain facade coordination. */
   #applyViewResult(result: DocumentViewTransactionResult): void {
     if (result.kind === "unchanged") return;
+    this.#pointNavigationFocus = null;
+    this.#documentView.clearNavigationPoint();
     if (result.change.rotationChanged)
       this.#documentThumbnails.setRotation(this.#documentView.rotation);
     if (result.deferredScrollPage != null) {
@@ -6325,7 +6506,10 @@ export class PdfjsViewer {
         button: previousButton,
         longPressMs: this.#behavior.longPressMs,
         timers: this.#viewerLifetime,
-        canPress: () => this.#canInteractWithDocument() && !previousButton.disabled,
+        canPress: () =>
+          this.#canInteractWithDocument() &&
+          !previousButton.disabled &&
+          !this.#deferredNavigationControls?.has(previousButton),
         onShortPress: () => this.previousRow(),
         onLongPress: () => this.#scrollToPageWithHistory(1, true),
         listen: (target, type, listener, options) => this.#on(target, type, listener, options),
@@ -6337,7 +6521,10 @@ export class PdfjsViewer {
         button: nextButton,
         longPressMs: this.#behavior.longPressMs,
         timers: this.#viewerLifetime,
-        canPress: () => this.#canInteractWithDocument() && !nextButton.disabled,
+        canPress: () =>
+          this.#canInteractWithDocument() &&
+          !nextButton.disabled &&
+          !this.#deferredNavigationControls?.has(nextButton),
         onShortPress: () => this.nextRow(),
         onLongPress: () => this.#scrollToPageWithHistory(this.#documentView.pageCount, true),
         listen: (target, type, listener, options) => this.#on(target, type, listener, options),
@@ -7382,6 +7569,7 @@ export class PdfjsViewer {
    * @param trackMotion - Whether an instant jump should influence render direction.
    */
   #scrollToRow(index: number, smooth = true, trackMotion = true): void {
+    this.#documentView.clearNavigationPoint();
     this.#scrollRequestGeneration++;
     index = this.#clamp(index, 0, this.#documentView.rows.length - 1);
     const presentationSourceIndex = this.#presentationMode
@@ -7599,11 +7787,17 @@ export class PdfjsViewer {
   }
 
   /** Starts a newer semantic request after settling any installed smooth destination. */
-  #beginNavigationIntent(recordHistory: boolean): Readonly<{
+  #beginNavigationIntent(
+    recordHistory: boolean,
+    pointOrder = this.#pagePointRequestOrder,
+  ): Readonly<{
     documentGeneration: number;
     navigationGeneration: number;
     departure: Readonly<DocumentLocation> | null;
   }> {
+    this.#pagePointAdmissionBarrier = pointOrder;
+    this.#pointNavigationFocus = null;
+    this.#documentView.clearNavigationPoint();
     const navigationGeneration = ++this.#navigationIntentGeneration;
     this.#settlePendingExplicitNavigation();
     return Object.freeze({
@@ -7618,12 +7812,17 @@ export class PdfjsViewer {
 
   /** Invalidates pending async/deferred navigation without changing document history. */
   #invalidateNavigationIntent(): void {
+    this.#pagePointAdmissionBarrier = this.#pagePointRequestOrder;
+    this.#pointNavigationFocus = null;
+    this.#documentView.clearNavigationPoint();
     this.#navigationIntentGeneration++;
     this.#pendingExplicitNavigationIntent = null;
   }
 
   /** Releases only installed movement state without superseding unresolved semantic requests. */
   #releasePendingExplicitMovement(): void {
+    this.#pointNavigationFocus = null;
+    this.#documentView.clearNavigationPoint();
     this.#pendingExplicitNavigationIntent = null;
   }
 
@@ -7658,17 +7857,40 @@ export class PdfjsViewer {
     }>,
     intent: Readonly<DocumentNavigationIntent>,
     recordHistory: boolean,
+    preserveFocus = false,
   ): Readonly<{ moved: boolean; positioned: boolean }> {
     if (!this.#isCurrentNavigationIntent(navigation) || !this.#navigationIntentWouldMove(intent)) {
       return Object.freeze({ moved: false, positioned: false });
     }
-    if (recordHistory) this.#recordNavigationDeparture(navigation.departure);
-    this.#syncNavigationHistoryControls();
+    // A fractional target can round to the offset the browser already displays.
+    let pointPositioned: boolean | undefined;
+    if (intent.preservePoint) {
+      this.#pointNavigationFocus =
+        [this.#prevPageBtnEl, this.#nextPageBtnEl].find(
+          button =>
+            button && (button.getRootNode() as Document | ShadowRoot).activeElement === button,
+        ) ?? (this.#presentationMode ? this.#presentationInput.focusedNavigationControl() : null);
+      const { scrollTop, scrollLeft } = this.#docContainerEl;
+      const rowOnly = this.#presentationMode;
+      pointPositioned = this.#executeNavigationIntent(intent);
+      if (
+        !rowOnly &&
+        scrollTop === this.#docContainerEl.scrollTop &&
+        scrollLeft === this.#docContainerEl.scrollLeft
+      )
+        return Object.freeze({ moved: false, positioned: false });
+      if (!this.#isCurrentNavigationIntent(navigation))
+        return Object.freeze({ moved: true, positioned: pointPositioned });
+    }
+    const hadForward =
+      preserveFocus && recordHistory && this.#documentNavigationHistory.canGoForward;
+    const recorded = recordHistory && this.#recordNavigationDeparture(navigation.departure);
+    this.#syncNavigationHistoryControls(hadForward && recorded);
     const smooth = intent.smooth && this.#scrollBehavior(true) === "smooth";
     this.#pendingExplicitNavigationIntent = smooth
       ? Object.freeze({ ...intent, smooth: false })
       : null;
-    const positioned = this.#executeNavigationIntent(intent);
+    const positioned = pointPositioned ?? this.#executeNavigationIntent(intent);
     this.#navigationCommitRevision++;
     if (this.#isCurrentNavigationIntent(navigation)) {
       this.#syncNavigationHistoryControls();
@@ -7678,16 +7900,80 @@ export class PdfjsViewer {
   }
 
   /** Owns disabled and ARIA state for optional generated or custom history controls. */
-  #syncNavigationHistoryControls(): void {
+  #syncNavigationHistoryControls(preserveForwardFocus = false): void {
     const ready = this.#features.navigationHistory && this.#status === "ready" && !this.#destroyed;
-    for (const [control, available] of [
-      [this.#navigationHistoryBackBtnEl, this.#documentNavigationHistory.canGoBack],
-      [this.#navigationHistoryForwardBtnEl, this.#documentNavigationHistory.canGoForward],
-    ] as const) {
-      if (!control) continue;
-      control.disabled = !ready || !available;
-      control.setAttribute("aria-disabled", String(control.disabled));
+    const back = this.#navigationHistoryBackBtnEl;
+    if (back) {
+      back.disabled = !ready || !this.#documentNavigationHistory.canGoBack;
+      back.setAttribute("aria-disabled", String(back.disabled));
     }
+
+    const forward = this.#navigationHistoryForwardBtnEl;
+    if (!forward) return;
+    this.#setNavigationControlDisabled(
+      forward,
+      !ready || !this.#documentNavigationHistory.canGoForward,
+      ready && preserveForwardFocus,
+      true,
+    );
+  }
+
+  /** Keeps a focused, unavailable navigation control inert until it blurs. */
+  #setNavigationControlDisabled(
+    control: HTMLButtonElement,
+    disabled: boolean,
+    preserveFocus: boolean,
+    ownsAria: boolean,
+  ): void {
+    const previous = this.#deferredNavigationControls?.get(control);
+    const scope = this.#documentLifetime;
+    if (
+      !disabled ||
+      !scope.active ||
+      (!preserveFocus && !previous) ||
+      control.disabled ||
+      (control.getRootNode() as Document | ShadowRoot).activeElement !== control
+    ) {
+      previous?.();
+      control.toggleAttribute("disabled", disabled);
+      if (ownsAria && control.getAttribute("aria-disabled") !== String(disabled))
+        control.setAttribute("aria-disabled", String(disabled));
+      return;
+    }
+    if (previous) return;
+    const previousAria = control.getAttribute("aria-disabled");
+    control.setAttribute("aria-disabled", "true");
+    const deferrals = (this.#deferredNavigationControls ??= new Map());
+    const release = () => {
+      if (deferrals.get(control) !== release) return;
+      deferrals.delete(control);
+      if (!ownsAria) {
+        if (previousAria === null) control.removeAttribute("aria-disabled");
+        else control.setAttribute("aria-disabled", previousAria);
+      }
+      unlistenBlur();
+      unlistenClick();
+      unlistenAbort();
+    };
+    const unlistenBlur = scope.listen(control, "blur", () => {
+      if (!scope.active || deferrals.get(control) !== release) return;
+      release();
+      control.disabled = true;
+    });
+    const unlistenClick = scope.listen(
+      control,
+      "click",
+      event => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      },
+      true,
+    );
+    const unlistenAbort = scope.listen(scope.signal, "abort", () => {
+      release();
+      control.disabled = true;
+    });
+    deferrals.set(control, release);
   }
 
   /** Keeps a programmatic target authoritative while smooth scrolling crosses intermediate rows. */
@@ -7795,8 +8081,16 @@ export class PdfjsViewer {
           this.#docContainerEl.scrollTo({
             top: target.top,
             ...(target.left == null ? {} : { left: target.left }),
-            behavior: "auto",
+            behavior: intent.preservePoint ? "instant" : "auto",
           });
+          if (intent.preservePoint) {
+            this.#scrollRequestGeneration++;
+            this.#documentView.preserveNavigationPoint(
+              intent.page,
+              intent.xRatio ?? 0,
+              intent.yRatio,
+            );
+          }
         }
         this.#scheduleScrollDerivedState();
         return true;
@@ -7917,8 +8211,20 @@ export class PdfjsViewer {
    *              and disables "next" if idx is the last page.
    */
   #updatePageNavDisabled(idx: number) {
-    this.#prevPageBtnEl?.toggleAttribute("disabled", idx <= 0);
-    this.#nextPageBtnEl?.toggleAttribute("disabled", idx >= this.#documentView.rows.length - 1);
+    if (this.#prevPageBtnEl)
+      this.#setNavigationControlDisabled(
+        this.#prevPageBtnEl,
+        idx <= 0,
+        this.#pointNavigationFocus === this.#prevPageBtnEl,
+        false,
+      );
+    if (this.#nextPageBtnEl)
+      this.#setNavigationControlDisabled(
+        this.#nextPageBtnEl,
+        idx >= this.#documentView.rows.length - 1,
+        this.#pointNavigationFocus === this.#nextPageBtnEl,
+        false,
+      );
     this.#syncModeControls();
   }
 

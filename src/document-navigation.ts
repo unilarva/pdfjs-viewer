@@ -160,6 +160,8 @@ export interface DocumentNavigationIntent {
   readonly xRatio?: number;
   readonly usePosition: boolean;
   readonly smooth: boolean;
+  /** Keep an explicit native page point stable as page sizes settle. */
+  readonly preservePoint?: true;
 }
 
 /** Successful PDF named-destination resolution before movement is executed. */

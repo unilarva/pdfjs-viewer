@@ -1936,6 +1936,50 @@ export type PdfjsViewerPageContentDetail = {
 export interface PdfjsViewerPageContentEvent extends CustomEvent<PdfjsViewerPageContentDetail> {
   type: "pdf:pagecontent";
 }
+/** A point on a logical page in native PDF user space, before display rotation or zoom. */
+export interface PdfjsViewerPagePoint {
+  /** 1-based logical page number. */
+  readonly page: number;
+  /** Native horizontal coordinate, not normalized to the crop box. */
+  readonly x: number;
+  /** Native vertical coordinate, not normalized to the crop box. */
+  readonly y: number;
+}
+/** A page point hit in the current viewer, paired with its ready-document token. */
+export interface PdfjsViewerPagePointHit extends PdfjsViewerPagePoint {
+  /** Pass this token back to document-scoped operations to reject stale points. */
+  readonly documentId: number;
+}
+/** Result of an explicit PDF page-point jump. */
+export type PdfjsViewerPagePointNavigationResult =
+  | {
+      /** The target was accepted, including already-positioned targets. */
+      readonly ok: true;
+      /** The 1-based target page. */
+      readonly page: number;
+      /** Whether within-page scrolling was applied; false for row-only jumps and no-ops. */
+      readonly positioned: boolean;
+    }
+  | {
+      /** The jump did not complete for the requested document and target. */
+      readonly ok: false;
+      /** Admission, target, geometry, or lifecycle failure. */
+      readonly reason:
+        | "invalid-point"
+        | "not-ready"
+        | "stale-document"
+        | "destroyed"
+        | "cancelled"
+        | "unavailable-geometry";
+    }
+  | {
+      /** Page geometry could not be read. */
+      readonly ok: false;
+      /** An unexpected acquisition or geometry error. */
+      readonly reason: "error";
+      /** Original error from the viewer or PDF.js. */
+      readonly error: unknown;
+    };
 /** Geometry of a page-anchored overlay in page-local CSS pixels, independent of DPR. */
 export interface PdfjsViewerPageOverlayGeometry {
   /** Transformed anchor measured from the page's left edge. */

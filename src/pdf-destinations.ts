@@ -49,6 +49,16 @@ function isDestinationMode(value: unknown): value is PdfDestinationModeLike {
   return !!value && typeof value === "object" && "name" in value;
 }
 
+/** Projects native PDF coordinates to display ratios before applying a caller's edge policy. */
+export function pdfPointToViewportRatios(
+  page: PDFJS.PageViewport,
+  x: number,
+  y: number,
+): { xRatio: number; yRatio: number } {
+  const [viewportX, viewportY] = page.convertToViewportPoint(x, y);
+  return { xRatio: viewportX / page.width, yRatio: viewportY / page.height };
+}
+
 /** Resolves PDF.js destination forms and always cleans up temporary page proxies. */
 export async function resolvePdfDestination(
   pdf: PDFJS.PDFDocumentProxy | null,
@@ -95,11 +105,10 @@ export async function resolvePdfDestination(
         !Number.isFinite(y)
       )
         return null;
-      const page = await getViewport();
-      const [viewportX, viewportY] = page.convertToViewportPoint(x, y);
+      const { xRatio, yRatio } = pdfPointToViewportRatios(await getViewport(), x, y);
       return Object.freeze({
-        xRatio: clamp(viewportX / page.width, 0, 1),
-        yRatio: clamp(viewportY / page.height, 0, 1),
+        xRatio: clamp(xRatio, 0, 1),
+        yRatio: clamp(yRatio, 0, 1),
       });
     };
     let yRatio: number | undefined;

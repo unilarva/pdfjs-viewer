@@ -161,7 +161,7 @@ export class DocumentPageSources implements DocumentPageAcquirer {
   #handles = new WeakMap<PdfjsViewerPageSource, Entry>();
   #mappings = new Map<number, Mapping>();
   #revisions = new Map<number, number>();
-  #geometry = new Map<number, Promise<Geometry>>();
+  #geometry = new Map<number, { pending: Promise<Geometry>; resolved?: Geometry }>();
   #baseValidation?: Promise<void>;
   #bytes = 0;
   #blobBytes = 0;
@@ -411,6 +411,11 @@ export class DocumentPageSources implements DocumentPageAcquirer {
   currentSource(page: number): { source: PdfjsViewerPageSource; sourcePage: number } | undefined {
     const mapping = this.#mappings.get(page);
     return mapping && { source: mapping.entry.handle, sourcePage: mapping.sourcePage };
+  }
+
+  /** Exact canonical crop box already checked for a display replacement, without a new read. */
+  canonicalCropBoxFor(page: number): readonly number[] | undefined {
+    return this.#geometry.get(page)?.resolved?.view;
   }
 
   /** Captures selected logical slots atomically without opening or copying auxiliary PDFs. */
@@ -675,20 +680,22 @@ export class DocumentPageSources implements DocumentPageAcquirer {
   }
 
   #baseGeometry(page: number): Promise<Geometry> {
-    let pending = this.#geometry.get(page);
-    if (!pending) {
-      pending = (async () => {
-        const use = await this.#baseAcquirer.acquire(page);
-        try {
-          return geometry(use.page);
-        } finally {
-          use.release();
-        }
-      })();
-      this.#geometry.set(page, pending);
-      this.#track(pending);
+    let record = this.#geometry.get(page);
+    if (!record) {
+      const entry: { pending: Promise<Geometry>; resolved?: Geometry } = {
+        pending: this.#baseAcquirer.acquire(page).then(use => {
+          try {
+            return (entry.resolved = geometry(use.page));
+          } finally {
+            use.release();
+          }
+        }),
+      };
+      record = entry;
+      this.#geometry.set(page, entry);
+      this.#track(entry.pending);
     }
-    return pending;
+    return record.pending;
   }
 
   #track<T>(promise: Promise<T>): Promise<T> {

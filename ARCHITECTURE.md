@@ -289,6 +289,13 @@ The current owners are:
   hosts without changing consumer nodes or publishing geometry. Activity survives document
   reset, while registrations do not. Disposal and document reset remove elements and
   listeners; controlled printing never consumes overlay DOM.
+- Page-point hit-testing checks the `DocumentView` surface registry against the browser's hit
+  target, then inverts the renderer's existing PDF.js viewport using CSS-relative ratios. It
+  does not acquire pages or cache extra transforms. Point jumps acquire canonical geometry
+  for the current target row, validate the canonical crop before starting a navigation intent,
+  and install exact sizes without refitting. The shared destination path positions the point;
+  pending render geometry preserves its scrollport offset until independent movement. Replacement
+  page hits map back into the canonical crop box using the already validated geometry.
 - `DocumentFormState`: the complete document-scoped form-value owner. It captures visible loaded
   values from the PDF.js field-object `Map` plus initial annotation storage, keeps every widget binding and
   affected page for each logical ID, translates namespaced storage access, owns dirty/storage/page

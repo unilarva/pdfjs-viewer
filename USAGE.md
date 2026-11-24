@@ -47,6 +47,7 @@ and demo commands belong to the
 - [Advanced features](#advanced-features)
   - [Read-Only Display Page Sources](#read-only-display-page-sources)
   - [Page-Anchored DOM Overlays](#page-anchored-dom-overlays)
+  - [PDF Page Points](#pdf-page-points)
 - [Behavior and features](#behavior-and-features)
 - [Printing](#printing)
   - [Printing Display Replacements](#printing-display-replacements)
@@ -1587,6 +1588,48 @@ never enter exported PDF bytes, downloads or controlled print output.
 
 Call `setActive(false)` when switching away from a retained viewer. Its overlay hosts
 are hidden and inert until reactivation; the registrations themselves remain intact.
+
+### PDF Page Points
+
+`getPagePointAtClientPosition(clientX, clientY)` looks up an existing, visible page
+surface synchronously. Pass browser client coordinates in CSS pixels, such as a pointer
+event's `clientX` and `clientY`, without multiplying by `devicePixelRatio`. The result
+is a `PdfjsViewerPagePointHit` (`{ documentId, page, x, y }`), or `null` for a gutter,
+viewer chrome, or a page whose transform is not ready. Both pages of a spread are
+identified separately. The method adds no listeners or gestures; the host chooses when
+to call it and how to use the point.
+
+`navigateToPagePoint(point, documentId)` takes a `PdfjsViewerPagePoint` (`{ page, x, y }`)
+and a captured document token (from the hit or `viewer.documentId`). It resolves geometry
+for offscreen pages and uses the same point positioning as PDF destinations without
+changing zoom, fit, rotation, or page layout. It does not take keyboard focus from the host.
+A jump that moves records document-local history if enabled outside presentation mode.
+In presentation mode the viewer jumps to the page's row instead, also without taking focus.
+
+```ts
+const hit = viewer.getPagePointAtClientPosition(event.clientX, event.clientY);
+if (hit) {
+  // Retain the token with the point, especially across asynchronous host work.
+  const result = await viewer.navigateToPagePoint(hit, hit.documentId);
+  if (!result.ok && result.reason === "stale-document") {
+    // Ignore the point from the previous document.
+  }
+}
+```
+
+Pages are 1-based. Both methods use native PDF user-space coordinates, including the
+original crop-box origin, rather than rotated or top-left display coordinates. Use
+the same coordinates as the `anchor` for `registerPageOverlay()` to highlight a point.
+The package exports `PdfjsViewerPagePoint`, `PdfjsViewerPagePointHit`, and
+`PdfjsViewerPagePointNavigationResult` from its root.
+
+A jump returns `invalid-point` for out-of-range pages, nonfinite coordinates, or points
+outside the crop box. It returns `stale-document` if the token no longer matches, including
+replacement or close during acquisition, and `cancelled` if newer navigation takes over.
+Invalid points do not interrupt navigation already in progress. A positioned point stays
+in place as late page measurements update the layout, until another viewport movement takes over.
+Check `result.ok` before using `result.positioned`, which indicates whether within-page
+scrolling was applied. A successful no-op or presentation-mode jump has `positioned: false`.
 
 ## Behavior and features
 

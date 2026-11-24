@@ -13,6 +13,8 @@ All notable published changes to `@unilarva/pdfjs-viewer` will be documented her
   spreads, while preserving replacement-buffer memory headroom.
 - Cancel unfinished page renders that exceed revised allocation targets when visible demand changes.
 - Keep default dialog and menu close buttons visible while scrolling.
+- Added opt-in PDF page-point hit-testing and navigation in native PDF user space, with no
+  default gesture or UI changes.
 
 ## 0.9.0
 

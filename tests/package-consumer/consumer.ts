@@ -84,10 +84,30 @@ import {
   type PdfjsViewerPageSourcesChangeEvent,
   type PdfjsViewerPageContentDetail,
   type PdfjsViewerPageContentEvent,
+  type PdfjsViewerPagePoint,
+  type PdfjsViewerPagePointHit,
+  type PdfjsViewerPagePointNavigationResult,
 } from "@unilarva/pdfjs-viewer";
 import * as pdfjs from "pdfjs-dist";
 
 const pdfjsModule: PdfjsViewerPdfjsModule = pdfjs;
+
+/** Point navigation uses a detached PDF point and a document token from the public entry point. */
+export async function checkPagePointConsumerContract(viewer: PdfjsViewer, event: PointerEvent) {
+  const hit: PdfjsViewerPagePointHit | null = viewer.getPagePointAtClientPosition(
+    event.clientX,
+    event.clientY,
+  );
+  if (!hit) return;
+  const point: PdfjsViewerPagePoint = hit;
+  // @ts-expect-error A captured document token is required even when the point came from a hit.
+  void viewer.navigateToPagePoint(hit);
+  const result: PdfjsViewerPagePointNavigationResult = await viewer.navigateToPagePoint(
+    point,
+    hit.documentId,
+  );
+  return result.ok ? result.positioned : result.reason;
+}
 
 /** Consumer compilation uses root exports, not private PDF.js proxies or package internals. */
 export async function checkPageSourceConsumerContract(viewer: PdfjsViewer, input: Uint8Array) {

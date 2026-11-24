@@ -205,6 +205,15 @@ export class DocumentView {
   #cancelFrame: (handle: number) => void;
   #geometryChanged: (() => void) | undefined;
   #geometryFrame: number | null = null;
+  #navigationPoint: {
+    page: number;
+    xRatio: number;
+    yRatio: number;
+    x: number;
+    y: number;
+    left: number;
+    top: number;
+  } | null = null;
   #layoutMeasurementFrame: number | null = null;
   #layoutResizeObserver: ResizeObserver | null = null;
   #revision = 0;
@@ -378,6 +387,7 @@ export class DocumentView {
     if (this.#geometryFrame != null) this.#cancelFrame(this.#geometryFrame);
     if (this.#layoutMeasurementFrame != null) this.#cancelFrame(this.#layoutMeasurementFrame);
     this.#geometryFrame = null;
+    this.#navigationPoint = null;
     this.#layoutMeasurementFrame = null;
     this.#layoutResizeObserver?.disconnect();
     this.#layout.resetDocument();
@@ -464,6 +474,31 @@ export class DocumentView {
   /** Returns a page wrapper from the current surface registry. */
   pageWrapFor(pageNo: number): HTMLDivElement | null {
     return this.#layout.pageWrapFor(pageNo);
+  }
+  /** Hit-tests only a visible, owned page surface and returns page-local CSS ratios. */
+  pageAtClientPosition(
+    clientX: number,
+    clientY: number,
+  ): { page: number; xRatio: number; yRatio: number } | null {
+    const root = this.#container.getRootNode() as Document | ShadowRoot;
+    const wrapper = root.elementFromPoint?.(clientX, clientY)?.closest<HTMLElement>(".pdf-page");
+    if (!wrapper) return null;
+    const page = Number(wrapper.dataset.page);
+    if (this.#layout.pageWrapFor(page) !== wrapper) return null;
+    const bounds = wrapper.getBoundingClientRect();
+    if (
+      !(bounds.width > 0 && bounds.height > 0) ||
+      clientX < bounds.left ||
+      clientX > bounds.right ||
+      clientY < bounds.top ||
+      clientY > bounds.bottom
+    )
+      return null;
+    return {
+      page,
+      xRatio: (clientX - bounds.left) / bounds.width,
+      yRatio: (clientY - bounds.top) / bounds.height,
+    };
   }
   /** Registers consumer DOM using a detached intrinsic, scale-one PDF.js viewport. */
   registerPageOverlay(
@@ -589,8 +624,32 @@ export class DocumentView {
     this.#geometryFrame = this.#requestFrame(() => {
       this.#geometryFrame = null;
       if (revision !== this.#revision || !this.hasRows) return;
+      const point = this.#navigationPoint;
+      if (
+        point &&
+        (point.top !== this.#container.scrollTop || point.left !== this.#container.scrollLeft)
+      )
+        this.clearNavigationPoint();
       this.#applyPageSurfaceSizes();
+      if (revision !== this.#revision) return;
       this.updateHorizontalScrollLock(false);
+      if (point && point === this.#navigationPoint) {
+        const position = this.#navigationPointClientOffset(point.page, point.xRatio, point.yRatio);
+        if (position) {
+          // Measure after layout: the browser may already have compensated for some or all of the shift.
+          const dx = position.x - point.x;
+          const dy = position.y - point.y;
+          if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) {
+            this.#container.scrollTo({
+              left: this.#container.scrollLeft + dx,
+              top: this.#container.scrollTop + dy,
+              behavior: "instant",
+            });
+          }
+          point.left = this.#container.scrollLeft;
+          point.top = this.#container.scrollTop;
+        } else this.clearNavigationPoint();
+      }
       this.measureRows();
       this.reconcile();
       this.#geometryChanged?.();
@@ -599,9 +658,54 @@ export class DocumentView {
     return true;
   }
 
+  /** Retains an explicit jump's screen position until the viewport moves independently. */
+  preserveNavigationPoint(page: number, xRatio: number, yRatio: number): void {
+    const position = this.#navigationPointClientOffset(page, xRatio, yRatio);
+    if (!position) return;
+    this.#navigationPoint = {
+      page,
+      xRatio,
+      yRatio,
+      ...position,
+      left: this.#container.scrollLeft,
+      top: this.#container.scrollTop,
+    };
+  }
+
+  /** Releases a previously positioned point when an independent viewport operation takes over. */
+  clearNavigationPoint(): void {
+    this.#navigationPoint = null;
+  }
+
+  /** Measures a display point in the scrollport's client coordinate system. */
+  #navigationPointClientOffset(
+    page: number,
+    xRatio: number,
+    yRatio: number,
+  ): { x: number; y: number } | null {
+    const bounds = this.#layout.pageWrapFor(page)?.getBoundingClientRect();
+    if (!bounds || !(bounds.width > 0 && bounds.height > 0)) return null;
+    const port = this.#container.getBoundingClientRect();
+    return {
+      x: bounds.left - port.left + bounds.width * xRatio,
+      y: bounds.top - port.top + bounds.height * yRatio,
+    };
+  }
+
   /** Records exact unrotated intrinsic geometry before a view transaction. */
   recordPreparedPageGeometry(pageNo: number, width: number, height: number): boolean {
     return this.#layout.recordPageBaseSize(pageNo, width, height);
+  }
+
+  /** Installs exact target-row sizes before a point jump, without refitting or rebuilding rows. */
+  applyNavigationGeometry(
+    geometry: ReadonlyMap<number, Readonly<{ width: number; height: number }>>,
+  ): void {
+    const revision = this.#layout.pageGeometryRevision;
+    for (const [page, { width, height }] of geometry)
+      this.recordPreparedPageGeometry(page, width, height);
+    if (revision !== this.#layout.pageGeometryRevision || this.#geometryFrame != null)
+      this.#prepareScaledLayout();
   }
 
   /** Returns the row containing a page under current or staged topology. */

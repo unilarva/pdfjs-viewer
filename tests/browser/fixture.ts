@@ -44,6 +44,7 @@ declare global {
           options: Omit<ConstructorParameters<typeof PdfjsViewer>[0], "runtime">,
         ): PdfjsViewer;
         gateNextPageAcquisition(): PageAcquisitionGate;
+        gatePageAcquisitions(pageNo: number): PageAcquisitionGate;
         gateNextNamedDestination(destination: unknown[]): PageAcquisitionGate;
         loadingStats(resetPeak?: boolean): { live: number; peak: number; admissions: number };
       };
@@ -234,6 +235,7 @@ type DocumentDataReadGate = PageAcquisitionGate & {
   cleanupCalls(): number;
 };
 const pageAcquisitionGates: Array<{
+  pageNo?: number;
   entered(): void;
   settlement: Promise<void>;
 }> = [];
@@ -260,7 +262,7 @@ let rejectNextOptionalContentAcquisition = false;
 let stallNextFormPreparation = false;
 let challengeNextPassword = false;
 const admittedLoadOptions = new Map<string, Readonly<Record<string, unknown>>>();
-const gateNextPageAcquisition = (): PageAcquisitionGate => {
+const gatePageAcquisition = (pageNo?: number): PageAcquisitionGate => {
   let markEntered!: () => void;
   let resolve!: () => void;
   let reject!: (error: Error) => void;
@@ -271,9 +273,21 @@ const gateNextPageAcquisition = (): PageAcquisitionGate => {
     resolve = settle;
     reject = fail;
   });
-  pageAcquisitionGates.push({ entered: markEntered, settlement });
-  return { entered, release: error => (error ? reject(error) : resolve()) };
+  const gate = { pageNo, entered: markEntered, settlement };
+  pageAcquisitionGates.push(gate);
+  return {
+    entered,
+    release: error => {
+      if (pageNo !== undefined) {
+        const index = pageAcquisitionGates.indexOf(gate);
+        if (index !== -1) pageAcquisitionGates.splice(index, 1);
+      }
+      if (error) reject(error);
+      else resolve();
+    },
+  };
 };
+const gateNextPageAcquisition = () => gatePageAcquisition();
 const gateNextDocumentDataRead = (): DocumentDataReadGate => {
   let markEntered!: () => void;
   let resolve!: () => void;
@@ -361,8 +375,12 @@ const fixturePdfjs = {
           }
           if (property === "getPage") {
             return async (pageNo: number) => {
-              const gate = pageAcquisitionGates.shift();
+              const index = pageAcquisitionGates.findIndex(
+                gate => gate.pageNo === undefined || gate.pageNo === pageNo,
+              );
+              const gate = index < 0 ? undefined : pageAcquisitionGates[index];
               if (gate) {
+                if (gate.pageNo === undefined) pageAcquisitionGates.splice(index, 1);
                 gate.entered();
                 await gate.settlement;
               }
@@ -619,6 +637,7 @@ window.fixture = {
     makePdf: makeSyntheticPdf,
     createViewer: options => new PdfjsViewer({ ...options, runtime }),
     gateNextPageAcquisition,
+    gatePageAcquisitions: gatePageAcquisition,
     gateNextNamedDestination,
     loadingStats(resetPeak = false) {
       if (resetPeak) peakLoadingTasks = liveLoadingTasks.size;

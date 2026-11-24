@@ -443,6 +443,14 @@ export class DocumentRenderer {
     return this.#documentId;
   }
 
+  /** Reuses the current surface's display transform without requesting pixels or holding a page. */
+  viewportForPagePoint(pageNo: number, rotation: number): PDFJS.PageViewport | null {
+    const output = this.#outputs.get(pageNo);
+    return output && output.viewerRotation === rotation && this.#surfaces.isCurrent(output.lease)
+      ? output.viewport
+      : null;
+  }
+
   /**
    * Installs the latest full display configuration. A supplied page set attests
    * visual equivalence everywhere else; undefined or a mode change invalidates globally.

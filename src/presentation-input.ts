@@ -26,6 +26,7 @@ const POINTER_MOVE_TOLERANCE_PX = 12;
 
 export interface PresentationInputCallbacks {
   canInteract(): boolean;
+  setNavigationControlDisabled?(button: HTMLButtonElement, disabled: boolean): void;
   step(delta: -1 | 1): void;
   jump(boundary: "first" | "last"): void;
   exit(): void;
@@ -128,6 +129,15 @@ export class PresentationInputController {
     this.#setButtonAvailability(this.#next, canNext);
   }
 
+  /** Finds a focused presentation navigation button even when directly bound across roots. */
+  public focusedNavigationControl(): HTMLButtonElement | null {
+    for (const button of [this.#previous, this.#next]) {
+      if (button && (button.getRootNode() as Document | ShadowRoot).activeElement === button)
+        return button;
+    }
+    return null;
+  }
+
   public showControls(force = false): void {
     if (!this.#active) return;
     if (!force && this.#now() < this.#controlsSuppressedUntil) return;
@@ -218,7 +228,11 @@ export class PresentationInputController {
       button,
       longPressMs: this.#longPressMs,
       timers: this.#lifetime,
-      canPress: () => this.#active && !button.disabled && this.#callbacks.canInteract(),
+      canPress: () =>
+        this.#active &&
+        !button.disabled &&
+        button.getAttribute("aria-disabled") !== "true" &&
+        this.#callbacks.canInteract(),
       onShortPress: () => {
         this.#step(direction, true);
         this.#finishControlActivation();
@@ -374,6 +388,10 @@ export class PresentationInputController {
 
   #setButtonAvailability(button: HTMLButtonElement | null, available: boolean): void {
     if (!button) return;
+    if (this.#callbacks.setNavigationControlDisabled) {
+      this.#callbacks.setNavigationControlDisabled(button, !available);
+      return;
+    }
     button.disabled = !available;
     button.setAttribute("aria-disabled", String(!available));
   }

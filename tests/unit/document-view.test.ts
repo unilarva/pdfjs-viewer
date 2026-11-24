@@ -140,7 +140,12 @@ function withFakeDocument(run: () => void): void {
   }
 }
 
-function setup(options: { pageLayout?: "auto" | "single" | "double" | "book" } = {}) {
+function setup(
+  options: {
+    pageLayout?: "auto" | "single" | "double" | "book";
+    requestFrame?: (callback: FrameRequestCallback) => number;
+  } = {},
+) {
   const calls: string[] = [];
   const invalidations: Array<Readonly<{ retainPlaceholders: boolean; graceMs: number }>> = [];
   const views: Array<{
@@ -189,14 +194,58 @@ function setup(options: { pageLayout?: "auto" | "single" | "double" | "book" } =
     horizontalGap: 12,
     verticalGap: 16,
     devicePixelRatio: () => 1,
-    requestFrame: callback => {
-      callback(0);
-      return 1;
-    },
+    requestFrame:
+      options.requestFrame ??
+      (callback => {
+        callback(0);
+        return 1;
+      }),
     cancelFrame: () => {},
   });
   return { view, container, calls, views, invalidations };
 }
+
+test("late page sizes preserve a positioned point until independent scrolling", () => {
+  withFakeDocument(() => {
+    let frame: FrameRequestCallback | undefined;
+    const { view, container } = setup({
+      requestFrame: callback => {
+        frame = callback;
+        return 1;
+      },
+    });
+    view.beginDocument({
+      pageCount: 4,
+      basePageSize: { width: 400, height: 600 },
+      preferredLayout: null,
+    });
+    const previous = view.pageWrapFor(2)!;
+    const target = view.pageWrapFor(3)!;
+    target.getBoundingClientRect = () => {
+      const height = Number.parseFloat(target.style.height);
+      const top = 600 + Number.parseFloat(previous.style.height) - container.scrollTop;
+      return { top, left: 100, width: 400, height } as DOMRect;
+    };
+    container.scrollTop = 900;
+    const pointY = () => {
+      const bounds = target.getBoundingClientRect();
+      return bounds.top + bounds.height / 4;
+    };
+    const before = pointY();
+    view.preserveNavigationPoint(3, 0.5, 0.25);
+    view.recordObservedPageGeometry(2, 400, 400);
+    frame!(0);
+    assert.equal(pointY(), before);
+    assert.ok(container.scrollTop < 900);
+
+    view.recordObservedPageGeometry(2, 400, 500);
+    container.scrollTop += 30;
+    const scrolled = container.scrollTop;
+    frame!(0);
+    assert.equal(container.scrollTop, scrolled);
+    assert.notEqual(pointY(), before);
+  });
+});
 
 test("evicted raster retirement preserves wrappers and rejects live or stale leases", () => {
   withFakeDocument(() => {
